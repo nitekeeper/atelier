@@ -1,0 +1,18 @@
+{
+  "name": "atelier",
+  "description": "Shared workspace for human + multi-agent development. Session, dev workflow, project, task, meeting, and workspace commands backed by SQLite and tmux.",
+  "version": "0.1.0",
+  "author": {
+    "name": "nitekeeper"
+  },
+  "repository": "https://github.com/nitekeeper/atelier",
+  "license": "MIT",
+  "keywords": [
+    "workspace",
+    "multi-agent",
+    "project-management",
+    "dev-workflow",
+    "tdd",
+    "tmux"
+  ]
+}

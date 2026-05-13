@@ -68,27 +68,27 @@ def test_check_linux_tmux_present(mocker):
 
 def test_check_linux_tmux_missing_user_accepts(mocker):
     mocker.patch("sys.platform", "linux")
-    run_mock = mocker.patch("subprocess.run")
-    run_mock.side_effect = [
-        MagicMock(returncode=1),   # tmux -V fails
-        MagicMock(returncode=0),   # which apt-get succeeds
-        MagicMock(returncode=0),   # apt-get install succeeds
-    ]
     from importlib import reload
     import scripts.preflight as pf
     reload(pf)
+    run_mock = mocker.patch("subprocess.run")
+    run_mock.side_effect = [
+        MagicMock(returncode=1),   # tmux -V fails
+        MagicMock(returncode=0),   # apt-get install succeeds
+    ]
+    mocker.patch("scripts.preflight.which", side_effect=lambda pm: "/usr/bin/apt-get" if pm == "apt-get" else None)
     mocker.patch("scripts.preflight._prompt", return_value=True)
     pf.check()  # should not raise
 
 
 def test_check_linux_tmux_missing_user_declines(mocker):
     mocker.patch("sys.platform", "linux")
-    mocker.patch("subprocess.run", return_value=MagicMock(returncode=1))
     from importlib import reload
     import scripts.preflight as pf
     reload(pf)
+    mocker.patch("subprocess.run", return_value=MagicMock(returncode=1))
     mocker.patch("scripts.preflight._prompt", return_value=False)
-    with pytest.raises(pf.PreflightError, match="package manager"):
+    with pytest.raises(pf.PreflightError, match="tmux is required"):
         pf.check()
 
 
@@ -142,8 +142,7 @@ def test_detect_package_manager_apt(mocker):
     from importlib import reload
     import scripts.preflight as pf
     reload(pf)
-    run_mock = mocker.patch("subprocess.run")
-    run_mock.return_value = MagicMock(returncode=0)
+    mocker.patch("scripts.preflight.which", side_effect=lambda pm: "/usr/bin/apt-get" if pm == "apt-get" else None)
     result = pf._detect_linux_package_manager()
     assert result == "apt-get"
 
@@ -152,11 +151,7 @@ def test_detect_package_manager_dnf(mocker):
     from importlib import reload
     import scripts.preflight as pf
     reload(pf)
-    run_mock = mocker.patch("subprocess.run")
-    run_mock.side_effect = [
-        MagicMock(returncode=1),  # apt-get not found
-        MagicMock(returncode=0),  # dnf found
-    ]
+    mocker.patch("scripts.preflight.which", side_effect=lambda pm: "/usr/bin/dnf" if pm == "dnf" else None)
     result = pf._detect_linux_package_manager()
     assert result == "dnf"
 
@@ -165,11 +160,6 @@ def test_detect_package_manager_pacman(mocker):
     from importlib import reload
     import scripts.preflight as pf
     reload(pf)
-    run_mock = mocker.patch("subprocess.run")
-    run_mock.side_effect = [
-        MagicMock(returncode=1),  # apt-get not found
-        MagicMock(returncode=1),  # dnf not found
-        MagicMock(returncode=0),  # pacman found
-    ]
+    mocker.patch("scripts.preflight.which", side_effect=lambda pm: "/usr/bin/pacman" if pm == "pacman" else None)
     result = pf._detect_linux_package_manager()
     assert result == "pacman"

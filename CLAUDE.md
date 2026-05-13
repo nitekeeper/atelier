@@ -21,6 +21,7 @@ Atelier is a shared workspace for a human developer and a multi-agent system wor
    .ai/
    lessons/
    ```
+   Unlike `.gitignore`, this file lives only on your machine and is never committed — the project repo stays completely unaware of Atelier. Verify with `git status`: no output means the directories are invisible to git.
 
 ## Scripts
 

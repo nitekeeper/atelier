@@ -26,14 +26,18 @@ That's it. The migration is idempotent — safe to re-run.
 
 ### Keep Atelier out of your project's repo
 
-Use `.git/info/exclude` (never committed) rather than `.gitignore` to hide the Atelier
-working directories from git:
+Use `.git/info/exclude` rather than `.gitignore` to hide the Atelier working directories
+from git. Unlike `.gitignore`, this file lives only on your machine and is never committed
+— so your ignore rules stay completely invisible to the project repo.
 
 ```
 # .git/info/exclude
 .ai/
 lessons/
 ```
+
+Verify with `git status` — no output means git sees nothing untracked or modified. The
+`.ai/` and `lessons/` directories are fully invisible to the repo.
 
 ## Dev setup
 

@@ -12,6 +12,7 @@ from scripts.workspace import (
 def mock_preflight(mocker):
     mocker.patch("scripts.preflight.check")
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["tmux"])
+    mocker.patch("sys.platform", "linux")
 
 # ── workspace tests ──────────────────────────────────────────────────────────
 

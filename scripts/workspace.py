@@ -1,15 +1,40 @@
 # scripts/workspace.py
-import libtmux
+import subprocess
+import sys
+
+from scripts import preflight
+
+if sys.platform != "win32":
+    import libtmux
 
 AGENT_TEAMS_ENV = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 _MAX_AGENTS = 5
 
+preflight.check()
 
-def _get_server() -> libtmux.Server:
+
+class _Obj:
+    """Simple return object for Windows path — matches libtmux attribute names."""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+def _get_server() -> "libtmux.Server":
     return libtmux.Server()
 
 
-def create_workspace(name: str, project_root: str) -> libtmux.Session:
+def _run_tmux(args: list[str]) -> subprocess.CompletedProcess:
+    cmd = preflight.get_tmux_cmd() + args
+    return subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+
+def create_workspace(name: str, project_root: str):
+    if sys.platform == "win32":
+        _run_tmux(["new-session", "-d", "-s", name, "-c", project_root])
+        _run_tmux(["setenv", "-t", name, AGENT_TEAMS_ENV, "1"])
+        _run_tmux(["new-window", "-t", name, "-n", "main"])
+        return _Obj(name=name)
     server = _get_server()
     session = server.new_session(
         session_name=name,
@@ -21,11 +46,22 @@ def create_workspace(name: str, project_root: str) -> libtmux.Session:
 
 
 def list_workspaces() -> list[str]:
+    if sys.platform == "win32":
+        result = subprocess.run(
+            preflight.get_tmux_cmd() + ["list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return []
+        return [s for s in result.stdout.strip().split("\n") if s]
     server = _get_server()
     return [s.name for s in server.sessions]
 
 
-def join_workspace(name: str) -> libtmux.Session:
+def join_workspace(name: str):
+    if sys.platform == "win32":
+        _run_tmux(["attach-session", "-t", name])
+        return _Obj(name=name)
     server = _get_server()
     session = server.find_where({"session_name": name})
     if session is None:
@@ -35,6 +71,9 @@ def join_workspace(name: str) -> libtmux.Session:
 
 
 def leave_workspace(name: str) -> None:
+    if sys.platform == "win32":
+        _run_tmux(["detach-client", "-s", name])
+        return
     server = _get_server()
     session = server.find_where({"session_name": name})
     if session is None:
@@ -42,7 +81,10 @@ def leave_workspace(name: str) -> None:
     session.detach_session()
 
 
-def create_room(workspace: str, room_name: str) -> libtmux.Window:
+def create_room(workspace: str, room_name: str):
+    if sys.platform == "win32":
+        _run_tmux(["new-window", "-t", workspace, "-n", room_name])
+        return _Obj(name=room_name)
     server = _get_server()
     session = server.find_where({"session_name": workspace})
     if session is None:
@@ -51,6 +93,14 @@ def create_room(workspace: str, room_name: str) -> libtmux.Window:
 
 
 def list_rooms(workspace: str) -> list[str]:
+    if sys.platform == "win32":
+        result = subprocess.run(
+            preflight.get_tmux_cmd() + ["list-windows", "-t", workspace, "-F", "#{window_name}"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return []
+        return [w for w in result.stdout.strip().split("\n") if w]
     server = _get_server()
     session = server.find_where({"session_name": workspace})
     if session is None:
@@ -58,7 +108,10 @@ def list_rooms(workspace: str) -> list[str]:
     return [w.name for w in session.windows]
 
 
-def join_room(workspace: str, room_name: str) -> libtmux.Window:
+def join_room(workspace: str, room_name: str):
+    if sys.platform == "win32":
+        _run_tmux(["select-window", "-t", f"{workspace}:{room_name}"])
+        return _Obj(name=room_name)
     server = _get_server()
     session = server.find_where({"session_name": workspace})
     if session is None:
@@ -73,6 +126,9 @@ def join_room(workspace: str, room_name: str) -> libtmux.Window:
 def close_room(workspace: str, room_name: str) -> None:
     if room_name == "main":
         raise ValueError("Cannot close the main room")
+    if sys.platform == "win32":
+        _run_tmux(["kill-window", "-t", f"{workspace}:{room_name}"])
+        return
     server = _get_server()
     session = server.find_where({"session_name": workspace})
     if session is None:
@@ -83,7 +139,20 @@ def close_room(workspace: str, room_name: str) -> None:
     window.kill_window()
 
 
-def agent_join(workspace: str, room_name: str, agent_id: str) -> libtmux.Pane:
+def agent_join(workspace: str, room_name: str, agent_id: str):
+    if sys.platform == "win32":
+        count_result = _run_tmux(["list-panes", "-t", f"{workspace}:{room_name}", "-F", "#{pane_id}"])
+        pane_count = len([p for p in count_result.stdout.strip().split("\n") if p])
+        if pane_count >= _MAX_AGENTS:
+            raise ValueError(f"Maximum {_MAX_AGENTS} agents per room reached")
+        result = _run_tmux([
+            "split-window", "-t", f"{workspace}:{room_name}",
+            "-e", f"{AGENT_TEAMS_ENV}=1",
+            "-P", "-F", "#{pane_id}",
+        ])
+        pane_id = result.stdout.strip()
+        _run_tmux(["send-keys", "-t", pane_id, "claude", "Enter"])
+        return _Obj(id=pane_id)
     server = _get_server()
     session = server.find_where({"session_name": workspace})
     if session is None:
@@ -99,6 +168,9 @@ def agent_join(workspace: str, room_name: str, agent_id: str) -> libtmux.Pane:
 
 
 def agent_leave(workspace: str, room_name: str, pane_id: str) -> None:
+    if sys.platform == "win32":
+        _run_tmux(["kill-pane", "-t", pane_id])
+        return
     server = _get_server()
     session = server.find_where({"session_name": workspace})
     if session is None:

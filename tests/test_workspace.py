@@ -8,6 +8,12 @@ from scripts.workspace import (
     AGENT_TEAMS_ENV
 )
 
+@pytest.fixture(autouse=True)
+def mock_preflight(mocker):
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["tmux"])
+    mocker.patch("sys.platform", "linux")
+
 # ── workspace tests ──────────────────────────────────────────────────────────
 
 def test_create_workspace_creates_tmux_session(mocker):
@@ -174,3 +180,101 @@ def test_agent_leave_closes_pane(mocker):
 
     agent_leave(workspace="my-project", room_name="main", pane_id="%3")
     mock_pane.kill_pane.assert_called_once()
+
+# ── Windows path tests ────────────────────────────────────────────────────────
+
+def test_create_workspace_windows(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    run_mock = mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=""))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    ws.create_workspace(name="my-project", project_root="/home/user/project")
+
+    all_args = [c.args[0] for c in run_mock.call_args_list]
+    assert any("new-session" in a and "my-project" in a and "/home/user/project" in a for a in all_args), \
+        "new-session not called with correct args"
+    assert any("setenv" in a and "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" in a for a in all_args), \
+        "setenv not called for agent teams env var"
+    assert any("new-window" in a and "main" in a for a in all_args), \
+        "new-window -n main not called"
+
+
+def test_list_workspaces_windows(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    mocker.patch("subprocess.run", return_value=MagicMock(
+        returncode=0, stdout="project-a\nproject-b\n"
+    ))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    names = ws.list_workspaces()
+    assert names == ["project-a", "project-b"]
+
+
+def test_list_workspaces_windows_empty(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=""))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    names = ws.list_workspaces()
+    assert names == []
+
+
+def test_agent_join_windows(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    run_mock = mocker.patch("subprocess.run", return_value=MagicMock(
+        returncode=0, stdout="%0\n"
+    ))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    ws.agent_join(workspace="my-project", room_name="main", agent_id="dev-1")
+
+    all_args = [c.args[0] for c in run_mock.call_args_list]
+    split_call = next((a for a in all_args if "split-window" in a), None)
+    assert split_call is not None, "split-window not called"
+    assert "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" in split_call, (
+        "env var not passed at tmux invocation level via split-window -e"
+    )
+
+
+def test_list_workspaces_windows_no_server(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    mocker.patch("subprocess.run", return_value=MagicMock(returncode=1, stdout=""))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    names = ws.list_workspaces()
+    assert names == []
+
+
+def test_agent_join_windows_max_agents(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    # Simulate 5 existing panes (at max)
+    pane_ids = "\n".join(f"%{i}" for i in range(5))
+    mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=pane_ids))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    with pytest.raises(ValueError, match="Maximum 5 agents per room reached"):
+        ws.agent_join(workspace="my-project", room_name="main", agent_id="dev-6")

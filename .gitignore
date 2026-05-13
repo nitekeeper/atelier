@@ -5,3 +5,4 @@ __pycache__/
 *.db
 .ai/work.md
 .ai/meetings/
+.superpowers/

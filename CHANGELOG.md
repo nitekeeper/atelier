@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.0 — 2026-05-12
+
 ### Added
 
 - **Foundation** — SQLite database, migration runner, session management, shared pytest conftest

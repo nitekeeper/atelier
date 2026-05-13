@@ -131,6 +131,10 @@ def close_room(workspace: str, room_name: str) -> None:
 
 def agent_join(workspace: str, room_name: str, agent_id: str):
     if sys.platform == "win32":
+        count_result = _run_tmux(["list-panes", "-t", f"{workspace}:{room_name}", "-F", "#{pane_id}"])
+        pane_count = len([p for p in count_result.stdout.strip().split("\n") if p])
+        if pane_count >= _MAX_AGENTS:
+            raise ValueError(f"Maximum {_MAX_AGENTS} agents per room reached")
         result = _run_tmux([
             "split-window", "-t", f"{workspace}:{room_name}",
             "-e", f"{AGENT_TEAMS_ENV}=1",

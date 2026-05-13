@@ -194,9 +194,13 @@ def test_create_workspace_windows(mocker):
 
     ws.create_workspace(name="my-project", project_root="/home/user/project")
 
-    calls = [c.args[0] for c in run_mock.call_args_list]
-    assert any("new-session" in c for c in calls)
-    assert any("my-project" in c for c in calls)
+    all_args = [c.args[0] for c in run_mock.call_args_list]
+    assert any("new-session" in a and "my-project" in a and "/home/user/project" in a for a in all_args), \
+        "new-session not called with correct args"
+    assert any("setenv" in a and "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" in a for a in all_args), \
+        "setenv not called for agent teams env var"
+    assert any("new-window" in a and "main" in a for a in all_args), \
+        "new-window -n main not called"
 
 
 def test_list_workspaces_windows(mocker):
@@ -212,6 +216,19 @@ def test_list_workspaces_windows(mocker):
 
     names = ws.list_workspaces()
     assert names == ["project-a", "project-b"]
+
+
+def test_list_workspaces_windows_empty(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=""))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    names = ws.list_workspaces()
+    assert names == []
 
 
 def test_agent_join_windows(mocker):
@@ -233,3 +250,18 @@ def test_agent_join_windows(mocker):
     assert "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" in split_call, (
         "env var not passed at tmux invocation level via split-window -e"
     )
+
+
+def test_agent_join_windows_max_agents(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    # Simulate 5 existing panes (at max)
+    pane_ids = "\n".join(f"%{i}" for i in range(5))
+    mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=pane_ids))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    with pytest.raises(ValueError, match="Maximum 5 agents per room reached"):
+        ws.agent_join(workspace="my-project", room_name="main", agent_id="dev-6")

@@ -8,6 +8,11 @@ from scripts.workspace import (
     AGENT_TEAMS_ENV
 )
 
+@pytest.fixture(autouse=True)
+def mock_preflight(mocker):
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["tmux"])
+
 # ── workspace tests ──────────────────────────────────────────────────────────
 
 def test_create_workspace_creates_tmux_session(mocker):
@@ -174,3 +179,53 @@ def test_agent_leave_closes_pane(mocker):
 
     agent_leave(workspace="my-project", room_name="main", pane_id="%3")
     mock_pane.kill_pane.assert_called_once()
+
+# ── Windows path tests ────────────────────────────────────────────────────────
+
+def test_create_workspace_windows(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    run_mock = mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=""))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    ws.create_workspace(name="my-project", project_root="/home/user/project")
+
+    calls = [c.args[0] for c in run_mock.call_args_list]
+    assert any("new-session" in c for c in calls)
+    assert any("my-project" in c for c in calls)
+
+
+def test_list_workspaces_windows(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    mocker.patch("subprocess.run", return_value=MagicMock(
+        returncode=0, stdout="project-a\nproject-b\n"
+    ))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    names = ws.list_workspaces()
+    assert names == ["project-a", "project-b"]
+
+
+def test_agent_join_windows(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    run_mock = mocker.patch("subprocess.run", return_value=MagicMock(
+        returncode=0, stdout="%0\n"
+    ))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    ws.agent_join(workspace="my-project", room_name="main", agent_id="dev-1")
+
+    calls = [str(c) for c in run_mock.call_args_list]
+    assert any("split-window" in c for c in calls)
+    assert any("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" in c for c in calls)

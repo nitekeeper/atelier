@@ -15,10 +15,25 @@ A shared workspace for a human developer and a multi-agent system working togeth
 pip install -r requirements.txt
 
 # 2. Run the DB migration (from your project root)
-python /path/to/atelier/scripts/migrate.py .ai/memex.db
+PYTHONPATH=/path/to/atelier python /path/to/atelier/scripts/migrate.py .ai/memex.db
 ```
 
 That's it. The migration is idempotent — safe to re-run.
+
+> **Note:** `PYTHONPATH` must point to the Atelier root (where `scripts/` lives) whenever
+> running Atelier scripts directly. The skills handle this automatically; it only matters
+> when invoking scripts by hand.
+
+### Keep Atelier out of your project's repo
+
+Use `.git/info/exclude` (never committed) rather than `.gitignore` to hide the Atelier
+working directories from git:
+
+```
+# .git/info/exclude
+.ai/
+lessons/
+```
 
 ## Dev setup
 

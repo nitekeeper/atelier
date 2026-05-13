@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.1.1 — 2026-05-12
+
+### Fixed
+
+- `migrations/` directory now included in `dist/` — was missing from v0.1.0, causing `migrate.py` to silently skip all SQL migrations when run from `dist/`
+
 ## v0.1.0 — 2026-05-12
 
 ### Added

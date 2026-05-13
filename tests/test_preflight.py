@@ -1,7 +1,6 @@
 import os
-import subprocess
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 
 def test_get_tmux_cmd_linux(mocker):
@@ -41,6 +40,16 @@ def test_get_tmux_cmd_windows_with_distro(mocker):
 def test_check_windows_wsl_missing(mocker):
     mocker.patch("sys.platform", "win32")
     mocker.patch("subprocess.run", return_value=MagicMock(returncode=1))
+    from importlib import reload
+    import scripts.preflight as pf
+    reload(pf)
+    with pytest.raises(pf.PreflightError, match="WSL"):
+        pf.check()
+
+
+def test_check_windows_wsl_not_on_path(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("subprocess.run", side_effect=FileNotFoundError)
     from importlib import reload
     import scripts.preflight as pf
     reload(pf)

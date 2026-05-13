@@ -37,7 +37,13 @@ def _prompt(msg: str) -> bool:
 
 
 def _check_windows() -> None:
-    result = subprocess.run(["wsl", "--status"], capture_output=True)
+    try:
+        result = subprocess.run(["wsl", "--status"], capture_output=True, timeout=10)
+    except FileNotFoundError:
+        raise PreflightError(
+            "Workspace commands require WSL on Windows. "
+            "Please install WSL first: https://aka.ms/wsl"
+        )
     if result.returncode != 0:
         raise PreflightError(
             "Workspace commands require WSL on Windows. "

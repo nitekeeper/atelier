@@ -227,6 +227,9 @@ def test_agent_join_windows(mocker):
 
     ws.agent_join(workspace="my-project", room_name="main", agent_id="dev-1")
 
-    calls = [str(c) for c in run_mock.call_args_list]
-    assert any("split-window" in c for c in calls)
-    assert any("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" in c for c in calls)
+    all_args = [c.args[0] for c in run_mock.call_args_list]
+    split_call = next((a for a in all_args if "split-window" in a), None)
+    assert split_call is not None, "split-window not called"
+    assert "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1" in split_call, (
+        "env var not passed at tmux invocation level via split-window -e"
+    )

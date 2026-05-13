@@ -131,12 +131,13 @@ def close_room(workspace: str, room_name: str) -> None:
 
 def agent_join(workspace: str, room_name: str, agent_id: str):
     if sys.platform == "win32":
-        result = _run_tmux(["split-window", "-t", f"{workspace}:{room_name}", "-P", "-F", "#{pane_id}"])
-        pane_id = result.stdout.strip()
-        _run_tmux([
-            "send-keys", "-t", pane_id,
-            f"env {AGENT_TEAMS_ENV}=1 claude", "Enter"
+        result = _run_tmux([
+            "split-window", "-t", f"{workspace}:{room_name}",
+            "-e", f"{AGENT_TEAMS_ENV}=1",
+            "-P", "-F", "#{pane_id}",
         ])
+        pane_id = result.stdout.strip()
+        _run_tmux(["send-keys", "-t", pane_id, "claude", "Enter"])
         return _Obj(id=pane_id)
     server = _get_server()
     session = server.find_where({"session_name": workspace})

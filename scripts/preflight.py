@@ -36,6 +36,28 @@ def _prompt(msg: str) -> bool:
     return answer == "y"
 
 
+def _detect_linux_package_manager() -> str | None:
+    for pm in ["apt-get", "dnf", "pacman"]:
+        result = subprocess.run(["which", pm], capture_output=True)
+        if result.returncode == 0:
+            return pm
+    return None
+
+
+def _install_tmux_linux() -> None:
+    pm = _detect_linux_package_manager()
+    if pm == "apt-get":
+        subprocess.run(["sudo", "apt-get", "install", "-y", "tmux"], check=True)
+    elif pm == "dnf":
+        subprocess.run(["sudo", "dnf", "install", "-y", "tmux"], check=True)
+    elif pm == "pacman":
+        subprocess.run(["sudo", "pacman", "-S", "--noconfirm", "tmux"], check=True)
+    else:
+        raise PreflightError(
+            "Could not detect package manager. Install tmux manually."
+        )
+
+
 def _check_windows() -> None:
     try:
         result = subprocess.run(["wsl", "--status"], capture_output=True, timeout=10)
@@ -49,14 +71,39 @@ def _check_windows() -> None:
             "Workspace commands require WSL on Windows. "
             "Please install WSL first: https://aka.ms/wsl"
         )
+    wsl_cmd = _wsl_base_cmd()
+    result = subprocess.run(wsl_cmd + ["tmux", "-V"], capture_output=True)
+    if result.returncode != 0:
+        if _prompt("tmux is not installed in your WSL distro. Install it now?"):
+            subprocess.run(
+                wsl_cmd + ["sudo", "apt-get", "install", "-y", "tmux"], check=True
+            )
+        else:
+            raise PreflightError(
+                "tmux is required. Install it manually: sudo apt-get install tmux"
+            )
 
 
 def _check_macos() -> None:
-    pass  # tmux check added in Task 1
+    result = subprocess.run(["tmux", "-V"], capture_output=True)
+    if result.returncode != 0:
+        if _prompt("tmux is not installed. Install it now?"):
+            subprocess.run(["brew", "install", "tmux"], check=True)
+        else:
+            raise PreflightError(
+                "tmux is required. Install it manually: brew install tmux"
+            )
 
 
 def _check_linux() -> None:
-    pass  # tmux check added in Task 1
+    result = subprocess.run(["tmux", "-V"], capture_output=True)
+    if result.returncode != 0:
+        if _prompt("tmux is not installed. Install it now?"):
+            _install_tmux_linux()
+        else:
+            raise PreflightError(
+                "tmux is required. Install it with your package manager."
+            )
 
 
 def check() -> None:

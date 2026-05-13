@@ -138,6 +138,72 @@ def test_check_windows_wsl_distro_env_var(mocker):
     assert any("Ubuntu" in c for c in calls)
 
 
+def test_check_linux_tmux_not_on_path_user_accepts(mocker):
+    mocker.patch("sys.platform", "linux")
+    from importlib import reload
+    import scripts.preflight as pf
+    reload(pf)
+    run_mock = mocker.patch("subprocess.run")
+    run_mock.side_effect = [
+        FileNotFoundError,         # tmux -V not on PATH
+        MagicMock(returncode=0),   # apt-get install succeeds
+    ]
+    mocker.patch("scripts.preflight.which", side_effect=lambda pm: "/usr/bin/apt-get" if pm == "apt-get" else None)
+    mocker.patch("scripts.preflight._prompt", return_value=True)
+    pf.check()  # should not raise
+
+
+def test_check_linux_tmux_not_on_path_user_declines(mocker):
+    mocker.patch("sys.platform", "linux")
+    from importlib import reload
+    import scripts.preflight as pf
+    reload(pf)
+    mocker.patch("subprocess.run", side_effect=FileNotFoundError)
+    mocker.patch("scripts.preflight._prompt", return_value=False)
+    with pytest.raises(pf.PreflightError, match="tmux is required"):
+        pf.check()
+
+
+def test_check_macos_tmux_not_on_path_user_accepts(mocker):
+    mocker.patch("sys.platform", "darwin")
+    from importlib import reload
+    import scripts.preflight as pf
+    reload(pf)
+    run_mock = mocker.patch("subprocess.run")
+    run_mock.side_effect = [
+        FileNotFoundError,         # tmux -V not on PATH
+        MagicMock(returncode=0),   # brew install succeeds
+    ]
+    mocker.patch("scripts.preflight._prompt", return_value=True)
+    pf.check()  # should not raise
+
+
+def test_check_macos_tmux_not_on_path_user_declines(mocker):
+    mocker.patch("sys.platform", "darwin")
+    from importlib import reload
+    import scripts.preflight as pf
+    reload(pf)
+    mocker.patch("subprocess.run", side_effect=FileNotFoundError)
+    mocker.patch("scripts.preflight._prompt", return_value=False)
+    with pytest.raises(pf.PreflightError, match="tmux is required"):
+        pf.check()
+
+
+def test_check_macos_brew_not_installed(mocker):
+    mocker.patch("sys.platform", "darwin")
+    from importlib import reload
+    import scripts.preflight as pf
+    reload(pf)
+    run_mock = mocker.patch("subprocess.run")
+    run_mock.side_effect = [
+        FileNotFoundError,   # tmux -V not on PATH
+        FileNotFoundError,   # brew install -> brew not on PATH
+    ]
+    mocker.patch("scripts.preflight._prompt", return_value=True)
+    with pytest.raises(pf.PreflightError, match="Homebrew not found"):
+        pf.check()
+
+
 def test_detect_package_manager_apt(mocker):
     from importlib import reload
     import scripts.preflight as pf

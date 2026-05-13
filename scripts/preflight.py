@@ -91,11 +91,19 @@ def _check_windows() -> None:
 
 
 def _check_macos() -> None:
-    result = subprocess.run(["tmux", "-V"], capture_output=True)
-    if result.returncode != 0:
+    try:
+        result = subprocess.run(["tmux", "-V"], capture_output=True, timeout=10)
+        tmux_missing = result.returncode != 0
+    except FileNotFoundError:
+        tmux_missing = True
+    if tmux_missing:
         if _prompt("tmux is not installed. Install it now?"):
             try:
                 subprocess.run(["brew", "install", "tmux"], check=True)
+            except FileNotFoundError:
+                raise PreflightError(
+                    "Homebrew not found. Install tmux manually: https://brew.sh"
+                )
             except subprocess.CalledProcessError as e:
                 raise PreflightError(f"Failed to install tmux via brew: {e}") from e
         else:
@@ -105,8 +113,12 @@ def _check_macos() -> None:
 
 
 def _check_linux() -> None:
-    result = subprocess.run(["tmux", "-V"], capture_output=True)
-    if result.returncode != 0:
+    try:
+        result = subprocess.run(["tmux", "-V"], capture_output=True, timeout=10)
+        tmux_missing = result.returncode != 0
+    except FileNotFoundError:
+        tmux_missing = True
+    if tmux_missing:
         if _prompt("tmux is not installed. Install it now?"):
             _install_tmux_linux()
         else:

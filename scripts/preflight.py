@@ -33,6 +33,11 @@ def get_tmux_cmd() -> list[str]:
 
 
 def _prompt(msg: str) -> bool:
+    if not sys.stdin.isatty():
+        raise PreflightError(
+            f"{msg} — non-interactive environment detected. "
+            "Install tmux manually and re-run."
+        )
     answer = input(f"{msg} (y/n): ").strip().lower()
     return answer == "y"
 
@@ -69,13 +74,18 @@ def _check_windows() -> None:
             "Workspace commands require WSL on Windows. "
             "Please install WSL first: https://aka.ms/wsl"
         )
+    except subprocess.TimeoutExpired:
+        raise PreflightError("WSL check timed out. Ensure WSL is running and try again.")
     if result.returncode != 0:
         raise PreflightError(
             "Workspace commands require WSL on Windows. "
             "Please install WSL first: https://aka.ms/wsl"
         )
     wsl_cmd = _wsl_base_cmd()
-    result = subprocess.run(wsl_cmd + ["tmux", "-V"], capture_output=True, timeout=10)
+    try:
+        result = subprocess.run(wsl_cmd + ["tmux", "-V"], capture_output=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        raise PreflightError("tmux check in WSL timed out.")
     if result.returncode != 0:
         if _prompt("tmux is not installed in your WSL distro. Install it now? (uses apt-get)"):
             try:
@@ -95,6 +105,8 @@ def _check_macos() -> None:
         result = subprocess.run(["tmux", "-V"], capture_output=True, timeout=10)
         tmux_missing = result.returncode != 0
     except FileNotFoundError:
+        tmux_missing = True
+    except subprocess.TimeoutExpired:
         tmux_missing = True
     if tmux_missing:
         if _prompt("tmux is not installed. Install it now?"):
@@ -117,6 +129,8 @@ def _check_linux() -> None:
         result = subprocess.run(["tmux", "-V"], capture_output=True, timeout=10)
         tmux_missing = result.returncode != 0
     except FileNotFoundError:
+        tmux_missing = True
+    except subprocess.TimeoutExpired:
         tmux_missing = True
     if tmux_missing:
         if _prompt("tmux is not installed. Install it now?"):

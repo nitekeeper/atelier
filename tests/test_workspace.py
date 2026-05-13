@@ -252,6 +252,19 @@ def test_agent_join_windows(mocker):
     )
 
 
+def test_list_workspaces_windows_no_server(mocker):
+    mocker.patch("sys.platform", "win32")
+    mocker.patch("scripts.preflight.check")
+    mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
+    mocker.patch("subprocess.run", return_value=MagicMock(returncode=1, stdout=""))
+    from importlib import reload
+    import scripts.workspace as ws
+    reload(ws)
+
+    names = ws.list_workspaces()
+    assert names == []
+
+
 def test_agent_join_windows_max_agents(mocker):
     mocker.patch("sys.platform", "win32")
     mocker.patch("scripts.preflight.check")

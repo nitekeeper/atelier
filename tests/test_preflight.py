@@ -1,6 +1,27 @@
 import os
+import subprocess
 import pytest
 from unittest.mock import MagicMock
+
+
+def test_prompt_non_interactive_raises(mocker):
+    import scripts.preflight as pf
+    from importlib import reload
+    reload(pf)
+    mocker.patch("sys.stdin.isatty", return_value=False)
+    with pytest.raises(pf.PreflightError, match="non-interactive"):
+        pf._prompt("Install tmux now?")
+
+
+def test_check_linux_tmux_timeout(mocker):
+    import scripts.preflight as pf
+    from importlib import reload
+    reload(pf)
+    mocker.patch("sys.platform", "linux")
+    mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired(["tmux", "-V"], 10))
+    mocker.patch("scripts.preflight._prompt", return_value=False)
+    with pytest.raises(pf.PreflightError):
+        pf.check()
 
 
 def test_get_tmux_cmd_linux(mocker):

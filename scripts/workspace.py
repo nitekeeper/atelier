@@ -47,7 +47,12 @@ def create_workspace(name: str, project_root: str):
 
 def list_workspaces() -> list[str]:
     if sys.platform == "win32":
-        result = _run_tmux(["list-sessions", "-F", "#{session_name}"])
+        result = subprocess.run(
+            preflight.get_tmux_cmd() + ["list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return []
         return [s for s in result.stdout.strip().split("\n") if s]
     server = _get_server()
     return [s.name for s in server.sessions]
@@ -89,7 +94,12 @@ def create_room(workspace: str, room_name: str):
 
 def list_rooms(workspace: str) -> list[str]:
     if sys.platform == "win32":
-        result = _run_tmux(["list-windows", "-t", workspace, "-F", "#{window_name}"])
+        result = subprocess.run(
+            preflight.get_tmux_cmd() + ["list-windows", "-t", workspace, "-F", "#{window_name}"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return []
         return [w for w in result.stdout.strip().split("\n") if w]
     server = _get_server()
     session = server.find_where({"session_name": workspace})

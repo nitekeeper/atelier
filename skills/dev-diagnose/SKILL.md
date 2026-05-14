@@ -36,7 +36,7 @@ None — callable from any phase.
 6. Identify the affected layer:
    - Design error → after fix, restore to `design:open`
    - Implementation error → fix in current branch, restore to `<pre_diagnose_phase>`
-   - Review miss → document what was missed, restore to `<pre_diagnose_phase>`
+   - Review miss → write a session note via `python atelier/scripts/session.py write <project_id> <agent_id> <pre_diagnose_phase> in-progress --notes "Review miss: <what was missed>"`, then restore to `<pre_diagnose_phase>`
 
 7. Fix the root cause. Not the symptom.
 

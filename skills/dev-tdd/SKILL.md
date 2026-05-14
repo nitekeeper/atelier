@@ -15,7 +15,7 @@ Requires `plan:approved`.
 
 3. Read the plan document:
    ```
-   python atelier/scripts/documents.py list <project_id>
+   python atelier/scripts/documents.py list --project_id <project_id>
    ```
    Open the plan. Work one task at a time in order.
 

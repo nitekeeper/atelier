@@ -15,9 +15,9 @@ Requires `tdd:clean`.
 
 3. Read the plan and design documents:
    ```
-   python atelier/scripts/documents.py list <project_id>
+   python atelier/scripts/documents.py list --project_id <project_id>
    ```
-   Open both. The review must check against both — spec compliance and implementation quality.
+   This returns JSON with all documents. Extract the `filename` fields for both the plan and design documents. Read both files — the review must check against both for spec compliance and implementation quality.
 
 4. Review checklist (all required):
 
@@ -36,7 +36,7 @@ Requires `tdd:clean`.
    - Advance phase: `python atelier/scripts/workflow.py advance <project_id> review:changes-requested`
    - List each issue precisely: file, line range, what is wrong, what the fix should be.
    - The engineer fixes the issues, re-runs tests, and re-requests review.
-   - On re-review: advance back to `review:open` first:
+   - On re-review (the REVIEWER runs this): advance back to `review:open` first:
      ```
      python atelier/scripts/workflow.py advance <project_id> review:open
      ```

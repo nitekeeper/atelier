@@ -15,9 +15,9 @@ Requires `design:approved`.
 
 3. Read the approved design document for the project:
    ```
-   python atelier/scripts/documents.py list <project_id>
+   python atelier/scripts/documents.py list --project_id <project_id>
    ```
-   Open the design document. Do not plan without reading it.
+   This returns JSON with all documents. Extract the `filename` field for the design document (type: "design") and read that file. Do not plan without reading the approved design.
 
 4. Write the implementation plan to `docs/plans/<project-slug>-plan.md`.
 

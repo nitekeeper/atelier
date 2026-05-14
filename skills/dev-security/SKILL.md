@@ -1,50 +1,46 @@
-# dev:security-review
+# dev:security
 
-Reviews the implementation for security vulnerabilities. Produces a security report. Blocking issues must be resolved before advancing.
+Security review. Checks the implementation for vulnerabilities, exposed secrets, and insecure patterns before QA.
 
 ## Hard gate
 
-Requires `code-review:merged`.
+Requires `review:approved`.
 
 ## Procedure
 
-1. Run: `python atelier/scripts/workflow.py check-gate <project_id> dev:security-review`
+1. Run: `python atelier/scripts/workflow.py check-gate <project_id> dev:security`
    If the gate fails, state the current phase and stop.
 
-2. Advance phase: `python atelier/scripts/workflow.py advance <project_id> security-review:in-progress`
+2. Advance phase: `python atelier/scripts/workflow.py advance <project_id> security:open`
 
-3. **Threat model review** — re-read the Cross-cutting concerns section of the design document.
-   Verify the implementation addresses all threats identified at design time.
+3. Security checklist (all required):
 
-4. **Security checklist** (all blocking):
-
-   | Area | What to check |
+   | # | Check |
    |---|---|
-   | Injection | SQL injection, command injection, path traversal — are all inputs parameterised or sanitised? |
-   | Authentication | Are auth checks present on all protected paths? Can they be bypassed? |
-   | Authorisation | Does the code enforce who can do what, or just who is logged in? |
-   | Secrets | Are secrets hardcoded, logged, or committed? |
-   | Data exposure | Does the API return more data than the caller needs? |
-   | Input validation | Is all input validated at system boundaries? |
-   | Dependency vulnerabilities | Are all dependencies up to date? Run `pip-audit` or equivalent. |
-   | Error messages | Do error messages leak implementation details? |
+   | 1 | No secrets, API keys, or credentials in source or test files |
+   | 2 | No hardcoded internal paths, hostnames, or IPs |
+   | 3 | All external input is validated before use |
+   | 4 | SQL queries use parameterised statements — no string interpolation |
+   | 5 | File paths derived from user input are sanitised (no path traversal) |
+   | 6 | Dependencies are pinned — no floating version constraints |
+   | 7 | Error messages do not leak internal state to external callers |
+   | 8 | Authentication and authorisation are not bypassable by changing a parameter |
 
-5. **Security test coverage** — verify tests exist for:
-   - Authentication paths (valid + invalid credentials)
-   - Authorisation (access denied cases)
-   - Input validation (boundary values, injection attempts)
+4. **If issues are found:**
+   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> security:changes-requested`
+   - List each issue: file, line range, vulnerability class, recommended fix.
+   - The engineer addresses all issues.
+   - On re-review: advance back to `security:open` first:
+     ```
+     python atelier/scripts/workflow.py advance <project_id> security:open
+     ```
+     Then repeat the checklist from the top.
 
-6. If blocking issues found:
-   - State all issues with file references and proposed fixes.
-   - Do not advance the phase until all blocking issues are resolved and re-reviewed.
-
-7. When clean:
-   - Write the security review report to `docs/reports/<project-slug>-security-review.md`
-   - Register: `python atelier/scripts/documents.py create <project_id> security-review-report "<title>" "<filename>" "<agent_id>"`
-   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> security-review:approved`
-   - Confirm: "Security review complete. No blocking issues. Report saved. Ready for `dev:qa-review`."
+5. **If no issues found:**
+   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> security:approved`
+   - Confirm: "Security review approved. Phase: security:approved. Ready for dev:qa."
 
 ## Hard rules
-- No "no security concerns" without a documented reason why.
-- Secrets in code are always blocking — no exceptions.
-- Do not advance the phase if any blocking issue is unresolved.
+- Run `pytest -v` before approving — security fixes must not regress tests.
+- Never mark an item as passed without explicitly checking it — no assumed passes.
+- Secrets found anywhere in source are a hard block — no exceptions.

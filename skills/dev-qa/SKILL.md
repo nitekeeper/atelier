@@ -17,9 +17,9 @@ Requires `security:approved`.
 
    | # | Check | How to verify |
    |---|---|---|
-   | 1 | CI pipeline green | All tests pass, linting clean, security scans pass |
-   | 2 | All assigned tasks complete | `python atelier/scripts/tasks.py list --project_id <id> --status assigned` — must be empty |
-   | 3 | No open blocking tasks | `python atelier/scripts/tasks.py list --project_id <id> --status open` — review any found |
+   | 1 | CI pipeline green | Run `pytest -v` — all tests must pass. Run `python -m py_compile scripts/*.py` to check for syntax errors. |
+   | 2 | All assigned tasks complete | `python atelier/scripts/tasks.py list --project_id <project_id> --status assigned` — must be empty |
+   | 3 | No open blocking tasks | `python atelier/scripts/tasks.py list --project_id <project_id> --status open` — review any found |
    | 4 | Documentation updated | README, API docs, user-facing materials current |
    | 5 | Rollback plan exists | For migrations or serialisation changes — is rollback documented? |
    | 6 | Acceptance criteria met | Re-read design Goals section — is each goal demonstrably met? |

@@ -22,7 +22,7 @@ Requires `review:approved`.
    | 3 | All external input is validated before use |
    | 4 | SQL queries use parameterised statements — no string interpolation |
    | 5 | File paths derived from user input are sanitised (no path traversal) |
-   | 6 | Dependencies are pinned — no floating version constraints |
+   | 6 | Dependencies are pinned — no floating version constraints. Check `requirements.txt` or `pyproject.toml`: no `>=`, `~=`, or unpinned entries |
    | 7 | Error messages do not leak internal state to external callers |
    | 8 | Authentication and authorisation are not bypassable by changing a parameter |
 

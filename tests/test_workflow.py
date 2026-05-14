@@ -4,13 +4,14 @@ from pathlib import Path
 from scripts.migrate import apply_migrations
 from scripts.roles import create_role
 from scripts.agents import create_agent
-from scripts.projects import create_project, get_project
+from scripts.projects import create_project
 from scripts.workflow import (
     get_phase, advance_phase, check_gate,
-    PHASE_GATES, VALID_TRANSITIONS, WorkflowError
+    get_valid_transitions, is_allow_from_any, WorkflowError,
 )
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+
 
 @pytest.fixture
 def db_path(tmp_path):
@@ -20,55 +21,103 @@ def db_path(tmp_path):
     create_agent(path, id="pm-1", name="PM", role_id=role["id"], profile="Expert PM")
     return path
 
+
 @pytest.fixture
 def project_id(db_path):
-    project = create_project(db_path, name="Auth", description="OAuth2", created_by="pm-1")
+    project = create_project(db_path, name="Auth", description="OAuth2 login", created_by="pm-1")
     return project["id"]
 
-def test_get_phase_returns_current_phase(db_path, project_id):
-    assert get_phase(db_path, project_id) == "design:in-progress"
 
-def test_advance_phase_design_to_approved(db_path, project_id):
+def test_get_phase_returns_default_design_open(db_path, project_id):
+    assert get_phase(db_path, project_id) == "design:open"
+
+
+def test_get_phase_unknown_project_raises(db_path):
+    with pytest.raises(WorkflowError, match="not found"):
+        get_phase(db_path, 9999)
+
+
+def test_advance_phase_valid_transition(db_path, project_id):
     advance_phase(db_path, project_id, "design:approved")
     assert get_phase(db_path, project_id) == "design:approved"
 
+
 def test_advance_phase_invalid_transition_raises(db_path, project_id):
     with pytest.raises(WorkflowError, match="Invalid transition"):
-        advance_phase(db_path, project_id, "qa-review:approved")
+        advance_phase(db_path, project_id, "qa:approved")
+
+
+def test_check_gate_no_gate_always_passes(db_path, project_id):
+    # dev:design has no gate — passes even at design:open
+    check_gate(db_path, project_id, "dev:design")
+
 
 def test_check_gate_passes_when_met(db_path, project_id):
     advance_phase(db_path, project_id, "design:approved")
-    check_gate(db_path, project_id, required_phase="design:approved")
+    check_gate(db_path, project_id, "dev:plan")
+
 
 def test_check_gate_fails_when_not_met(db_path, project_id):
+    # project is at design:open, dev:plan requires design:approved
     with pytest.raises(WorkflowError, match="Gate not met"):
-        check_gate(db_path, project_id, required_phase="design:approved")
+        check_gate(db_path, project_id, "dev:plan")
 
-def test_full_happy_path_transitions(db_path, project_id):
-    transitions = [
-        "design:approved",
-        "plan:in-progress",
-        "plan:approved",
-        "tdd:red",
-        "tdd:green",
-        "tdd:refactor",
-        "code-review:draft",
-        "code-review:merged",
-        "security-review:in-progress",
-        "security-review:approved",
-        "qa-review:in-progress",
-        "qa-review:approved",
+
+def test_diagnose_allow_from_any_is_true(db_path):
+    assert is_allow_from_any(db_path, "diagnose:open") is True
+
+
+def test_design_open_allow_from_any_is_false(db_path):
+    assert is_allow_from_any(db_path, "design:open") is False
+
+
+def test_advance_to_diagnose_from_any_phase(db_path, project_id):
+    # Project is at design:open (default) — can still enter diagnose:open
+    advance_phase(db_path, project_id, "diagnose:open")
+    assert get_phase(db_path, project_id) == "diagnose:open"
+
+
+def test_get_valid_transitions_from_design_open(db_path):
+    transitions = get_valid_transitions(db_path, "design:open")
+    assert "design:approved" in transitions
+    assert len(transitions) == 1
+
+
+def test_full_happy_path(db_path, project_id):
+    path = [
+        "design:approved", "plan:open", "plan:approved",
+        "tdd:red", "tdd:green", "tdd:clean",
+        "review:open", "review:approved",
+        "security:open", "security:approved",
+        "qa:open", "qa:approved",
+        "handoff:complete",
     ]
-    for phase in transitions:
+    for phase in path:
         advance_phase(db_path, project_id, phase)
         assert get_phase(db_path, project_id) == phase
 
-def test_diagnose_can_be_entered_from_any_phase(db_path, project_id):
-    check_gate(db_path, project_id, required_phase=None)
 
-def test_advance_to_code_review_changes_requested(db_path, project_id):
-    for phase in ["design:approved", "plan:in-progress", "plan:approved",
-                  "tdd:red", "tdd:green", "tdd:refactor", "code-review:draft"]:
+def test_review_changes_requested_loop(db_path, project_id):
+    for phase in [
+        "design:approved", "plan:open", "plan:approved",
+        "tdd:red", "tdd:green", "tdd:clean", "review:open",
+    ]:
         advance_phase(db_path, project_id, phase)
-    advance_phase(db_path, project_id, "code-review:changes-requested")
-    assert get_phase(db_path, project_id) == "code-review:changes-requested"
+    advance_phase(db_path, project_id, "review:changes-requested")
+    advance_phase(db_path, project_id, "review:open")
+    assert get_phase(db_path, project_id) == "review:open"
+
+
+def test_tdd_cycle_repeats(db_path, project_id):
+    for phase in ["design:approved", "plan:open", "plan:approved",
+                  "tdd:red", "tdd:green", "tdd:clean"]:
+        advance_phase(db_path, project_id, phase)
+    advance_phase(db_path, project_id, "tdd:red")
+    assert get_phase(db_path, project_id) == "tdd:red"
+
+
+def test_diagnose_resolved_returns_to_prior_phase(db_path, project_id):
+    advance_phase(db_path, project_id, "diagnose:open")
+    advance_phase(db_path, project_id, "diagnose:resolved")
+    advance_phase(db_path, project_id, "design:open")  # restore via PM-recorded pre_diagnose_phase
+    assert get_phase(db_path, project_id) == "design:open"

@@ -9,7 +9,7 @@ def _now() -> str:
 
 def create_task(db_path: str, project_id: int | None, title: str,
                 created_by: str, description: str | None = None,
-                priority: int = 0) -> dict:
+                priority: str = 'medium') -> dict:
     now = _now()
     conn = get_connection(db_path)
     cur = conn.execute(
@@ -87,7 +87,7 @@ def list_tasks(db_path: str, status: str | None = None,
         params.append(project_id)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     conn = get_connection(db_path)
-    cur = conn.execute(f"SELECT * FROM tasks {where} ORDER BY priority DESC, created_at", params)
+    cur = conn.execute(f"SELECT * FROM tasks {where} ORDER BY CASE priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC, created_at", params)
     rows = cur.fetchall()
     cols = [col[0] for col in cur.description]
     conn.close()
@@ -109,7 +109,7 @@ def search_tasks(db_path: str, query: str,
     where = "WHERE " + " AND ".join(conditions)
     conn = get_connection(db_path)
     cur = conn.execute(
-        f"SELECT * FROM tasks {where} ORDER BY priority DESC, created_at", params
+        f"SELECT * FROM tasks {where} ORDER BY CASE priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC, created_at", params
     )
     rows = cur.fetchall()
     cols = [col[0] for col in cur.description]
@@ -131,7 +131,7 @@ if __name__ == "__main__":
         parser.add_argument("title")
         parser.add_argument("created_by")
         parser.add_argument("--description")
-        parser.add_argument("--priority", type=int, default=0)
+        parser.add_argument("--priority", default='medium')
         args = parser.parse_args(sys.argv[2:])
         print(json.dumps(create_task(db_path, project_id=args.project_id, title=args.title,
                                       created_by=args.created_by, description=args.description,
@@ -151,7 +151,7 @@ if __name__ == "__main__":
         parser.add_argument("--notes")
         parser.add_argument("--title")
         parser.add_argument("--description")
-        parser.add_argument("--priority", type=int)
+        parser.add_argument("--priority")
         args = parser.parse_args(sys.argv[2:])
         kwargs = {k: v for k, v in vars(args).items() if k != "task_id" and v is not None}
         print(json.dumps(update_task(db_path, args.task_id, **kwargs), indent=2))

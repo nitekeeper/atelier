@@ -82,6 +82,8 @@ INSERT OR IGNORE INTO phase_transitions (from_phase, to_phase) VALUES
     ('qa:open',                  'qa:approved'),
     -- Handoff
     ('qa:approved',              'handoff:complete'),
+    -- diagnose cycle
+    ('diagnose:open',            'diagnose:resolved'),
     -- diagnose:resolved can return to any pre-diagnose phase
     ('diagnose:resolved',        'design:open'),
     ('diagnose:resolved',        'design:approved'),

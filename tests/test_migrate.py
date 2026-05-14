@@ -16,7 +16,8 @@ def test_all_tables_created(tmp_path):
     ).fetchall()}
     conn.close()
     expected = {"roles", "agents", "projects", "project_documents",
-                "tasks", "meeting_minutes", "meeting_participants", "migrations"}
+                "tasks", "meeting_minutes", "meeting_participants", "migrations",
+                "sessions", "phases", "phase_transitions", "skill_gates"}
     assert expected == tables
 
 def test_migration_is_idempotent(tmp_path):
@@ -26,7 +27,7 @@ def test_migration_is_idempotent(tmp_path):
     conn = get_connection(db_path)
     count = conn.execute("SELECT COUNT(*) FROM migrations").fetchone()[0]
     conn.close()
-    assert count == 1  # only one migration file applied once
+    assert count == 4  # four migration files applied once each
 
 def test_migration_recorded(tmp_path):
     db_path = str(tmp_path / "test.db")

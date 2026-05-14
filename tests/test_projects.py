@@ -25,7 +25,7 @@ def test_create_project(db_path, agent_id):
                              repo="github.com/org/auth", created_by=agent_id)
     assert project["id"] == 1
     assert project["name"] == "Auth Service"
-    assert project["phase"] == "design:in-progress"
+    assert project["phase"] == "design:open"
     assert project["created_by"] == agent_id
 
 def test_get_project(db_path, agent_id):
@@ -55,8 +55,8 @@ def test_list_projects(db_path, agent_id):
 def test_list_projects_filter_by_phase(db_path, agent_id):
     create_project(db_path, name="Auth Service", description="OAuth2", created_by=agent_id)
     create_project(db_path, name="Payment API", description="Stripe", created_by=agent_id)
-    update_project(db_path, 2, phase="plan:in-progress")
-    results = list_projects(db_path, phase="design:in-progress")
+    update_project(db_path, 2, phase="plan:open")
+    results = list_projects(db_path, phase="design:open")
     assert len(results) == 1
     assert results[0]["name"] == "Auth Service"
 

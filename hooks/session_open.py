@@ -24,9 +24,6 @@ _SCRIPTS_DIR = _HOOK_DIR.parent / "scripts"
 # Flag to prevent announcing more than once per session.
 _FLAG_NAME = ".atelier-session-announced"
 
-# File that stores the active project ID for this workspace.
-_ACTIVE_PROJECT = Path(".ai") / "active_project"
-
 
 def find_active_project(cwd: Path) -> str | None:
     """Return project_id from .ai/active_project, or None if absent/empty."""
@@ -50,6 +47,7 @@ def fetch_latest_session(scripts_dir: Path, project_id: str) -> dict | None | st
             [sys.executable, str(scripts_dir / "session.py"), "read-latest", project_id],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5,
         )
     except Exception as exc:

@@ -180,3 +180,59 @@ class TestFetchLatestSession:
             result = session_open.fetch_latest_session(Path("/fake"), "1")
         assert isinstance(result, str)
         assert result.startswith("error:")
+
+
+class TestMain:
+    def test_no_active_project_exits_silently(self, tmp_path, capsys):
+        """No .ai/active_project → exits silently (SystemExit 0), no output."""
+        with patch("session_open.Path.cwd", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                session_open.main()
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_announce_on_first_call(self, tmp_path, capsys):
+        """First call with valid project → prints announcement."""
+        (tmp_path / ".ai").mkdir()
+        (tmp_path / ".ai" / "active_project").write_text("1")
+        session_data = {
+            "phase": "tdd:clean",
+            "pm_notes": None,
+            "next_action": "Run dev:review",
+            "status": "in-progress",
+            "blocking_reason": None,
+        }
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(session_data)
+        mock_result.stderr = ""
+        with patch("session_open.Path.cwd", return_value=tmp_path), \
+             patch("session_open.subprocess.run", return_value=mock_result):
+            session_open.main()
+        captured = capsys.readouterr()
+        assert "tdd:clean" in captured.out
+        assert (tmp_path / ".atelier-session-announced").exists()
+
+    def test_flag_suppresses_second_call(self, tmp_path, capsys):
+        """If flag file exists, second call produces no output (SystemExit 0)."""
+        (tmp_path / ".ai").mkdir()
+        (tmp_path / ".ai" / "active_project").write_text("1")
+        (tmp_path / ".atelier-session-announced").write_text("announced")
+        with patch("session_open.Path.cwd", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                session_open.main()
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_db_error_prints_warning_not_raises(self, tmp_path, capsys):
+        """DB error → warning printed, no exception raised, no sys.exit(1)."""
+        (tmp_path / ".ai").mkdir()
+        (tmp_path / ".ai" / "active_project").write_text("1")
+        with patch("session_open.Path.cwd", return_value=tmp_path), \
+             patch("session_open.subprocess.run", side_effect=OSError("DB gone")):
+            session_open.main()  # Must not raise
+        captured = capsys.readouterr()
+        assert "warning" in captured.out.lower()
+        assert "DB gone" in captured.out

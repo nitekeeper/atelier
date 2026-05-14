@@ -63,23 +63,36 @@ PM performs a full codebase audit and decides which area most needs improvement.
 
 The PM produces:
 - A structured agenda (numbered items, each with a clear improvement question)
-- A list of agents to summon (drawn from the 46-role roster, selected by domain relevance)
+- A list of agents to summon (drawn from the 61-role roster, selected by domain relevance)
 - The opening section of the meeting minutes document
 
 ---
 
 ## Phase 2 — Domain Agent Selection and Parallel Pre-Analysis
 
-**Agent selection:** PM selects from the 46-role roster based on agenda content. Examples:
+**Agent selection:** PM selects from the 61-role roster based on agenda content. The roster now includes 15 world-class AI experts whose domain maps directly to self-improvement work. Examples:
 
 | Agenda area | Agents summoned |
 |---|---|
-| Skill procedures | Relevant skill domain leads + discipline experts |
-| Scripts / DB | Systems Engineer, Backend Engineers, Architect |
-| Security | Security Engineer + relevant reviewers |
-| Test coverage | QA Engineers |
-| Documentation | Technical Writer + PM |
-| Cross-cutting | Multiple domains → broader team |
+| Skill procedures | Prompt Engineer, Agent Systems Architect, NLP Engineer, Cognitive Scientist |
+| Agent reasoning / logic | AI Research Scientist, RL Researcher, Agent Systems Architect |
+| Scripts / DB | Systems Engineer, Backend Engineers, AI Infrastructure Engineer, Architect |
+| Safety and alignment | AI Safety Researcher, AI Ethicist, AI Policy Researcher |
+| Test coverage | QA Engineers, Data Scientist (AI Evaluation) |
+| Knowledge representation | Knowledge Engineer, NLP Engineer |
+| Documentation | Technical Writer, AI Product Manager, PM |
+| Cross-cutting / broad | Multiple AI experts + domain leads — PM decides scope |
+
+**AI expert roles with standing relevance to self-improvement cycles:**
+
+| Role | Why always relevant |
+|---|---|
+| Agent Systems Architect (Dr. Nadia Petrov) | Reviews agent orchestration, coordination logic, skill dispatch |
+| AI Safety Researcher (Dr. Fatima Al-Rashid) | Checks every proposed change for alignment and failure modes |
+| Prompt Engineer (Dr. Yusuf Okafor) | Reviews all SKILL.md procedures and prompt quality |
+| AI Ethicist (Dr. Yewande Diallo) | Flags bias, harmful impacts, and governance concerns |
+| AI Research Scientist (Dr. Amara Osei-Bonsu) | Validates theoretical soundness of reasoning patterns |
+| Cognitive Scientist (Dr. Aisha Mensah) | Ensures procedures align with human cognitive principles |
 
 All selected agents are named in the meeting minutes with their role and the agenda items they own.
 

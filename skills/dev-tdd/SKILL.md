@@ -80,7 +80,7 @@ Requires `plan:approved`.
     - Return to step 4 for the next task.
 
 15. When all plan tasks are complete:
-    - Confirm: "All plan tasks complete. Phase: tdd:clean. Ready for dev:review."
+    - Confirm: "All plan tasks complete. Phase: tdd:clean. Next phase: review:open. Invoke dev:review to begin."
     - Do not advance to review — the PM or engineer initiates dev:review.
 
 ## Hard rules

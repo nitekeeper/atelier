@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def create_branch(clone_dir: Path, cycle_n: int) -> str:
 def run_tests_in_clone(clone_dir: Path) -> tuple[bool, int]:
     """Run pytest in clone_dir. Returns (all_passed, test_count)."""
     result = subprocess.run(
-        ["python", "-m", "pytest", "-v", "--tb=short"],
+        [sys.executable, "-m", "pytest", "-v", "--tb=short"],
         cwd=clone_dir,
         capture_output=True,
         text=True,
@@ -139,7 +140,6 @@ if __name__ == "__main__":
     #   python scripts/self_improve.py pull
 
     import json
-    import sys
 
     from scripts.worktree import detect_worktree, parse_main_worktree
 

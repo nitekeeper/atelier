@@ -11,6 +11,14 @@ Test-driven development. Implements plan tasks one at a time using red → green
 
 Requires `plan:approved`.
 
+## The Iron Law
+
+No production code without a failing test first. No exceptions.
+
+If you wrote implementation before the test: delete it. Not "keep as reference." Not "adapt while writing the test." Delete means delete — then write the test, watch it fail, then implement from scratch.
+
+"Simple change," "obvious fix," and "just this once" are rationalizations, not reasons. The order is the method. Violating the order means you are not doing TDD.
+
 ## Procedure
 
 1. Check the phase gate:

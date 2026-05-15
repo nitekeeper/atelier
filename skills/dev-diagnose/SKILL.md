@@ -11,6 +11,14 @@ Bug diagnosis. Can be entered from any phase. Identifies root cause, writes a re
 
 None — callable from any phase.
 
+## The Iron Law
+
+No fix without root cause identified and a failing regression test written first. No exceptions.
+
+If you patched the code before writing the regression test: revert the patch, write the test, confirm it fails, then re-apply the fix. A fix without a prior failing test is not diagnosed — it is guessed.
+
+"The root cause is obvious" is a rationalization. If you have not reproduced the failure independently, you are diagnosing your assumption, not the system.
+
 ## Procedure
 
 1. Check the phase gate:

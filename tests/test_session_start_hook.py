@@ -15,6 +15,7 @@ def test_hook_outputs_skill_body():
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         capture_output=True, text=True, encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
     )
     assert result.returncode == 0, f"hook failed; stderr: {result.stderr}"
     # Body must contain the canonical sections
@@ -28,6 +29,7 @@ def test_hook_does_not_emit_frontmatter():
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         capture_output=True, text=True, encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
     )
     # The hook strips the frontmatter block before printing
     assert "name: using-atelier" not in result.stdout
@@ -46,7 +48,7 @@ def test_hook_exits_zero_when_skill_missing(tmp_path):
         [sys.executable, str(target_hook)],
         capture_output=True, text=True, encoding="utf-8",
         cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        env={**os.environ, "PYTHONPATH": str(tmp_path), "PYTHONUTF8": "1"},
     )
     # Must NOT block session even if the canonical file is missing
     assert result.returncode == 0, f"hook returned non-zero on missing skill; stderr: {result.stderr}"
@@ -68,6 +70,7 @@ def test_hook_strips_frontmatter_with_crlf_line_endings(tmp_path):
         [sys.executable, str(target_hook)],
         capture_output=True, text=True, encoding="utf-8",
         cwd=tmp_path,
+        env={**os.environ, "PYTHONUTF8": "1"},
     )
     assert result.returncode == 0
     # Frontmatter must be stripped even with CRLF

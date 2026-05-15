@@ -241,19 +241,56 @@ class TestMain:
         assert "warning" in captured.out.lower()
         assert "DB gone" in captured.out
 
+    def test_main_no_guidance_when_phase_missing_from_dict(self, tmp_path, capsys, monkeypatch):
+        """When session dict lacks 'phase' key, no guidance is appended (no crash)."""
+        (tmp_path / ".ai").mkdir()
+        (tmp_path / ".ai" / "active_project").write_text("1")
+        monkeypatch.setattr(session_open, "find_active_project", lambda cwd: "1")
+        monkeypatch.setattr(
+            session_open, "fetch_latest_session",
+            lambda scripts_dir, project_id: {"notes": "x"},  # no 'phase' key
+        )
+        monkeypatch.setattr(
+            session_open, "build_announcement",
+            lambda project_id, session: "Session at unknown phase.",
+        )
+        with patch("session_open.Path.cwd", return_value=tmp_path):
+            session_open.main()
+        captured = capsys.readouterr()
+        # Should NOT raise, and should NOT contain "Recommended next action"
+        assert "Recommended next action" not in captured.out
+
 
 class TestGetPhaseGuidance:
-    def test_known_phase_returns_string(self):
-        """A phase present in the table returns a non-None guidance string."""
+    def test_known_phase_returns_string(self, tmp_path, monkeypatch):
+        """Returns a formatted guidance line for a known phase using an isolated SKILL.md."""
+        skill_path = tmp_path / "SKILL.md"
+        skill_path.write_text(
+            "---\nname: test\n---\n## Phase guidance\n\n"
+            "| Phase | Recommended next action | Skill |\n"
+            "|---|---|---|\n"
+            "| `design:open` | Continue grilling | `dev:design` |\n\n"
+            "## Other section\nfoo\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(session_open, "_USING_ATELIER_PATH", skill_path)
         result = session_open.get_phase_guidance("design:open")
         assert result is not None
-        assert "Recommended next action:" in result
+        assert "Continue grilling" in result
         assert "dev:design" in result
 
-    def test_unknown_phase_returns_none(self):
-        """A phase not in the table returns None without raising."""
-        result = session_open.get_phase_guidance("nonexistent:phase")
-        assert result is None
+    def test_unknown_phase_returns_none(self, tmp_path, monkeypatch):
+        """Returns None for a phase not present in the table."""
+        skill_path = tmp_path / "SKILL.md"
+        skill_path.write_text(
+            "---\nname: test\n---\n## Phase guidance\n\n"
+            "| Phase | Recommended next action | Skill |\n"
+            "|---|---|---|\n"
+            "| `design:open` | foo | `bar` |\n\n## Other\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(session_open, "_USING_ATELIER_PATH", skill_path)
+        assert session_open.get_phase_guidance("nonexistent:phase") is None
 
     def test_missing_skill_file_returns_none(self, tmp_path):
         """If SKILL.md is missing, returns None without raising."""
@@ -413,21 +450,24 @@ def test_hook_appends_phase_guidance(project_at_phase, phase, expected_skill):
     )
 
 
-def test_hook_handles_missing_using_atelier_gracefully(project_at_phase):
+def test_hook_handles_missing_using_atelier_gracefully(project_at_phase, tmp_path):
     """If using-atelier/SKILL.md is missing, hook still announces phase."""
+    import shutil
     db_path, pid, cwd = project_at_phase("design:open")
-    skill_path = REPO_ROOT / "skills" / "using-atelier" / "SKILL.md"
-    backup = skill_path.with_suffix(".md.bak")
-    try:
-        skill_path.rename(backup)
-        result = subprocess.run(
-            [sys.executable, str(HOOK_PATH)],
-            capture_output=True, text=True, encoding="utf-8",
-            cwd=str(cwd),
-            env=_HOOK_ENV,
-        )
-        assert result.returncode == 0
-        assert "design:open" in result.stdout
-    finally:
-        if backup.exists():
-            backup.rename(skill_path)
+
+    # Create an isolated directory tree in tmp_path with the hook and scripts
+    # copied, but NO skills/using-atelier/SKILL.md — that's the test condition.
+    (tmp_path / "hooks").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    shutil.copytree(str(REPO_ROOT / "scripts"), str(tmp_path / "scripts"))
+    target_hook = tmp_path / "hooks" / "session_open.py"
+    target_hook.write_text(HOOK_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(target_hook)],
+        capture_output=True, text=True, encoding="utf-8",
+        cwd=str(cwd),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT), "PYTHONUTF8": "1"},
+    )
+    assert result.returncode == 0
+    assert "design:open" in result.stdout

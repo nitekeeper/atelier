@@ -13,7 +13,7 @@ MIGRATION_003 = Path(__file__).resolve().parent.parent / "migrations" / "003_pha
 def skill_data():
     """Return (frontmatter, body) parsed from SKILL.md."""
     text = SKILL_PATH.read_text(encoding="utf-8")
-    m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
+    m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n(.*)$", text, re.DOTALL)
     assert m is not None, "SKILL.md missing YAML frontmatter delimited by ---"
     return yaml.safe_load(m.group(1)), m.group(2)
 
@@ -62,7 +62,7 @@ def test_phase_guidance_table_has_all_phases(skill_data):
     """Every phase in migration 003 must appear in the phase guidance table."""
     _, body = skill_data
     phase_section_match = re.search(
-        r"## Phase guidance\n(.*?)(?=\n## )", body, re.DOTALL,
+        r"## Phase guidance\r?\n(.*?)(?=\r?\n## )", body, re.DOTALL,
     )
     assert phase_section_match is not None, "Phase guidance section not found or improperly closed"
     phase_block = phase_section_match.group(1)
@@ -77,7 +77,7 @@ def test_phase_guidance_table_has_all_phases(skill_data):
 def test_dev_arc_references_canonical_flow(skill_data):
     """Dev arc section must mention every phase in canonical order."""
     _, body = skill_data
-    arc_section_match = re.search(r"## Dev arc\n(.*?)(?=\n## )", body, re.DOTALL)
+    arc_section_match = re.search(r"## Dev arc\r?\n(.*?)(?=\r?\n## )", body, re.DOTALL)
     assert arc_section_match is not None, "Dev arc section not found or improperly closed"
     arc = arc_section_match.group(1)
     for phase in ["design", "plan", "tdd", "review", "security", "qa", "handoff"]:
@@ -87,7 +87,7 @@ def test_dev_arc_references_canonical_flow(skill_data):
 def test_trigger_contract_describes_three_routings(skill_data):
     """Trigger contract must define three routings: full arc, diagnose, direct."""
     _, body = skill_data
-    match = re.search(r"## Trigger contract\n(.*?)(?=\n## )", body, re.DOTALL)
+    match = re.search(r"## Trigger contract\r?\n(.*?)(?=\r?\n## )", body, re.DOTALL)
     assert match is not None, "Trigger contract section not found or improperly closed"
     contract = match.group(1)
     assert "Full Atelier arc" in contract or "full arc" in contract.lower()
@@ -98,7 +98,7 @@ def test_trigger_contract_describes_three_routings(skill_data):
 def test_red_flags_table_present(skill_data):
     """Red Flags table must have at least 5 substantive rows (from spec §2.3)."""
     _, body = skill_data
-    match = re.search(r"## Red Flags\n(.*?)(?=\n## )", body, re.DOTALL)
+    match = re.search(r"## Red Flags\r?\n(.*?)(?=\r?\n## )", body, re.DOTALL)
     assert match is not None, "Red Flags section not found or improperly closed"
     red_flags = match.group(1)
     table_rows = [r for r in red_flags.split("\n") if r.strip().startswith("|") and "---" not in r]

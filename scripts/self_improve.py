@@ -105,12 +105,24 @@ def push_branch(clone_dir: Path, branch: str) -> None:
 
 
 def auto_merge_to_main(repo_dir: Path, branch: str) -> None:
-    """Merge branch into main in the production repo and push. Leaves repo on main."""
+    """Merge branch into main in the production repo and push. Leaves repo on main.
+
+    Stashes any uncommitted changes in the main workspace before merging and
+    restores them afterward so a dirty working tree never blocks the merge.
+    """
     _git(["fetch", "origin"], repo_dir)
     _git(["checkout", "main"], repo_dir)
     _git(["pull", "origin", "main"], repo_dir)
-    _git(["merge", "--no-ff", f"origin/{branch}", "-m", f"Merge {branch} into main"], repo_dir)
-    _git(["push", "origin", "main"], repo_dir)
+
+    stash_result = _git(["stash", "push", "--include-untracked", "-m", "auto-stash before self-improve merge"], repo_dir, check=False)
+    stashed = "No local changes" not in stash_result.stdout and stash_result.returncode == 0
+
+    try:
+        _git(["merge", "--no-ff", f"origin/{branch}", "-m", f"Merge {branch} into main"], repo_dir)
+        _git(["push", "origin", "main"], repo_dir)
+    finally:
+        if stashed:
+            _git(["stash", "pop"], repo_dir, check=False)
 
 
 def cleanup_experiment(experiment_dir: Path) -> None:

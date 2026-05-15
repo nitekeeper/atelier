@@ -222,6 +222,26 @@ class TestPullMain:
 # ── auto_merge_to_main ────────────────────────────────────────────────────
 
 class TestAutoMergeToMain:
+    def test_merges_with_dirty_main_stashes_and_restores(self, tmp_path, bare_remote, source_repo):
+        from scripts.self_improve import clone_repo, create_branch, push_branch, auto_merge_to_main, commit_cycle
+        dest = tmp_path / "clone"
+        clone_repo(str(bare_remote), dest)
+        branch = create_branch(dest, 9)
+        (dest / "improvement.txt").write_text("improvement")
+        commit_cycle(
+            clone_dir=dest, cycle_n=9,
+            decisions=["Add improvement"], participants=["Dr. Test"],
+            n_tests=1, subject="test",
+            minutes_rel_path="docs/self-improve/minutes.md",
+        )
+        push_branch(dest, branch)
+        # Dirty up the main workspace with an uncommitted file
+        (source_repo / "wip.txt").write_text("work in progress")
+        auto_merge_to_main(source_repo, branch)
+        # Stashed change must be restored
+        assert (source_repo / "wip.txt").exists()
+        assert (source_repo / "wip.txt").read_text() == "work in progress"
+
     def test_merges_branch_into_main_in_source_repo(self, tmp_path, bare_remote, source_repo):
         from scripts.self_improve import clone_repo, create_branch, push_branch, auto_merge_to_main
         dest = tmp_path / "clone"

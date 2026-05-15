@@ -1,3 +1,8 @@
+---
+name: ingest
+description: Use when capturing a document, URL, decision, or learned context into the shared Memex wiki for future sessions.
+---
+
 # ingest
 
 Capture knowledge into the shared Memex wiki. Any actor — human or agent — can call this.

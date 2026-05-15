@@ -8,10 +8,27 @@ Requires `review:approved`.
 
 ## Procedure
 
-1. Run: `python atelier/scripts/workflow.py check-gate <project_id> dev:security`
-   If the gate fails, state the current phase and stop.
+1. Check the phase gate:
+   ```
+   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:security
+   ```
+   Parse the JSON output: `{"allowed": bool, "current_phase": str, "required_phase": str, "reason": str}`.
 
-2. Advance phase: `python atelier/scripts/workflow.py advance <project_id> security:open`
+   **If `allowed` is `true`**: record `current_phase` and proceed to the next step.
+
+   **If `allowed` is `false`** (soft wall): ask the user:
+
+   > *"Project is at `<current_phase>`. This skill normally requires `<required_phase>`. Proceed anyway? (yes / no)"*
+
+   - On **yes**: run:
+     ```
+     python atelier/scripts/workflow.py <db_path> log-bypass <project_id> dev:security <current_phase> <required_phase>
+     ```
+     Optionally append `--agent <agent_id>` and `--note "<reason>"`. Then proceed to the next step.
+   - On **no**: stop. Tell the user:
+     > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
+
+2. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> security:open`
 
 3. Security checklist (all required):
 
@@ -27,17 +44,17 @@ Requires `review:approved`.
    | 8 | Authentication and authorisation are not bypassable by changing a parameter |
 
 4. **If issues are found:**
-   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> security:changes-requested`
+   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> security:changes-requested`
    - List each issue: file, line range, vulnerability class, recommended fix.
    - The engineer addresses all issues.
    - On re-review: advance back to `security:open` first:
      ```
-     python atelier/scripts/workflow.py advance <project_id> security:open
+     python atelier/scripts/workflow.py <db_path> advance <project_id> security:open
      ```
      Then repeat the checklist from the top.
 
 5. **If no issues found:**
-   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> security:approved`
+   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> security:approved`
    - Confirm: "Security review approved. Phase: security:approved. Ready for dev:qa."
 
 ## Hard rules

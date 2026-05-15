@@ -3,6 +3,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from scripts.db import get_connection
 
+MIGRATIONS_DIR: Path = Path(__file__).parent.parent / "migrations"
+
 
 def apply_migrations(db_path: str, migrations_dir: Path) -> None:
     conn = get_connection(db_path)
@@ -34,6 +36,5 @@ def apply_migrations(db_path: str, migrations_dir: Path) -> None:
 if __name__ == "__main__":
     import sys
     db_path = sys.argv[1] if len(sys.argv) > 1 else ".ai/memex.db"
-    migrations_dir = Path(__file__).parent.parent / "migrations"
-    apply_migrations(db_path, migrations_dir)
+    apply_migrations(db_path, MIGRATIONS_DIR)
     print(f"Migrations applied to {db_path}")

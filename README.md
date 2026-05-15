@@ -24,6 +24,36 @@ That's it. The migration is idempotent — safe to re-run.
 > running Atelier scripts directly. The skills handle this automatically; it only matters
 > when invoking scripts by hand.
 
+### Auto-trigger setup
+
+Atelier ships a SessionStart hook that injects its methodology into every Claude Code session, so the agent knows the trigger contract and the soft-wall bypass procedure from the first user message.
+
+Add to your project's `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python /path/to/atelier/hooks/session_start.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+As a fallback if the hook can't run, paste `templates/CLAUDE-snippet.md` into your project's `CLAUDE.md`.
+
+### Soft walls
+
+Phase gates are recommendations, not blocks. When a dev skill detects an out-of-phase invocation, it asks you to confirm a bypass, then logs the bypass to `phase_bypasses` for retrospective. Run `dev:handoff` at project close to see the bypass summary.
+
 ### Keep Atelier out of your project's repo
 
 Use `.git/info/exclude` rather than `.gitignore` to hide the Atelier working directories
@@ -50,8 +80,8 @@ pytest tests/
 
 | Category | Skills |
 |---|---|
-| Session | `ingest`, `save`, `load` |
-| Dev workflow | `dev:design`, `dev:plan`, `dev:tdd-red`, `dev:tdd-green`, `dev:tdd-refactor`, `dev:code-review`, `dev:security-review`, `dev:qa-review`, `dev:diagnose`, `dev:handoff` |
+| Session | `using-atelier`, `ingest`, `save`, `load` |
+| Dev workflow | `dev:design`, `dev:plan`, `dev:tdd`, `dev:review`, `dev:security`, `dev:qa`, `dev:diagnose`, `dev:handoff` |
 | Projects | `project:create/read/update/delete/list/search` |
 | Documents | `doc:create/read/update/delete/list/search` |
 | Tasks | `task:create/assign/claim/update/complete/list/search` |
@@ -64,6 +94,6 @@ pytest tests/
 
 - All deterministic operations are Python scripts in `scripts/`
 - Skill files in `skills/` are thin wrappers — they invoke scripts and handle language tasks only
-- State lives in `memex.db` (8 tables) and `.ai/work.md` (session state)
+- State lives in `memex.db` (13 tables including `phase_bypasses` for soft-wall audit, `sessions` for session state, etc.)
 - WAL mode required on `memex.db` for safe concurrent agent writes
 - Workspace commands require tmux via `libtmux`

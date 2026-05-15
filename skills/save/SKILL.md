@@ -1,3 +1,8 @@
+---
+name: save
+description: Use when ending a session or at a meaningful checkpoint — captures session state for the next resume.
+---
+
 # save
 
 Session-close command. Writes current task state to `.ai/work.md` and optionally captures session knowledge to Memex.

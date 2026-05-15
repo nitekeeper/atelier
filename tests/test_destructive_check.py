@@ -66,6 +66,14 @@ class TestIsImportedByAnyFile:
         )
         assert _is_imported_by_any_file("docs/readme.md", tmp_path) is False
 
+    def test_git_dir_not_scanned(self, tmp_path):
+        git_hooks = tmp_path / ".git" / "hooks"
+        git_hooks.mkdir(parents=True)
+        (git_hooks / "pre-commit").write_text("from scripts.db import get_connection\n")
+        diff = _delete_diff("scripts/db.py", "def get_connection(): pass")
+        issues = detect_destructive(diff, tmp_path)
+        assert not any(i["type"] == "deleted_imported_file" for i in issues)
+
 
 # ── detect_destructive ─────────────────────────────────────────────────────
 

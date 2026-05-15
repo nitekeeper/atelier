@@ -18,13 +18,15 @@ def get_diff(clone_dir: Path) -> str:
         encoding="utf-8",
         check=False,
     )
+    if result.returncode != 0:
+        print(f"Warning: git diff failed in {clone_dir}: {result.stderr.strip()}", file=sys.stderr)
     return result.stdout
 
 
 def _deleted_file_paths(diff_text: str) -> list[str]:
     """Extract paths of deleted files from a git diff."""
     pattern = re.compile(
-        r"^diff --git a/(.+?) b/\1\ndeleted file mode", re.MULTILINE
+        r"^diff --git a/(.+?) b/\1\r?\ndeleted file mode", re.MULTILINE
     )
     return [m.group(1) for m in pattern.finditer(diff_text)]
 
@@ -41,6 +43,8 @@ def _is_imported_by_any_file(filepath: str, repo_dir: Path) -> bool:
         f"import {module_parts[-1]}",
     ]
     for py_file in repo_dir.rglob("*.py"):
+        if ".git" in py_file.parts:
+            continue
         try:
             content = py_file.read_text(encoding="utf-8")
             if any(p in content for p in import_patterns):
@@ -66,12 +70,18 @@ def _check_deleted_files(diff_text: str, repo_dir: Path) -> list[dict]:
 def _check_removed_public_functions(diff_text: str) -> list[dict]:
     """Flag removed public function definitions (not starting with _)."""
     issues = []
-    for m in re.finditer(r"^-(?:    )?def ([a-zA-Z][a-zA-Z0-9_]*)\(", diff_text, re.MULTILINE):
-        issues.append({
-            "type": "removed_public_function",
-            "description": f"Public function '{m.group(1)}' was removed",
-            "file": "unknown",
-        })
+    current_file = "unknown"
+    for line in diff_text.splitlines():
+        header = re.match(r"^diff --git a/(.+?) b/\1$", line)
+        if header:
+            current_file = header.group(1)
+        m = re.match(r"^-\s*def ([a-zA-Z][a-zA-Z0-9_]*)\(", line)
+        if m:
+            issues.append({
+                "type": "removed_public_function",
+                "description": f"Public function '{m.group(1)}' was removed",
+                "file": current_file,
+            })
     return issues
 
 

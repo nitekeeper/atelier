@@ -424,7 +424,7 @@ _HOOK_ENV = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "PYTHONUTF8": "1"}
     ("plan:approved", "dev:tdd"),
     ("tdd:clean", "dev:review"),
     ("review:approved", "dev:security"),
-    ("qa:approved", "dev:handoff"),
+    ("qa:approved", "dev:finish"),
 ])
 def test_hook_appends_phase_guidance(project_at_phase, phase, expected_skill):
     """For each phase, the hook output mentions the phase and the recommended skill."""

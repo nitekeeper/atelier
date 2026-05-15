@@ -89,7 +89,12 @@ def merge_back(worktree_dir: Path) -> None:
         sys.exit(1)
 
     main_status = _git(["status", "--porcelain"], main_path)
-    if main_status.stdout.strip():
+    status_lines = main_status.stdout.splitlines()
+    dirty_lines = [l for l in status_lines if not l.startswith("??")]
+    untracked_claude = [l for l in status_lines if l.startswith("?? ") and l[3:].startswith(".claude/")]
+    untracked_other = [l for l in status_lines if l.startswith("?? ") and not l[3:].startswith(".claude/")]
+
+    if dirty_lines or untracked_other:
         print(
             f"ERROR: Main workspace has uncommitted changes.\n"
             f"Commit or stash them first:\n"
@@ -97,6 +102,12 @@ def merge_back(worktree_dir: Path) -> None:
             f"  git stash"
         )
         sys.exit(1)
+
+    if untracked_claude:
+        print(
+            f"Note: Untracked .claude/ files detected and skipped — these are Claude Code's worktree storage, not project files.\n"
+            f"To silence this warning permanently, add '.claude/' to {main_path}/.git/info/exclude"
+        )
 
     # ── Merge ────────────────────────────────────────────────────────────────
     merge_result = _git(

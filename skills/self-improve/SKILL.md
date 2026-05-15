@@ -37,7 +37,7 @@ Cycles run sequentially. A failure in one cycle does not block the next.
    - A numbered agenda (each item is a specific improvement question)
    - A list of agents to summon from the 61-role roster (select by domain relevance)
 
-5. Write the minutes file header to `docs/self-improve/YYYY-MM-DD-cycle-N-minutes.md`:
+5. Draft the minutes file header in working context. Use this format (it will be written to the clone at step 11):
 
 ```markdown
 # Self-Improvement Meeting — Cycle N
@@ -70,6 +70,7 @@ Cycles run sequentially. A failure in one cycle does not block the next.
    - What they found (specific files, patterns, problems)
    - What they propose to change and why
    - Risk classification: destructive or non-destructive
+   - Any dependencies or conflicts with other agents' domains they anticipate
 
 7. Collect all proposals before the meeting begins.
 
@@ -108,6 +109,8 @@ Cycles run sequentially. A failure in one cycle does not block the next.
 
 ### Phase 4 — Implementation in experiment clone
 
+> The clone is created at `<production_repo_parent>/experiment/<repo_name>/`. This is the path printed as `CLONE_DIR`. The production repo is never modified during the cycle.
+
 10. Set up the isolated clone and feature branch:
 ```
 python scripts/self_improve.py clone <cycle_n>
@@ -130,6 +133,7 @@ python scripts/self_improve.py check-destructive <clone_dir>
   > "Cycle N proposes a destructive change: [description]. Approve? (y/n)"
   - Approved: proceed.
   - Rejected: revert that change in the clone, re-run check until exit 0.
+- If all proposed changes were rejected and no changes remain, ABORT the cycle. Append to minutes: `## Outcome\nABORTED — all proposed changes rejected`. Proceed directly to step 17.
 
 ### Phase 5 — Quality gates, push, cleanup
 
@@ -138,7 +142,7 @@ python scripts/self_improve.py check-destructive <clone_dir>
 python scripts/self_improve.py run-tests <clone_dir>
 ```
 - **Pass (exit 0):** proceed to step 15.
-- **Fail (exit 1):** ABORT. Append to minutes: `## Outcome\nFAILED — tests did not pass`. Go to step 17.
+- **Fail (exit 1):** ABORT. Do NOT execute step 15 or 16. The branch is NOT pushed. Append to minutes: `## Outcome\nFAILED — tests did not pass`. Proceed directly to step 17.
 
 15. Commit all changes:
 ```
@@ -150,6 +154,8 @@ Where:
 - `<d1>|<d2>` — pipe-separated decisions from the log
 - `<p1>|<p2>` — pipe-separated participant names
 - `<test_count>` — number from `run-tests` output
+
+> **Note:** Decision and participant strings must not contain `|` characters. If a decision text contains `|`, replace it with ` / ` before passing.
 
 16. Push and merge:
 ```

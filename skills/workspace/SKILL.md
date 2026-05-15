@@ -1,5 +1,5 @@
-﻿---
-name: workspace
+---
+name: atelier-workspace
 description: Use to create, join, list, or leave tmux workspaces for multi-agent team sessions.
 ---
 

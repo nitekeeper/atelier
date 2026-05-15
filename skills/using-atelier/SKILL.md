@@ -1,5 +1,5 @@
 ---
-name: using-atelier
+name: atelier-using-atelier
 description: Use when starting any session in a project that uses Atelier — establishes the trigger contract for new-work requests and the soft-wall bypass procedure.
 ---
 
@@ -32,7 +32,7 @@ On every user message, before responding:
 1. **Mid-arc rule.** If a project is active and its phase is not `handoff:complete`, continue the current arc. Do NOT ask. Proceed with the phase-recommended skill (see Phase guidance) or with the user's explicit request.
 2. **No-fire rule.** If the message is a question, exploration, read-only request, or trivial edit (see Red Flags), handle directly without asking.
 3. **Ask gate.** If the message describes new development work, ask the user one of three routings:
-   - **(a) Full Atelier arc** — invoke `project:create`, then `dev:design`. Routes through design → plan → tdd → review → security → qa → handoff with soft walls.
+   - **(a) Full Atelier arc** — invoke `project:create`, then `dev:design`. Routes through design â†’ plan â†’ tdd â†’ review â†’ security â†’ qa â†’ handoff with soft walls.
    - **(b) Bug fix** — invoke `dev:diagnose` against the active project. Captures pre-diagnose phase, writes regression test first, restores phase on resolution.
    - **(c) Handle directly** — do the work without Atelier orchestration. No project created, no phase tracked.
 
@@ -79,14 +79,14 @@ Bypass entries are recorded in the `phase_bypasses` table and surfaced by `dev:h
 | "I'll verify later, it looks right" | "Looks right" is not evidence. Run `dev:verify` now. Later means never. |
 
 **Firing patterns (examples):**
-- "I want to add X" → fires
-- "Build a system that does Y" → fires
-- "The bug in Z is back" → fires (option b recommended)
-- "Refactor the auth module" → fires
-- "How does this codebase handle X?" → does not fire (question)
-- "Show me the file at path Y" → does not fire (read-only)
-- "Fix the typo on line 42" → does not fire (trivial edit)
-- "List the open tasks" → does not fire (CRUD)
+- "I want to add X" â†’ fires
+- "Build a system that does Y" â†’ fires
+- "The bug in Z is back" â†’ fires (option b recommended)
+- "Refactor the auth module" â†’ fires
+- "How does this codebase handle X?" â†’ does not fire (question)
+- "Show me the file at path Y" â†’ does not fire (read-only)
+- "Fix the typo on line 42" â†’ does not fire (trivial edit)
+- "List the open tasks" â†’ does not fire (CRUD)
 
 ## Phase guidance
 
@@ -126,10 +126,10 @@ Bypass entries are recorded in the `phase_bypasses` table and surfaced by `dev:h
 The canonical Atelier development flow:
 
 ```
-design → plan → tdd (red ⇄ green ⇄ clean) → review → security → qa → handoff
-              ↑
-              ├── dev:subagent (alternative to dev:tdd; enters at plan:approved, exits at tdd:clean)
-              └── diagnose (entered from any non-terminal phase, restored on resolve)
+design â†’ plan â†’ tdd (red â‡„ green â‡„ clean) â†’ review â†’ security â†’ qa â†’ handoff
+              â†‘
+              â”œâ”€â”€ dev:subagent (alternative to dev:tdd; enters at plan:approved, exits at tdd:clean)
+              â””â”€â”€ diagnose (entered from any non-terminal phase, restored on resolve)
 ```
 
 All transitions are tracked in `memex.db` (`projects.phase` column). Transitions are validated by `atelier/scripts/workflow.py advance` against the `phase_transitions` table. Skills no longer block on out-of-phase invocation — instead they apply the Bypass procedure above.

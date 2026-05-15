@@ -1,5 +1,5 @@
 ---
-name: dev:write-skill
+name: atelier-dev-write-skill
 description: Use when creating a new Atelier skill or rewriting an existing one — structures authoring, runs a self-review gate, and verifies with a subagent before registering.
 ---
 

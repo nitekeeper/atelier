@@ -1,5 +1,5 @@
 ---
-name: save
+name: atelier-save
 description: Use when ending a session or at a meaningful checkpoint — captures session state for the next resume.
 ---
 

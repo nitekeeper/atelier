@@ -1,5 +1,5 @@
 ---
-name: dev:diagnose
+name: atelier-dev-diagnose
 description: Use when encountering a bug or unexpected behavior at any phase — diagnoses root cause, writes a regression test, and resumes the interrupted phase.
 ---
 
@@ -51,9 +51,9 @@ If you patched the code before writing the regression test: revert the patch, wr
    - Name it `test_regression_<short-description>`.
 
 6. Identify the affected layer:
-   - Design error → after fix, restore to `design:open`
-   - Implementation error → fix in current branch, restore to `<pre_diagnose_phase>`
-   - Review miss → write a session note via `python atelier/scripts/session.py write <project_id> <agent_id> <pre_diagnose_phase> in-progress --notes "Review miss: <what was missed>"`, then restore to `<pre_diagnose_phase>`
+   - Design error â†’ after fix, restore to `design:open`
+   - Implementation error â†’ fix in current branch, restore to `<pre_diagnose_phase>`
+   - Review miss â†’ write a session note via `python atelier/scripts/session.py write <project_id> <agent_id> <pre_diagnose_phase> in-progress --notes "Review miss: <what was missed>"`, then restore to `<pre_diagnose_phase>`
 
 7. Fix the root cause. Not the symptom.
 

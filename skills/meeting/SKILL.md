@@ -1,5 +1,5 @@
-﻿---
-name: meeting
+---
+name: atelier-meeting
 description: Use to create, read, update, delete, list, or search meetings — writes both a DB record and a markdown file.
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: dev:handoff
+name: atelier-dev-handoff
 description: Use at the end of any session — records current state to the DB so the next session can resume.
 ---
 

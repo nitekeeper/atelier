@@ -85,19 +85,15 @@ Hard rule: **never reintroduce raising in `check_gate` for phase mismatch.** If 
 
 ## Skill frontmatter convention
 
-Most Atelier skills (`skills/<name>/SKILL.md`) open directly with `# <name>` and have no YAML frontmatter — they are invoked by name, not discovered by description.
-
-Four skills carry YAML frontmatter for downstream tool discovery:
-- `using-atelier` — loaded by the SessionStart hook (`hooks/session_start.py`) and discovered by agent skill-routing systems.
-- `ingest`, `save`, `load` — session-lifecycle skills whose `description: Use when…` triggers help the agent route session events.
-
-The frontmatter format is:
+Every skill at `skills/<name>/SKILL.md` MUST carry YAML frontmatter so Claude Code's plugin marketplace can discover and route it as a slash command:
 
 ```yaml
 ---
-name: <skill-name>
+name: atelier-<skill-name>
 description: Use when <trigger condition> — <effect summary>.
 ---
 ```
 
-Dev-workflow and CRUD skills do NOT use frontmatter — they are routed through `using-atelier`'s trigger contract.
+The `name` field is plugin-prefixed (`atelier-<skill-name>`) — Claude Code uses this as the slash-command identifier. The `description` is the routing trigger contract for the agent and for Claude Code's autocomplete UI.
+
+When adding a new skill: create the directory, write the SKILL.md with the frontmatter above, then increment `.claude-plugin/plugin.json`'s `version` field. Re-register in agora afterward via `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.

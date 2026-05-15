@@ -1,5 +1,5 @@
 ---
-name: load
+name: atelier-load
 description: Use when resuming work mid-arc and needing the latest session context loaded into the conversation.
 ---
 

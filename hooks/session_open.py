@@ -11,6 +11,7 @@ and Claude continues with reduced context.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -20,9 +21,37 @@ from pathlib import Path
 # hooks/ is at atelier-root/hooks/; scripts/ is at atelier-root/scripts/.
 _HOOK_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _HOOK_DIR.parent / "scripts"
+_USING_ATELIER_PATH = _HOOK_DIR.parent / "skills" / "using-atelier" / "SKILL.md"
 
 # Flag to prevent announcing more than once per session.
 _FLAG_NAME = ".atelier-session-announced"
+
+
+def get_phase_guidance(phase: str) -> str | None:
+    """Read the phase guidance table from using-atelier/SKILL.md and return the
+    line for `phase`, formatted for hook output. Returns None on any failure
+    (missing file, table not found, phase not present) -- caller should not
+    block the session on a None return."""
+    try:
+        if not _USING_ATELIER_PATH.exists():
+            return None
+        text = _USING_ATELIER_PATH.read_text(encoding="utf-8")
+        # CRLF-tolerant section match
+        section = re.search(r"## Phase guidance\r?\n(.*?)(?=\r?\n## )", text, re.DOTALL)
+        if not section:
+            return None
+        # Each table row: | `phase` | recommendation | `skill` |
+        row_pattern = re.compile(
+            rf"\|\s*`{re.escape(phase)}`\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|",
+        )
+        match = row_pattern.search(section.group(1))
+        if not match:
+            return None
+        recommendation = match.group(1).strip()
+        skill = match.group(2).strip()
+        return f"Recommended next action: {recommendation} ({skill})"
+    except Exception:
+        return None
 
 
 def find_active_project(cwd: Path) -> str | None:
@@ -111,6 +140,11 @@ def main() -> None:
     else:
         announcement = build_announcement(project_id, result)
         print(announcement, flush=True)
+        current_phase = result.get("phase") if isinstance(result, dict) else None
+        if current_phase:
+            guidance = get_phase_guidance(current_phase)
+            if guidance:
+                print(guidance, flush=True)
 
     # Mark announced — suppress further invocations this session.
     try:

@@ -1,5 +1,6 @@
 """Tests for hooks/session_open.py"""
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,9 @@ HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 sys.path.insert(0, str(HOOKS_DIR))
 
 import session_open  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HOOK_PATH = REPO_ROOT / "hooks" / "session_open.py"
 
 
 class TestFindActiveProject:
@@ -236,3 +240,194 @@ class TestMain:
         captured = capsys.readouterr()
         assert "warning" in captured.out.lower()
         assert "DB gone" in captured.out
+
+
+class TestGetPhaseGuidance:
+    def test_known_phase_returns_string(self):
+        """A phase present in the table returns a non-None guidance string."""
+        result = session_open.get_phase_guidance("design:open")
+        assert result is not None
+        assert "Recommended next action:" in result
+        assert "dev:design" in result
+
+    def test_unknown_phase_returns_none(self):
+        """A phase not in the table returns None without raising."""
+        result = session_open.get_phase_guidance("nonexistent:phase")
+        assert result is None
+
+    def test_missing_skill_file_returns_none(self, tmp_path):
+        """If SKILL.md is missing, returns None without raising."""
+        orig = session_open._USING_ATELIER_PATH
+        try:
+            session_open._USING_ATELIER_PATH = tmp_path / "no_such_file.md"
+            result = session_open.get_phase_guidance("design:open")
+        finally:
+            session_open._USING_ATELIER_PATH = orig
+        assert result is None
+
+    def test_malformed_skill_file_returns_none(self, tmp_path):
+        """If SKILL.md has no Phase guidance section, returns None."""
+        fake = tmp_path / "SKILL.md"
+        fake.write_text("# No phase guidance here\n", encoding="utf-8")
+        orig = session_open._USING_ATELIER_PATH
+        try:
+            session_open._USING_ATELIER_PATH = fake
+            result = session_open.get_phase_guidance("design:open")
+        finally:
+            session_open._USING_ATELIER_PATH = orig
+        assert result is None
+
+    def test_main_appends_guidance_after_phase_announcement(self, tmp_path, capsys):
+        """main() prints guidance line when session has a known phase."""
+        (tmp_path / ".ai").mkdir()
+        (tmp_path / ".ai" / "active_project").write_text("1")
+        session_data = {
+            "phase": "design:open",
+            "pm_notes": None,
+            "next_action": None,
+            "status": "in-progress",
+            "blocking_reason": None,
+        }
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(session_data)
+        mock_result.stderr = ""
+        with patch("session_open.Path.cwd", return_value=tmp_path), \
+             patch("session_open.subprocess.run", return_value=mock_result):
+            session_open.main()
+        captured = capsys.readouterr()
+        assert "design:open" in captured.out
+        assert "Recommended next action:" in captured.out
+        assert "dev:design" in captured.out
+
+    def test_main_no_guidance_when_result_is_none(self, tmp_path, capsys):
+        """main() does not print guidance when there is no prior session (result is None)."""
+        (tmp_path / ".ai").mkdir()
+        (tmp_path / ".ai" / "active_project").write_text("1")
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+        with patch("session_open.Path.cwd", return_value=tmp_path), \
+             patch("session_open.subprocess.run", return_value=mock_result):
+            session_open.main()
+        captured = capsys.readouterr()
+        assert "Recommended next action:" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Subprocess integration tests — run the hook as a real process with a live DB
+# ---------------------------------------------------------------------------
+
+def _make_project_at_phase(db_path: str, phase: str) -> str:
+    """Set up a project at the given phase and write a session row. Returns project_id as string.
+
+    Walks the valid transition graph to reach the target phase without
+    using force_phase (which does not exist). The DB must already have
+    migrations applied before calling this.
+    """
+    from scripts.migrate import apply_migrations, MIGRATIONS_DIR
+    from scripts.projects import create_project
+    from scripts.roles import create_role
+    from scripts.agents import create_agent
+    from scripts.session import write_session
+    from scripts import workflow
+
+    apply_migrations(db_path, MIGRATIONS_DIR)
+    role = create_role(db_path, "pm", "Project Manager")
+    create_agent(db_path, "test-agent", "Test Agent", role["id"], "")
+    project = create_project(
+        db_path, name="t", description="d", created_by="test-agent"
+    )
+    pid = project["id"]
+
+    # Walk valid transitions to reach the target phase.
+    _TRANSITION_PATH = [
+        "design:open",
+        "design:approved",
+        "plan:open",
+        "plan:approved",
+        "tdd:red",
+        "tdd:green",
+        "tdd:clean",
+        "review:open",
+        "review:approved",
+        "security:open",
+        "security:approved",
+        "qa:open",
+        "qa:approved",
+    ]
+    if phase not in _TRANSITION_PATH:
+        raise ValueError(f"Phase '{phase}' not in known transition path")
+    target_idx = _TRANSITION_PATH.index(phase)
+    for next_phase in _TRANSITION_PATH[1:target_idx + 1]:
+        workflow.advance_phase(db_path, pid, next_phase)
+
+    # Write a session row so read-latest returns JSON (not the "No session found" message).
+    write_session(db_path, pid, "test-agent", phase, "in-progress")
+
+    return str(pid)
+
+
+@pytest.fixture
+def project_at_phase(tmp_path):
+    """Factory fixture: returns a callable that sets up a project at a given phase.
+
+    Returns (db_path_str, project_id_str, working_dir).
+    The working_dir contains .ai/atelier.db and .ai/active_project as
+    session.py expects.
+    """
+    def _make(phase: str):
+        ai_dir = tmp_path / ".ai"
+        ai_dir.mkdir(exist_ok=True)
+        db_path = str(ai_dir / "atelier.db")
+        pid = _make_project_at_phase(db_path, phase)
+        (ai_dir / "active_project").write_text(pid, encoding="utf-8")
+        return db_path, pid, tmp_path
+    return _make
+
+
+_HOOK_ENV = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "PYTHONUTF8": "1"}
+
+
+@pytest.mark.parametrize("phase,expected_skill", [
+    ("design:open", "dev:design"),
+    ("plan:approved", "dev:tdd"),
+    ("tdd:clean", "dev:review"),
+    ("review:approved", "dev:security"),
+    ("qa:approved", "dev:handoff"),
+])
+def test_hook_appends_phase_guidance(project_at_phase, phase, expected_skill):
+    """For each phase, the hook output mentions the phase and the recommended skill."""
+    db_path, pid, cwd = project_at_phase(phase)
+    result = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        capture_output=True, text=True, encoding="utf-8",
+        cwd=str(cwd),
+        env=_HOOK_ENV,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert phase in result.stdout, f"phase '{phase}' not in output: {result.stdout!r}"
+    assert expected_skill in result.stdout, (
+        f"skill '{expected_skill}' not in output: {result.stdout!r}"
+    )
+
+
+def test_hook_handles_missing_using_atelier_gracefully(project_at_phase):
+    """If using-atelier/SKILL.md is missing, hook still announces phase."""
+    db_path, pid, cwd = project_at_phase("design:open")
+    skill_path = REPO_ROOT / "skills" / "using-atelier" / "SKILL.md"
+    backup = skill_path.with_suffix(".md.bak")
+    try:
+        skill_path.rename(backup)
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            capture_output=True, text=True, encoding="utf-8",
+            cwd=str(cwd),
+            env=_HOOK_ENV,
+        )
+        assert result.returncode == 0
+        assert "design:open" in result.stdout
+    finally:
+        if backup.exists():
+            backup.rename(skill_path)

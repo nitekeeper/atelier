@@ -1,5 +1,5 @@
 <!-- Atelier methodology — paste into your project's CLAUDE.md -->
-<!-- Source of truth: skills/using-atelier/SKILL.md in the Atelier install -->
+<!-- For full reference, see skills/using-atelier/SKILL.md in your Atelier install. -->
 
 ## Atelier methodology
 
@@ -10,7 +10,7 @@ This project uses Atelier for development workflow.
 1. **Mid-arc rule.** If a project is active and its phase is not `handoff:complete`, continue the current arc. Do NOT ask. Use the phase-recommended skill from `using-atelier/SKILL.md`.
 2. **No-fire rule.** Questions, exploration, read-only requests, and trivial edits are handled directly without asking.
 3. **Ask gate.** New development work triggers a three-routing ask:
-   - **(a) Full Atelier arc** — `project:create` then `dev:design` → plan → tdd → review → security → qa → handoff
+   - **(a) Full Atelier arc** — `project:create` then `dev:design` → plan → tdd → review → security → qa → handoff (See `using-atelier/SKILL.md` for the authoritative phase sequence and per-phase guidance.)
    - **(b) Bug fix** — `dev:diagnose` (captures pre-diagnose phase, restores on resolve)
    - **(c) Handle directly** — no project, no phase tracking
 

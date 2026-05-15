@@ -1,6 +1,6 @@
 ---
 name: ingest
-description: Use when starting a new session and the agent needs to load prior session state and active project context.
+description: Use when capturing a document, URL, decision, or learned context into the shared Memex wiki for future sessions.
 ---
 
 # ingest

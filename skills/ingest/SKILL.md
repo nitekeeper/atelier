@@ -1,3 +1,8 @@
+---
+name: ingest
+description: Use when starting a new session and the agent needs to load prior session state and active project context.
+---
+
 # ingest
 
 Capture knowledge into the shared Memex wiki. Any actor — human or agent — can call this.

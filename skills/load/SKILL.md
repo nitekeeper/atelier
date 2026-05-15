@@ -1,3 +1,8 @@
+---
+name: load
+description: Use when resuming work mid-arc and needing the latest session context loaded into the conversation.
+---
+
 # load
 
 Session-open command. Reads current task state and surfaces relevant knowledge from Memex before work begins.

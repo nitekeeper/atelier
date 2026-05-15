@@ -262,6 +262,24 @@ class TestCleanupExperiment:
 
 # ── CLI ───────────────────────────────────────────────────────────────────
 
+# ── repo_dir resolution from worktree ────────────────────────────────────
+
+class TestRepoDir:
+    def test_resolves_main_repo_when_invoked_from_worktree(self, tmp_path, bare_remote, source_repo):
+        """CLI repo_dir must point to main workspace even when run from a linked worktree."""
+        wt_path = tmp_path / "worktree"
+        _git(["worktree", "add", "-b", "feat/test", str(wt_path)], source_repo)
+        result = subprocess.run(
+            ["python", str(Path.cwd() / "scripts" / "self_improve.py"),
+             "pull"],
+            capture_output=True, text=True, encoding="utf-8",
+            cwd=str(wt_path),
+            env={**__import__("os").environ, "PYTHONPATH": str(Path.cwd())},
+        )
+        # pull from a worktree context must not crash with checkout-main errors
+        assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+
+
 class TestCLI:
     def test_unknown_command_exits_1(self):
         result = subprocess.run(

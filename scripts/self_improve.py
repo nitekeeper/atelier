@@ -137,7 +137,11 @@ if __name__ == "__main__":
     import json
     import sys
 
-    repo_dir = Path.cwd()
+    from scripts.worktree import detect_worktree, parse_main_worktree
+
+    _cwd = Path.cwd()
+    _is_wt, _ = detect_worktree(_cwd)
+    repo_dir = Path(parse_main_worktree(_cwd)[0]) if _is_wt else _cwd
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 
     if cmd == "clone":

@@ -1,8 +1,10 @@
 """Atelier self-improvement cycle — git infrastructure CLI."""
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -118,10 +120,26 @@ def auto_merge_to_main(repo_dir: Path, branch: str) -> None:
                 print(f"WARNING: stash pop failed in {repo_dir} — working directory may contain uncommitted changes")
 
 
+def _on_rm_error(func, path, exc_info) -> None:
+    """rmtree error handler: clear read-only bit and retry.
+
+    On Windows, git pack files inside .git/objects/ are marked read-only,
+    which makes shutil.rmtree fail with PermissionError. Clearing the
+    read-only attribute lets the retried unlink succeed. On POSIX systems
+    where this attribute is not used, the handler is rarely invoked.
+    """
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        # Let the original error propagate if the retry also fails.
+        raise
+
+
 def cleanup_experiment(experiment_dir: Path) -> None:
     """Delete the experiment directory. Safe if it does not exist."""
     if experiment_dir.exists():
-        shutil.rmtree(experiment_dir)
+        shutil.rmtree(experiment_dir, onerror=_on_rm_error)
 
 
 def pull_main(repo_dir: Path) -> None:

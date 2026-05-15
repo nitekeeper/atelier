@@ -1,5 +1,8 @@
 """Tests for scripts/self_improve.py git operations."""
+import os
+import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -278,6 +281,19 @@ class TestCleanupExperiment:
     def test_no_error_if_already_absent(self, tmp_path):
         from scripts.self_improve import cleanup_experiment
         cleanup_experiment(tmp_path / "nonexistent")  # must not raise
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only readonly attribute bug")
+    def test_cleanup_removes_readonly_files_on_windows(self, tmp_path):
+        """Read-only files (like git pack objects) must not block cleanup on Windows."""
+        from scripts.self_improve import cleanup_experiment
+        exp = tmp_path / "experiment"
+        (exp / "sub").mkdir(parents=True)
+        readonly_file = exp / "sub" / "readonly.txt"
+        readonly_file.write_text("locked")
+        os.chmod(readonly_file, stat.S_IREAD)
+
+        cleanup_experiment(exp)
+        assert not exp.exists()
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────

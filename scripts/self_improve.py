@@ -194,6 +194,26 @@ if __name__ == "__main__":
             auto_merge_to_main(repo_dir, branch)
             pull_main(repo_dir)
             print(f"Merged {branch} into main and pulled.")
+            if _is_wt:
+                from scripts.worktree import get_current_branch
+                wt_branch = get_current_branch(_cwd)
+                wt_status = _git(["status", "--porcelain"], _cwd, check=False)
+                if wt_status.stdout.strip():
+                    print(
+                        f"Note: Worktree branch '{wt_branch}' has uncommitted changes — skipping sync with main.\n"
+                        f"To sync manually once your working tree is clean:\n"
+                        f"  git -C {_cwd} merge --ff-only main"
+                    )
+                else:
+                    ff = _git(["merge", "--ff-only", "main"], _cwd, check=False)
+                    if ff.returncode == 0:
+                        print(f"Worktree branch '{wt_branch}' fast-forwarded to main.")
+                    else:
+                        print(
+                            f"Note: Worktree branch '{wt_branch}' has local commits — fast-forward not possible.\n"
+                            f"To sync with main manually:\n"
+                            f"  git -C {_cwd} merge main"
+                        )
         else:
             print(f"Branch {branch} pushed. Awaiting human approval to merge.")
 

@@ -68,14 +68,14 @@ def _check_deleted_files(diff_text: str, repo_dir: Path) -> list[dict]:
 
 
 def _check_removed_public_functions(diff_text: str) -> list[dict]:
-    """Flag removed public function definitions (not starting with _)."""
+    """Flag removed top-level public function definitions (not starting with _)."""
     issues = []
     current_file = "unknown"
     for line in diff_text.splitlines():
         header = re.match(r"^diff --git a/(.+?) b/\1$", line)
         if header:
             current_file = header.group(1)
-        m = re.match(r"^-\s*def ([a-zA-Z][a-zA-Z0-9_]*)\(", line)
+        m = re.match(r"^-def ([a-zA-Z][a-zA-Z0-9_]*)\(", line)
         if m:
             issues.append({
                 "type": "removed_public_function",
@@ -86,7 +86,7 @@ def _check_removed_public_functions(diff_text: str) -> list[dict]:
 
 
 def _check_db_migrations(diff_text: str) -> list[dict]:
-    """Flag SQL that drops or renames tables/columns."""
+    """Flag SQL that drops or renames tables/columns (skips SQL comments)."""
     issues = []
     pattern = re.compile(
         r"^\+.*(DROP\s+TABLE|DROP\s+COLUMN|RENAME\s+TABLE|RENAME\s+COLUMN"
@@ -94,6 +94,9 @@ def _check_db_migrations(diff_text: str) -> list[dict]:
         re.IGNORECASE | re.MULTILINE,
     )
     for m in pattern.finditer(diff_text):
+        line = m.group(0).lstrip("+").lstrip()
+        if line.startswith("--"):
+            continue
         issues.append({
             "type": "destructive_db_migration",
             "description": f"Destructive SQL: {m.group(0).strip()}",

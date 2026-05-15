@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+- `dev:self-improve` skill — autonomous multi-agent improvement cycle with isolated git clone, unanimous consensus gate, destructive-change detection, and full test gate before merge
+- `scripts/destructive_check.py` — detects destructive changes in git diffs (5 categories: deleted imported files, removed public functions, destructive DB migrations, removed skill directories, removed test files)
+- `scripts/self_improve.py` — git infrastructure for self-improve cycles (clone, branch, test, commit, push-merge, cleanup, pull)
+
 ## v0.1.1 — 2026-05-12
 
 ### Fixed

@@ -104,6 +104,11 @@ class TestDetectDestructive:
         issues = detect_destructive(diff, tmp_path)
         assert not any(i["type"] == "removed_public_function" for i in issues)
 
+    def test_removed_class_method_not_flagged(self, tmp_path):
+        diff = "-    def get_phase(self):\n-        pass\n"
+        issues = detect_destructive(diff, tmp_path)
+        assert not any(i["type"] == "removed_public_function" for i in issues)
+
     def test_db_drop_table_flagged(self, tmp_path):
         diff = "+DROP TABLE sessions;\n"
         issues = detect_destructive(diff, tmp_path)
@@ -113,6 +118,11 @@ class TestDetectDestructive:
         diff = "+ALTER TABLE projects DROP COLUMN description;\n"
         issues = detect_destructive(diff, tmp_path)
         assert any(i["type"] == "destructive_db_migration" for i in issues)
+
+    def test_db_drop_in_sql_comment_not_flagged(self, tmp_path):
+        diff = "+-- DROP TABLE old_table;\n"
+        issues = detect_destructive(diff, tmp_path)
+        assert not any(i["type"] == "destructive_db_migration" for i in issues)
 
     def test_removed_skill_dir_flagged(self, tmp_path):
         diff = _delete_diff("skills/dev-qa/SKILL.md", "# dev:qa")

@@ -171,10 +171,7 @@ python scripts/self_improve.py push-merge <clone_dir> <branch> skip
 python scripts/self_improve.py cleanup
 ```
 
-18. If auto-merged, pull main:
-```
-python scripts/self_improve.py pull
-```
+18. The `push-merge` command automatically pulls main after a successful auto-merge. No additional pull step is needed.
 
 19. Print cycle summary:
 ```

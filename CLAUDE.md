@@ -56,3 +56,22 @@ Skills live in `skills/<name>/SKILL.md`. Each is a thin wrapper that invokes a P
 ## DB path convention
 
 Default: `.ai/memex.db` (inside the target project). Scripts accept `db_path` as a positional argument.
+
+## Skill frontmatter convention
+
+Most Atelier skills (`skills/<name>/SKILL.md`) open directly with `# <name>` and have no YAML frontmatter — they are invoked by name, not discovered by description.
+
+Four skills carry YAML frontmatter for downstream tool discovery:
+- `using-atelier` — loaded by the SessionStart hook (`hooks/session_start.py`) and discovered by agent skill-routing systems.
+- `ingest`, `save`, `load` — session-lifecycle skills whose `description: Use when…` triggers help the agent route session events.
+
+The frontmatter format is:
+
+```yaml
+---
+name: <skill-name>
+description: Use when <trigger condition> — <effect summary>.
+---
+```
+
+Dev-workflow and CRUD skills do NOT use frontmatter — they are routed through `using-atelier`'s trigger contract.

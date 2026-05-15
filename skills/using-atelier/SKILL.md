@@ -3,8 +3,6 @@ name: using-atelier
 description: Use when starting any session in a project that uses Atelier — establishes the trigger contract for new-work requests and the soft-wall bypass procedure.
 ---
 
-# using-atelier
-
 Atelier is a workspace and methodology for a human developer collaborating with one or more AI agents on a software project. This skill defines the trigger contract every session follows and the bypass procedure for soft phase walls.
 
 ## Trigger contract
@@ -57,8 +55,10 @@ Wait for an explicit user response. Default to (a) if the user says "yes" withou
 | `review:changes-requested` | Apply requested changes, then re-review. | `dev:review` |
 | `review:approved` | Run security review. | `dev:security` |
 | `security:open` | Apply security findings or mark approved. | `dev:security` |
+| `security:changes-requested` | Apply security findings, then re-review. | `dev:security` |
 | `security:approved` | Run QA review. | `dev:qa` |
 | `qa:open` | Address QA findings or mark approved. | `dev:qa` |
+| `qa:changes-requested` | Apply QA findings, then re-review. | `dev:qa` |
 | `qa:approved` | Close out the project. | `dev:handoff` |
 | `diagnose:open` | Reproduce the bug, write regression test, fix root cause. | `dev:diagnose` |
 | `diagnose:resolved` | Restore to pre-diagnose phase. | `dev:diagnose` (final steps) |
@@ -74,7 +74,7 @@ design → plan → tdd (red ⇄ green ⇄ clean) → review → security → qa
               └── diagnose (entered from any non-terminal phase, restored on resolve)
 ```
 
-All transitions are tracked in `memex.db` (`projects.phase` column). Transitions are validated by `scripts/workflow.py advance` against the `phase_transitions` table. Skills no longer block on out-of-phase invocation — instead they apply the Bypass procedure below.
+All transitions are tracked in `atelier.db` (`projects.phase` column). Transitions are validated by `scripts/workflow.py advance` against the `phase_transitions` table. Skills no longer block on out-of-phase invocation — instead they apply the Bypass procedure below.
 
 ## Bypass procedure
 

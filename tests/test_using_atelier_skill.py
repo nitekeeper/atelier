@@ -2,35 +2,49 @@
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "using-atelier" / "SKILL.md"
+MIGRATION_003 = Path(__file__).resolve().parent.parent / "migrations" / "003_phases.sql"
 
 
-def _read_skill():
+@pytest.fixture(scope="module")
+def skill_data():
+    """Return (frontmatter, body) parsed from SKILL.md."""
     text = SKILL_PATH.read_text(encoding="utf-8")
     m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
     assert m is not None, "SKILL.md missing YAML frontmatter delimited by ---"
     return yaml.safe_load(m.group(1)), m.group(2)
 
 
-def test_skill_file_exists():
-    """SKILL.md must exist at the canonical path."""
-    assert SKILL_PATH.exists(), f"{SKILL_PATH} does not exist"
+def _parse_phases_from_migration():
+    """Parse the INSERT into phases rows from migration 003.
+
+    Returns the set of phase names (all phases, including terminal ones,
+    since the guidance table includes a row for handoff:complete).
+    """
+    text = MIGRATION_003.read_text(encoding="utf-8")
+    # Find rows like: ('phase:name', 'skill', 'state', 'desc', is_terminal, allow_from_any),
+    rows = re.findall(
+        r"\(\s*'([^']+)'\s*,\s*'[^']*'\s*,\s*'[^']*'\s*,\s*'[^']*'\s*,\s*([01])\s*,\s*[01]\s*\)",
+        text,
+    )
+    return {phase for phase, _is_terminal in rows}
 
 
-def test_frontmatter_has_required_keys():
+def test_frontmatter_has_required_keys(skill_data):
     """Frontmatter must define name=using-atelier and a Use-when description."""
-    frontmatter, _ = _read_skill()
+    frontmatter, _ = skill_data
     assert "name" in frontmatter
     assert frontmatter["name"] == "using-atelier"
     assert "description" in frontmatter
     assert "Use when" in frontmatter["description"]
 
 
-def test_body_has_required_sections():
+def test_body_has_required_sections(skill_data):
     """All five canonical sections must be present."""
-    _, body = _read_skill()
+    _, body = skill_data
     required_sections = [
         "## Trigger contract",
         "## Red Flags",
@@ -42,51 +56,48 @@ def test_body_has_required_sections():
         assert section in body, f"missing section: {section}"
 
 
-def test_phase_guidance_table_has_all_phases():
-    """Every non-terminal phase from migration 003 must appear in the phase guidance table."""
-    _, body = _read_skill()
+def test_phase_guidance_table_has_all_phases(skill_data):
+    """Every phase in migration 003 must appear in the phase guidance table."""
+    _, body = skill_data
     phase_section_match = re.search(
         r"## Phase guidance\n(.*?)(?=\n## )", body, re.DOTALL,
     )
-    assert phase_section_match, "Phase guidance section not found or improperly closed"
+    assert phase_section_match is not None, "Phase guidance section not found or improperly closed"
     phase_block = phase_section_match.group(1)
 
-    expected_phases = {
-        "design:open", "design:approved",
-        "plan:open", "plan:approved",
-        "tdd:red", "tdd:green", "tdd:clean",
-        "review:open", "review:changes-requested", "review:approved",
-        "security:open", "security:approved",
-        "qa:open", "qa:approved",
-        "diagnose:open", "diagnose:resolved",
-        "handoff:complete",
-    }
+    expected_phases = _parse_phases_from_migration()
+    assert len(expected_phases) > 0, "no phases parsed from migration 003"
+
     for phase in expected_phases:
         assert f"`{phase}`" in phase_block, f"phase '{phase}' missing from phase guidance"
 
 
-def test_dev_arc_references_canonical_flow():
+def test_dev_arc_references_canonical_flow(skill_data):
     """Dev arc section must mention every phase in canonical order."""
-    _, body = _read_skill()
+    _, body = skill_data
     arc_section_match = re.search(r"## Dev arc\n(.*?)(?=\n## )", body, re.DOTALL)
-    assert arc_section_match, "Dev arc section not found or improperly closed"
+    assert arc_section_match is not None, "Dev arc section not found or improperly closed"
     arc = arc_section_match.group(1)
     for phase in ["design", "plan", "tdd", "review", "security", "qa", "handoff"]:
         assert phase in arc, f"dev arc missing '{phase}'"
 
 
-def test_trigger_contract_describes_three_routings():
+def test_trigger_contract_describes_three_routings(skill_data):
     """Trigger contract must define three routings: full arc, diagnose, direct."""
-    _, body = _read_skill()
-    contract = re.search(r"## Trigger contract\n(.*?)(?=\n## )", body, re.DOTALL).group(1)
+    _, body = skill_data
+    match = re.search(r"## Trigger contract\n(.*?)(?=\n## )", body, re.DOTALL)
+    assert match is not None, "Trigger contract section not found or improperly closed"
+    contract = match.group(1)
     assert "Full Atelier arc" in contract or "full arc" in contract.lower()
     assert "diagnose" in contract.lower()
     assert "directly" in contract.lower() or "without" in contract.lower()
 
 
-def test_red_flags_table_present():
+def test_red_flags_table_present(skill_data):
     """Red Flags table must have at least 5 substantive rows (from spec §2.3)."""
-    _, body = _read_skill()
-    red_flags = re.search(r"## Red Flags\n(.*?)(?=\n## )", body, re.DOTALL).group(1)
+    _, body = skill_data
+    match = re.search(r"## Red Flags\n(.*?)(?=\n## )", body, re.DOTALL)
+    assert match is not None, "Red Flags section not found or improperly closed"
+    red_flags = match.group(1)
     table_rows = [r for r in red_flags.split("\n") if r.strip().startswith("|") and "---" not in r]
     assert len(table_rows) >= 6, f"Red Flags table needs more rows; found {len(table_rows)}"

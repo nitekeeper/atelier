@@ -151,7 +151,7 @@ if __name__ == "__main__":
     import argparse
     import json
 
-    db_path = ".ai/atelier.db"
+    db_path = ".ai/memex.db"
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
 
     if cmd == "write":

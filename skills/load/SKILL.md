@@ -5,27 +5,60 @@ description: Use when resuming work mid-arc and needing the latest session conte
 
 # load
 
-Session-open command. Reads current task state and surfaces relevant knowledge from Memex before work begins.
+Session-open command. Reads the most recent session from the DB and surfaces relevant knowledge from Memex before work begins.
 
 ## When to use
 
-Call `load` at the start of every session. This is the first thing you do.
+Call `load` at the start of every session, before any other action.
 
 ## Procedure
 
-1. Run: `python atelier/scripts/session.py read .ai/work.md`
-2. If session state exists, announce to the user:
-   > "Resuming: [current-task]. Status: [status]. Last session: [last-session]. Next action: [next-action]."
-   If no session state exists, announce:
-   > "No previous session found. Starting fresh."
-3. If session state exists, run two Memex `ask` queries:
-   - Query 1: the value of `current-task` from `.ai/work.md`
-   - Query 2: the files or area being worked on (ask the user if not clear from task)
-4. Present the Memex results as context before proceeding.
-5. Begin work from `next-action`.
+1. **Identify the active project.**
+   Run (from the target project root):
+   ```
+   python atelier/scripts/projects.py list
+   ```
+   (DB: `.ai/memex.db`)
+
+   - If **exactly one** project exists: use it automatically. Announce: "Found project: **[name]** (ID [id], phase: [phase])."
+   - If **multiple** exist: display the list (id, name, phase) and ask the user: "Which project are you resuming?" Wait for a response, then confirm: "Resuming **[name]** (ID [id], phase: [phase]). Correct? (yes/no)"
+   - If **none** exist: announce "No projects found. Run `project:create` to set up a project first." Stop.
+
+2. **Read the latest session.**
+   Run:
+   ```
+   python atelier/scripts/session.py read-latest <project_id>
+   ```
+   (DB: `.ai/memex.db`)
+
+3. **Announce session state.**
+   If a session row was returned, announce:
+   > "Resuming: [current_tasks]. Status: [status]. Last closed: [closed_at]. Next action: [next_action]."
+
+   If `closed_at` is null, omit the "Last closed" clause:
+   > "Resuming: [current_tasks]. Status: [status]. Next action: [next_action]."
+
+   If `blocking_reason` is non-null, append:
+   > "Blocked: [blocking_reason]."
+
+   If the command returns "No session found for this project.", announce:
+   > "No previous session found for this project. Starting fresh."
+
+4. **Surface Memex context** (only if a session row was returned).
+   Run two Memex `ask` queries:
+   - Query 1: the value of `current_tasks` from the session record
+   - Query 2: the value of `next_action` from the session record (or ask the user which files/area to query if `next_action` is not file-specific)
+   Present the results. If Memex returns nothing relevant, say so briefly and proceed.
+
+5. **Confirm next action with the user.**
+   Do not begin executing `next_action` automatically. Ask:
+   > "Ready to continue from: '[next_action]'? Or do you want to start somewhere else?"
+   Begin work only after the user confirms or redirects.
 
 ## Hard rules
 
-- Always announce session state before doing anything else.
-- Always run both Memex `ask` queries when session state exists — never skip them.
-- Do not begin work until steps 1–4 are complete.
+- Always run steps 1–4 before doing any work.
+- Never skip the project-identification step — `read-latest` requires a valid `project_id`.
+- Both `projects.py` and `session.py` use `.ai/memex.db`. Pass no db path; the default is correct.
+- Never begin executing `next_action` without user confirmation.
+- If project identification or session read fails, surface the error to the user before proceeding.

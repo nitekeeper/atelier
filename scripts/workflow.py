@@ -192,8 +192,8 @@ def log_bypass(
 
 if __name__ == "__main__":
     # Usage: workflow.py <db_path> <command> [args...]
-    # db_path defaults to .ai/atelier.db when invoked without it for backward
-    # compatibility, but all CLI tests pass it explicitly.
+    # db_path defaults to .ai/memex.db when invoked without it.
+    # All CLI tests pass it explicitly.
     if len(sys.argv) >= 3 and not sys.argv[1].startswith("-") and sys.argv[2] in (
         "get-phase", "advance", "check-gate", "force-phase", "transitions", "log-bypass"
     ):
@@ -201,7 +201,7 @@ if __name__ == "__main__":
         cmd = sys.argv[2]
         _argv_offset = 3
     else:
-        db_path = ".ai/atelier.db"
+        db_path = ".ai/memex.db"
         cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
         _argv_offset = 2
 

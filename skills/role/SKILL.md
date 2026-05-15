@@ -1,3 +1,8 @@
+﻿---
+name: role
+description: Use to create, read, update, delete, list, or search agent roles in Atelier.
+---
+
 # role
 
 Manages roles in Atelier. Roles define the type and responsibility of agents.

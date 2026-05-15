@@ -1,3 +1,8 @@
+﻿---
+name: project
+description: Use to create, read, update, delete, list, or search Atelier projects.
+---
+
 # project
 
 Manages projects in Atelier. A project is a feature, epic, or new repo moving through the dev workflow.

@@ -1,3 +1,8 @@
+﻿---
+name: agent
+description: Use to create, read, update, delete, list, or search agents (human or AI participants) in Atelier.
+---
+
 # agent
 
 Manages agents in Atelier. Agents are human or AI participants with a role and a profile.

@@ -1,3 +1,8 @@
+﻿---
+name: task
+description: Use to create, assign, claim, update, complete, list, or search tasks in the current Atelier project.
+---
+
 # task
 
 Manages tasks in Atelier. Tasks are created from the TDD red phase and assigned by the coordinator.

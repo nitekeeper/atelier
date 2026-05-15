@@ -1,3 +1,8 @@
+---
+name: dev:diagnose
+description: Use when encountering a bug or unexpected behavior at any phase — diagnoses root cause, writes a regression test, and resumes the interrupted phase.
+---
+
 # dev:diagnose
 
 Bug diagnosis. Can be entered from any phase. Identifies root cause, writes a regression test, fixes the root cause, and resumes the interrupted phase.

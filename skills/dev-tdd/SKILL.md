@@ -1,3 +1,8 @@
+---
+name: dev:tdd
+description: Use when implementing a plan task — drives red/green/clean TDD cycles one task at a time.
+---
+
 # dev:tdd
 
 Test-driven development. Implements plan tasks one at a time using red → green → clean cycles. The primary implementation skill.

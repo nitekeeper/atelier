@@ -1,3 +1,8 @@
+﻿---
+name: room
+description: Use to create, join, list, or close tmux rooms (windows) within a workspace.
+---
+
 # room
 
 Manages rooms (tmux windows) within a workspace. Rooms are created dynamically. Every workspace always has a main room.

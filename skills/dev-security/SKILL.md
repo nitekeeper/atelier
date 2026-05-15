@@ -1,3 +1,8 @@
+---
+name: dev:security
+description: Use when review is approved and before QA — checks for vulnerabilities, exposed secrets, and insecure patterns.
+---
+
 # dev:security
 
 Security review. Checks the implementation for vulnerabilities, exposed secrets, and insecure patterns before QA.

@@ -1,3 +1,8 @@
+---
+name: dev:qa
+description: Use when security is approved and deployment is imminent — verifies all gates are clean and acceptance criteria are met.
+---
+
 # dev:qa
 
 Pre-deployment verification. Ensures all gates are clean, all debt is resolved, and all acceptance criteria are met. Produces a QA report.

@@ -1,3 +1,8 @@
+﻿---
+name: meeting
+description: Use to create, read, update, delete, list, or search meetings — writes both a DB record and a markdown file.
+---
+
 # meeting
 
 Manages meetings in Atelier. Each meeting creates both a DB record and a markdown file in `.ai/meetings/`.

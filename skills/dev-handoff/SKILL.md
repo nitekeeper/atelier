@@ -1,3 +1,8 @@
+---
+name: dev:handoff
+description: Use at the end of any session — records current state to the DB so the next session can resume.
+---
+
 # dev:handoff
 
 Records current session state to the DB. Callable from any phase. Always the last action before closing a session.

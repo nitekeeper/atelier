@@ -1,3 +1,8 @@
+---
+name: dev:plan
+description: Use when a design is approved and ready for implementation — translates the design into a concrete task list.
+---
+
 # dev:plan
 
 Implementation planning. Translates an approved design into a concrete task list. Produces a plan document that guides TDD execution.

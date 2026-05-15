@@ -1,3 +1,8 @@
+---
+name: dev:design
+description: Use when starting any new project, feature, or initiative — PM agent grills requirements until all design decisions are resolved.
+---
+
 # dev:design
 
 The first phase of every project. The PM agent grills the human until all requirements are fully clear, then produces the design document. No time limit on questions — the PM keeps asking until there are zero remaining ambiguities.

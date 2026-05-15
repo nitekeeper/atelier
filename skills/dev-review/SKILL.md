@@ -1,3 +1,8 @@
+---
+name: dev:review
+description: Use when implementation is complete — examines code for correctness, maintainability, and spec compliance.
+---
+
 # dev:review
 
 Code review. Examines the implementation for correctness, maintainability, and spec compliance. Produces a review decision.

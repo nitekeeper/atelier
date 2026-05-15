@@ -1,3 +1,8 @@
+﻿---
+name: workspace
+description: Use to create, join, list, or leave tmux workspaces for multi-agent team sessions.
+---
+
 # workspace
 
 Manages tmux workspaces. Each workspace is a tmux session with Claude Code agent teams enabled.

@@ -1,3 +1,8 @@
+---
+name: agent-desk
+description: Use to join or leave a tmux agent desk (pane) within a room.
+---
+
 # agent-desk
 
 Manages agent desks (tmux panes) within a room. Each pane is one agent's desk running a Claude Code CLI session.

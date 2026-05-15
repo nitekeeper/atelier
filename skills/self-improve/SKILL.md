@@ -1,3 +1,8 @@
+---
+name: dev:self-improve
+description: Use when improving Atelier's own code, skills, or structure — multi-agent autonomous improvement with isolated clone and unanimous consensus before merging.
+---
+
 # dev:self-improve
 
 Autonomous multi-agent improvement of Atelier's own code, skills, and structure. Uses an isolated git clone, a structured meeting with world-class expert agents, unanimous consensus, and a full test gate before merging.

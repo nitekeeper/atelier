@@ -1,6 +1,4 @@
 """Soft walls: check_gate returns GateResult instead of raising."""
-from pathlib import Path
-
 import pytest
 
 from scripts.migrate import apply_migrations, MIGRATIONS_DIR

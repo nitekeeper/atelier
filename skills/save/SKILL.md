@@ -56,6 +56,7 @@ Call `save` when closing a session or at a meaningful checkpoint. This is the la
 4. **Determine context.**
    You need four values before calling `session.py write`. If you ran `load` this session they are in working memory. If not:
    - `project_id`: run `python atelier/scripts/projects.py list` and select the active project.
+     **If the output is empty (`[]` or no rows):** stop. Tell the user: "No projects found in `.ai/memex.db`. Create a project first with `projects.py create` or confirm you are in the correct target directory." Do not proceed to step 5.
    - `agent_id`: run `python atelier/scripts/agents.py list` and identify your own agent record by name. Ask the user if your record is ambiguous or missing.
    - `phase`: read from the project record returned by `projects.py list` (`phase` column).
    - `status`: determine from session state — `in-progress`, `blocked`, or `complete`.

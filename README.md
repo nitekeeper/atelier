@@ -81,7 +81,7 @@ pytest tests/
 | Category | Skills |
 |---|---|
 | Session | `using-atelier`, `ingest`, `save`, `load` |
-| Dev workflow | `dev:design`, `dev:plan`, `dev:tdd-red`, `dev:tdd-green`, `dev:tdd-refactor`, `dev:code-review`, `dev:security-review`, `dev:qa-review`, `dev:diagnose`, `dev:handoff` |
+| Dev workflow | `dev:design`, `dev:plan`, `dev:tdd`, `dev:review`, `dev:security`, `dev:qa`, `dev:diagnose`, `dev:handoff` |
 | Projects | `project:create/read/update/delete/list/search` |
 | Documents | `doc:create/read/update/delete/list/search` |
 | Tasks | `task:create/assign/claim/update/complete/list/search` |
@@ -94,6 +94,6 @@ pytest tests/
 
 - All deterministic operations are Python scripts in `scripts/`
 - Skill files in `skills/` are thin wrappers — they invoke scripts and handle language tasks only
-- State lives in `memex.db` (9 tables, including `phase_bypasses` for soft-wall audit) and `.ai/work.md` (session state)
+- State lives in `memex.db` (13 tables including `phase_bypasses` for soft-wall audit, `sessions` for session state, etc.)
 - WAL mode required on `memex.db` for safe concurrent agent writes
 - Workspace commands require tmux via `libtmux`

@@ -28,7 +28,7 @@ Requires `design:approved`.
    - On **no**: stop. Tell the user:
      > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
-2. Advance phase: `python atelier/scripts/workflow.py advance <project_id> plan:open`
+2. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> plan:open`
 
 3. Read the approved design document for the project:
    ```
@@ -60,7 +60,7 @@ Requires `design:approved`.
    ```
 
 6. When plan is approved by the human:
-   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> plan:approved`
+   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> plan:approved`
    - Confirm: "Plan approved. Phase: plan:approved. Ready to begin dev:tdd."
 
 ## Hard rules

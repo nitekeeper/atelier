@@ -28,7 +28,7 @@ Requires `security:approved`.
    - On **no**: stop. Tell the user:
      > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
-2. Advance phase: `python atelier/scripts/workflow.py advance <project_id> qa:open`
+2. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> qa:open`
 
 3. **Pre-deploy checklist** (all blocking):
 
@@ -53,7 +53,7 @@ Requires `security:approved`.
 6. When all checks pass:
    - Write the QA report to `docs/reports/<project-slug>-qa.md`
    - Register: `python atelier/scripts/documents.py create <project_id> qa-report "<title>" "<filename>" "<agent_id>"`
-   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> qa:approved`
+   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> qa:approved`
    - Confirm: "QA review approved. All checks passed. Project is ready for deployment. Phase: qa:approved."
 
 ## Hard rules

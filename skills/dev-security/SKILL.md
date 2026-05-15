@@ -28,7 +28,7 @@ Requires `review:approved`.
    - On **no**: stop. Tell the user:
      > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
-2. Advance phase: `python atelier/scripts/workflow.py advance <project_id> security:open`
+2. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> security:open`
 
 3. Security checklist (all required):
 
@@ -44,17 +44,17 @@ Requires `review:approved`.
    | 8 | Authentication and authorisation are not bypassable by changing a parameter |
 
 4. **If issues are found:**
-   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> security:changes-requested`
+   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> security:changes-requested`
    - List each issue: file, line range, vulnerability class, recommended fix.
    - The engineer addresses all issues.
    - On re-review: advance back to `security:open` first:
      ```
-     python atelier/scripts/workflow.py advance <project_id> security:open
+     python atelier/scripts/workflow.py <db_path> advance <project_id> security:open
      ```
      Then repeat the checklist from the top.
 
 5. **If no issues found:**
-   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> security:approved`
+   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> security:approved`
    - Confirm: "Security review approved. Phase: security:approved. Ready for dev:qa."
 
 ## Hard rules

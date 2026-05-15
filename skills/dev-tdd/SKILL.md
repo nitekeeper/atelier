@@ -28,7 +28,7 @@ Requires `plan:approved`.
    - On **no**: stop. Tell the user:
      > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
-2. Advance phase: `python atelier/scripts/workflow.py advance <project_id> tdd:red`
+2. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:red`
 
 3. Read the plan document:
    ```
@@ -50,7 +50,7 @@ Requires `plan:approved`.
 
 ### Green cycle
 
-6. Advance phase: `python atelier/scripts/workflow.py advance <project_id> tdd:green`
+6. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:green`
 
 7. Write the minimal implementation to make the test pass.
    - Minimal means: the simplest code that passes the test, no more.
@@ -70,7 +70,7 @@ Requires `plan:approved`.
 
 ### Clean cycle
 
-10. Advance phase: `python atelier/scripts/workflow.py advance <project_id> tdd:clean`
+10. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:clean`
 
 11. Refactor the implementation:
     - Remove duplication.
@@ -93,7 +93,7 @@ Requires `plan:approved`.
 ### Repeat or advance
 
 14. If more tasks remain in the plan:
-    - Advance phase back to red: `python atelier/scripts/workflow.py advance <project_id> tdd:red`
+    - Advance phase back to red: `python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:red`
     - Return to step 4 for the next task.
 
 15. When all plan tasks are complete:

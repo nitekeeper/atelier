@@ -43,7 +43,7 @@ No gate — requires only that a project exists. Run `project:read <project_id>`
 
 6. Register the document: `python atelier/scripts/documents.py create <project_id> design "<title>" "<filename>" "<agent_id>"`
 
-7. Advance phase: `python atelier/scripts/workflow.py advance <project_id> design:approved`
+7. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> design:approved`
 
 8. Confirm: "Design document approved. Phase advanced to design:approved. Ready for `dev:plan`."
 

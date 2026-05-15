@@ -3,7 +3,17 @@
 Atelier session open hook.
 Reads the latest session from the DB and announces project phase to Claude context.
 
-Install as a PreToolUse hook in .claude/settings.json. See docs/HOOKS_SETUP.md.
+Install as a PreToolUse hook in .claude/settings.json. Example:
+  {
+    "hooks": {
+      "PreToolUse": [
+        {"matcher": "", "hooks": [
+          {"type": "command",
+           "command": "python /path/to/atelier/hooks/session_open.py"}
+        ]}
+      ]
+    }
+  }
 
 Option B (from spec): DB errors never block a session. Errors produce a warning
 and Claude continues with reduced context.

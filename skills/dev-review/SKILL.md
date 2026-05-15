@@ -28,7 +28,7 @@ Requires `tdd:clean`.
    - On **no**: stop. Tell the user:
      > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
-2. Advance phase: `python atelier/scripts/workflow.py advance <project_id> review:open`
+2. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> review:open`
 
 3. Read the plan and design documents:
    ```
@@ -50,17 +50,17 @@ Requires `tdd:clean`.
    | 8 | No duplication that belongs in a shared helper |
 
 5. **If changes are required:**
-   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> review:changes-requested`
+   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> review:changes-requested`
    - List each issue precisely: file, line range, what is wrong, what the fix should be.
    - The engineer fixes the issues, re-runs tests, and re-requests review.
    - On re-review (the REVIEWER runs this): advance back to `review:open` first:
      ```
-     python atelier/scripts/workflow.py advance <project_id> review:open
+     python atelier/scripts/workflow.py <db_path> advance <project_id> review:open
      ```
      Then repeat the review checklist.
 
 6. **If approved:**
-   - Advance phase: `python atelier/scripts/workflow.py advance <project_id> review:approved`
+   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> review:approved`
    - Confirm: "Code review approved. Phase: review:approved. Ready for dev:security."
 
 ## Hard rules

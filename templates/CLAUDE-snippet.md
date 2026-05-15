@@ -18,4 +18,4 @@ This project uses Atelier for development workflow.
 
 **Full methodology:** `skills/using-atelier/SKILL.md` in the Atelier install.
 **Phase state:** `.ai/atelier.db` `projects.phase`.
-**Phase gates:** `python scripts/workflow.py <db_path> check-gate <project_id> <skill>` (returns JSON; never blocks).
+**Phase gates:** `python atelier/scripts/workflow.py <db_path> check-gate <project_id> <skill>` (returns JSON; never blocks).

@@ -27,7 +27,7 @@ None — callable from any phase.
 
 3. Advance phase:
    ```
-   python atelier/scripts/workflow.py advance <project_id> diagnose:open
+   python atelier/scripts/workflow.py <db_path> advance <project_id> diagnose:open
    ```
 
 4. Determine if the bug is reproducible deterministically.
@@ -64,7 +64,7 @@ None — callable from any phase.
 
 11. Advance to resolved:
     ```
-    python atelier/scripts/workflow.py advance <project_id> diagnose:resolved
+    python atelier/scripts/workflow.py <db_path> advance <project_id> diagnose:resolved
     ```
 
 12. Read the latest session to retrieve the pre_diagnose_phase:
@@ -75,7 +75,7 @@ None — callable from any phase.
 
 13. Restore the project to the interrupted phase:
     ```
-    python atelier/scripts/workflow.py force-phase <project_id> <pre_diagnose_phase>
+    python atelier/scripts/workflow.py <db_path> force-phase <project_id> <pre_diagnose_phase>
     ```
     Confirm: "Bug resolved. Regression test added. Restored to <pre_diagnose_phase>. Ready to resume."
 

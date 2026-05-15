@@ -1,5 +1,5 @@
 ---
-name: atelier-dev-design
+name: atelier:dev-design
 description: Use when starting any new project, feature, or initiative — PM agent grills requirements until all design decisions are resolved.
 ---
 

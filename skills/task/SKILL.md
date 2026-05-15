@@ -1,5 +1,5 @@
 ---
-name: atelier-task
+name: atelier:task
 description: Use to create, assign, claim, update, complete, list, or search tasks in the current Atelier project.
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: atelier-dev-security
+name: atelier:dev-security
 description: Use when review is approved and before QA — checks for vulnerabilities, exposed secrets, and insecure patterns.
 ---
 

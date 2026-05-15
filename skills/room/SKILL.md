@@ -1,5 +1,5 @@
 ---
-name: atelier-room
+name: atelier:room
 description: Use to create, join, list, or close tmux rooms (windows) within a workspace.
 ---
 

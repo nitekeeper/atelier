@@ -89,11 +89,11 @@ Every skill at `skills/<name>/SKILL.md` MUST carry YAML frontmatter so Claude Co
 
 ```yaml
 ---
-name: atelier-<skill-name>
+name: atelier:<skill-name>
 description: Use when <trigger condition> — <effect summary>.
 ---
 ```
 
-The `name` field is plugin-prefixed (`atelier-<skill-name>`) — Claude Code uses this as the slash-command identifier. The `description` is the routing trigger contract for the agent and for Claude Code's autocomplete UI.
+The `name` field is plugin-prefixed with a colon separator (`atelier:<skill-name>`) — Claude Code uses this as the slash-command identifier. The `description` is the routing trigger contract for the agent and for Claude Code's autocomplete UI.
 
 When adding a new skill: create the directory, write the SKILL.md with the frontmatter above, then increment `.claude-plugin/plugin.json`'s `version` field. Re-register in agora afterward via `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.

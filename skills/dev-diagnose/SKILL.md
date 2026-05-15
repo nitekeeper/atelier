@@ -1,5 +1,5 @@
 ---
-name: atelier-dev-diagnose
+name: atelier:dev-diagnose
 description: Use when encountering a bug or unexpected behavior at any phase — diagnoses root cause, writes a regression test, and resumes the interrupted phase.
 ---
 

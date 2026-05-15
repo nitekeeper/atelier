@@ -1,5 +1,5 @@
 ---
-name: atelier-doc
+name: atelier:doc
 description: Use to create, read, update, delete, list, or search documents attached to Atelier projects.
 ---
 

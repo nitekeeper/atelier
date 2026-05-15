@@ -1,5 +1,5 @@
 ---
-name: atelier-project
+name: atelier:project
 description: Use to create, read, update, delete, list, or search Atelier projects.
 ---
 

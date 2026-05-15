@@ -1,10 +1,8 @@
 """Soft walls: check_gate returns GateResult instead of raising."""
-from contextlib import closing
 from pathlib import Path
 
 import pytest
 
-from scripts.db import get_connection
 from scripts.migrate import apply_migrations, MIGRATIONS_DIR
 from scripts.roles import create_role
 from scripts.agents import create_agent
@@ -61,3 +59,12 @@ def test_check_gate_does_not_raise_on_mismatch(project):
     assert result.required_phase == "design:approved"
     assert "design:open" in result.reason
     assert "design:approved" in result.reason
+
+
+def test_check_gate_raises_on_unknown_project_id(fresh_db):
+    """Documents the exception path: unknown project_id raises WorkflowError.
+
+    The 'never raises on phase mismatch' contract does not cover invalid input.
+    """
+    with pytest.raises(workflow.WorkflowError, match="not found"):
+        workflow.check_gate(fresh_db, 9999, "dev:plan")

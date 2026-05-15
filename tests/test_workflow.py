@@ -1,7 +1,6 @@
 # tests/test_workflow.py
 import pytest
-from pathlib import Path
-from scripts.migrate import apply_migrations
+from scripts.migrate import apply_migrations, MIGRATIONS_DIR
 from scripts.roles import create_role
 from scripts.agents import create_agent
 from scripts.projects import create_project
@@ -9,8 +8,6 @@ from scripts.workflow import (
     get_phase, advance_phase, check_gate,
     get_valid_transitions, is_allow_from_any, WorkflowError, GateResult,
 )
-
-MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
 
 @pytest.fixture

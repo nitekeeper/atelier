@@ -1,9 +1,6 @@
 from contextlib import closing
-from pathlib import Path
-from scripts.migrate import apply_migrations
+from scripts.migrate import apply_migrations, MIGRATIONS_DIR
 from scripts.db import get_connection
-
-MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
 def test_all_tables_created(tmp_path):
     """All expected tables exist after running the full migration set."""

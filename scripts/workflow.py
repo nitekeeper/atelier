@@ -27,6 +27,11 @@ class GateResult:
     required_phase: str | None
     reason: str
 
+    def __str__(self) -> str:
+        if self.allowed:
+            return f"allowed at {self.current_phase}"
+        return f"BLOCKED: {self.current_phase} requires {self.required_phase}"
+
 
 class WorkflowError(Exception):
     pass
@@ -92,9 +97,13 @@ def advance_phase(db_path: str, project_id: int, new_phase: str) -> str:
 def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
     """Check whether `skill` is in-phase for `project_id`.
 
-    Returns a GateResult describing the outcome. Does NOT raise on mismatch.
+    Returns a GateResult describing the outcome. Does NOT raise on a phase mismatch.
     Callers decide whether to proceed (typically: confirm with user, log bypass,
     then proceed).
+
+    May raise WorkflowError if `project_id` does not exist (programming error,
+    not a soft-wall concern — calling skills should validate the project exists
+    before invoking check_gate).
     """
     conn = get_connection(db_path)
     try:
@@ -153,6 +162,10 @@ if __name__ == "__main__":
             print(f"Error: {e}")
             sys.exit(1)
 
+    # CLI exit code: ALWAYS 0 for check-gate, regardless of allowed=False.
+    # This is a deliberate breaking change from the prior contract where
+    # gate-not-met → exit 1. Consumers must parse the JSON `allowed` field.
+    # Documented in CHANGELOG via Task 14.
     elif cmd == "check-gate":
         project_id = int(sys.argv[2])
         skill = sys.argv[3]
@@ -162,7 +175,7 @@ if __name__ == "__main__":
             "current_phase": result.current_phase,
             "required_phase": result.required_phase,
             "reason": result.reason,
-        }))
+        }, sort_keys=True))
         sys.exit(0)  # always 0 -- "not allowed" is no longer an error
 
     elif cmd == "force-phase":

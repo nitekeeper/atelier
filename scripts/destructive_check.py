@@ -16,6 +16,7 @@ def get_diff(clone_dir: Path) -> str:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if result.returncode != 0:
@@ -48,8 +49,11 @@ def _is_imported_by_any_file(filepath: str, repo_dir: Path) -> bool:
             continue
         try:
             content = py_file.read_text(encoding="utf-8")
-            if any(p in content for p in import_patterns):
-                return True
+            for line in content.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                if any(p in line for p in import_patterns):
+                    return True
         except OSError:
             continue
     return False

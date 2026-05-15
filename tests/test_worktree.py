@@ -174,6 +174,17 @@ class TestMergeBack:
             merge_back(wt_path)
         assert exc_info.value.code == 1
 
+    def test_detached_head_exits_cleanly(self, repo_with_worktree):
+        """Worktree in detached HEAD state should abort with exit code 1."""
+        main_repo, wt_path = repo_with_worktree
+        commit_hash = _git(["rev-parse", "HEAD"], wt_path).stdout.strip()
+        _git_no_check(["checkout", commit_hash], wt_path)
+
+        from scripts.worktree import merge_back
+        with pytest.raises(SystemExit) as exc_info:
+            merge_back(wt_path)
+        assert exc_info.value.code == 1
+
     def test_conflict_aborts_and_leaves_worktree_intact(self, repo_with_worktree):
         main_repo, wt_path = repo_with_worktree
         # Create conflicting change on main

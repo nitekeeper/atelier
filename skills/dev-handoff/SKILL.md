@@ -38,7 +38,31 @@ None — callable from any phase.
 
 3. Confirm: "Session state recorded. Next action: [next action]."
 
-4. Ask: "Anything to capture to the knowledge base before closing? (y/n)"
+4. **Query phase bypasses for retro:**
+
+   ```python
+   from contextlib import closing
+   from scripts.db import get_connection
+
+   with closing(get_connection('<db_path>')) as conn:
+       rows = conn.execute('''
+           SELECT skill, current_phase, required_phase, COUNT(*) AS n,
+                  GROUP_CONCAT(note, ' | ') AS notes
+           FROM phase_bypasses
+           WHERE project_id = ?
+           GROUP BY skill, current_phase, required_phase
+           ORDER BY n DESC
+       ''', (<project_id>,)).fetchall()
+       for row in rows:
+           print(row)
+   ```
+
+   Format the output as a **Bypasses** subsection in the retro:
+
+   - For each row: `<skill>: <n> bypass(es) from <current_phase> (normally requires <required_phase>)`. If `notes` is non-empty, append it.
+   - If no rows, write: "*No phase bypasses during this project's lifecycle.*"
+
+5. Ask: "Anything to capture to the knowledge base before closing? (y/n)"
    If yes: invoke `ingest`.
 
 ## Hard rules

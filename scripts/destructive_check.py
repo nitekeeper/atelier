@@ -19,7 +19,8 @@ def get_diff(clone_dir: Path) -> str:
         check=False,
     )
     if result.returncode != 0:
-        print(f"Warning: git diff failed in {clone_dir}: {result.stderr.strip()}", file=sys.stderr)
+        print(f"Error: git diff failed in {clone_dir}: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
     return result.stdout
 
 
@@ -75,7 +76,7 @@ def _check_removed_public_functions(diff_text: str) -> list[dict]:
         header = re.match(r"^diff --git a/(.+?) b/\1$", line)
         if header:
             current_file = header.group(1)
-        m = re.match(r"^-def ([a-zA-Z][a-zA-Z0-9_]*)\(", line)
+        m = re.match(r"^-(?:async\s+)?def ([a-zA-Z][a-zA-Z0-9_]*)\(", line)
         if m:
             issues.append({
                 "type": "removed_public_function",

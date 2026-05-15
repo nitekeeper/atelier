@@ -112,7 +112,9 @@ def auto_merge_to_main(repo_dir: Path, branch: str) -> None:
         _git(["push", "origin", "main"], repo_dir)
     finally:
         if stashed:
-            _git(["stash", "pop"], repo_dir, check=False)
+            pop_result = _git(["stash", "pop"], repo_dir, check=False)
+            if pop_result.returncode != 0:
+                print(f"WARNING: stash pop failed in {repo_dir} — working directory may contain uncommitted changes")
 
 
 def cleanup_experiment(experiment_dir: Path) -> None:

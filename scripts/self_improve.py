@@ -122,3 +122,87 @@ def cleanup_experiment(experiment_dir: Path) -> None:
 def pull_main(repo_dir: Path) -> None:
     """Pull main in the production repo."""
     _git(["pull", "origin", "main"], repo_dir)
+
+
+if __name__ == "__main__":
+    # Usage patterns:
+    #   python scripts/self_improve.py clone <cycle_n>
+    #   python scripts/self_improve.py check-destructive <clone_dir>
+    #   python scripts/self_improve.py run-tests <clone_dir>
+    #   python scripts/self_improve.py commit <clone_dir> <cycle_n> <subject> <decisions> <participants> <n_tests> <minutes_path>
+    #   python scripts/self_improve.py push-merge <clone_dir> <branch> [skip]
+    #   python scripts/self_improve.py cleanup [<experiment_dir>]
+    #   python scripts/self_improve.py pull
+
+    import json
+    import sys
+
+    from scripts.destructive_check import get_diff, detect_destructive
+
+    repo_dir = Path.cwd()
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+
+    if cmd == "clone":
+        cycle_n = int(sys.argv[2])
+        remote_url = get_remote_url(repo_dir)
+        experiment_dir = repo_dir.parent / "experiment"
+        clone = experiment_dir / repo_dir.name
+        clone_repo(remote_url, clone)
+        branch = create_branch(clone, cycle_n)
+        print(f"CLONE_DIR={clone}")
+        print(f"BRANCH={branch}")
+
+    elif cmd == "check-destructive":
+        clone = Path(sys.argv[2])
+        diff = get_diff(clone)
+        issues = detect_destructive(diff, clone)
+        print(json.dumps(issues, indent=2))
+        if issues:
+            sys.exit(1)
+
+    elif cmd == "run-tests":
+        clone = Path(sys.argv[2])
+        passed, count = run_tests_in_clone(clone)
+        print(f"TESTS_PASSED={count}")
+        if not passed:
+            sys.exit(1)
+
+    elif cmd == "commit":
+        # commit <clone_dir> <cycle_n> <subject> "<d1>|<d2>" "<p1>|<p2>" <n_tests> <minutes_path>
+        clone = Path(sys.argv[2])
+        cycle_n = int(sys.argv[3])
+        subject = sys.argv[4]
+        decisions = [d for d in sys.argv[5].split("|") if d.strip()]
+        participants = [p for p in sys.argv[6].split("|") if p.strip()]
+        n_tests = int(sys.argv[7])
+        minutes_rel = sys.argv[8]
+        commit_cycle(clone, cycle_n, decisions, participants, n_tests, subject, minutes_rel)
+        print("Committed.")
+
+    elif cmd == "push-merge":
+        clone = Path(sys.argv[2])
+        branch = sys.argv[3]
+        skip_merge = len(sys.argv) > 4 and sys.argv[4] == "skip"
+        push_branch(clone, branch)
+        if not skip_merge:
+            auto_merge_to_main(repo_dir, branch)
+            pull_main(repo_dir)
+            print(f"Merged {branch} into main and pulled.")
+        else:
+            print(f"Branch {branch} pushed. Awaiting human approval to merge.")
+
+    elif cmd == "cleanup":
+        exp = Path(sys.argv[2]) if len(sys.argv) > 2 else repo_dir.parent / "experiment"
+        cleanup_experiment(exp)
+        print("experiment/ removed.")
+
+    elif cmd == "pull":
+        pull_main(repo_dir)
+        print("Pulled main.")
+
+    else:
+        print(
+            "Commands: clone, check-destructive, run-tests, commit, "
+            "push-merge, cleanup, pull"
+        )
+        sys.exit(1)

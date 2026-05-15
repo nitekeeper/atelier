@@ -258,3 +258,48 @@ class TestCleanupExperiment:
     def test_no_error_if_already_absent(self, tmp_path):
         from scripts.self_improve import cleanup_experiment
         cleanup_experiment(tmp_path / "nonexistent")  # must not raise
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────
+
+class TestCLI:
+    def test_unknown_command_exits_1(self):
+        result = subprocess.run(
+            ["python", "scripts/self_improve.py", "bogus"],
+            capture_output=True, text=True,
+            env={**__import__("os").environ, "PYTHONPATH": "."},
+        )
+        assert result.returncode == 1
+
+    def test_no_command_exits_1(self):
+        result = subprocess.run(
+            ["python", "scripts/self_improve.py"],
+            capture_output=True, text=True,
+            env={**__import__("os").environ, "PYTHONPATH": "."},
+        )
+        assert result.returncode == 1
+
+    def test_run_tests_pass_exits_0(self, tmp_path, bare_remote, source_repo):
+        from scripts.self_improve import clone_repo
+        dest = tmp_path / "clone"
+        clone_repo(str(bare_remote), dest)
+        result = subprocess.run(
+            ["python", str(Path.cwd() / "scripts" / "self_improve.py"),
+             "run-tests", str(dest)],
+            capture_output=True, text=True,
+            env={**__import__("os").environ, "PYTHONPATH": str(Path.cwd())},
+        )
+        assert result.returncode == 0
+        assert "TESTS_PASSED=" in result.stdout
+
+    def test_cleanup_exits_0(self, tmp_path):
+        exp = tmp_path / "experiment"
+        exp.mkdir()
+        result = subprocess.run(
+            ["python", str(Path.cwd() / "scripts" / "self_improve.py"),
+             "cleanup", str(exp)],
+            capture_output=True, text=True,
+            env={**__import__("os").environ, "PYTHONPATH": str(Path.cwd())},
+        )
+        assert result.returncode == 0
+        assert not exp.exists()

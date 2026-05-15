@@ -21,8 +21,6 @@ Install: add to .claude/settings.json:
     }
   }
 """
-from __future__ import annotations
-
 import re
 import sys
 from pathlib import Path
@@ -38,10 +36,14 @@ def main() -> int:
             return 0
         text = _SKILL_PATH.read_text(encoding="utf-8")
         # Strip YAML frontmatter if present (--- delimited block at file start)
-        match = re.match(r"^---\n.*?\n---\n(.*)$", text, re.DOTALL)
+        match = re.match(r"^---\r?\n.*?\r?\n---\r?\n(.*)$", text, re.DOTALL)
         body = match.group(1) if match else text
         # Write as UTF-8 bytes to avoid codec issues on Windows (cp1252 default).
-        sys.stdout.buffer.write(body.encode("utf-8"))
+        out = getattr(sys.stdout, "buffer", None)
+        if out is not None:
+            out.write(body.encode("utf-8"))
+        else:
+            sys.stdout.write(body)  # fallback when stdout is replaced (e.g., StringIO in tests)
         return 0
     except Exception:
         # Per hook spec: never raise out of a hook.

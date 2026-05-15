@@ -15,8 +15,6 @@ def test_hook_outputs_skill_body():
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         capture_output=True, text=True, encoding="utf-8",
-        cwd=REPO_ROOT,
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
     )
     assert result.returncode == 0, f"hook failed; stderr: {result.stderr}"
     # Body must contain the canonical sections
@@ -30,8 +28,6 @@ def test_hook_does_not_emit_frontmatter():
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         capture_output=True, text=True, encoding="utf-8",
-        cwd=REPO_ROOT,
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
     )
     # The hook strips the frontmatter block before printing
     assert "name: using-atelier" not in result.stdout
@@ -54,3 +50,28 @@ def test_hook_exits_zero_when_skill_missing(tmp_path):
     )
     # Must NOT block session even if the canonical file is missing
     assert result.returncode == 0, f"hook returned non-zero on missing skill; stderr: {result.stderr}"
+
+
+def test_hook_strips_frontmatter_with_crlf_line_endings(tmp_path):
+    """Hook strips frontmatter even when SKILL.md has CRLF line endings (Windows checkout)."""
+    # Create a fake atelier root with a CRLF-encoded SKILL.md
+    skill_dir = tmp_path / "skills" / "using-atelier"
+    skill_dir.mkdir(parents=True)
+    crlf_content = "---\r\nname: using-atelier\r\ndescription: Test\r\n---\r\n# Body\r\n## Trigger contract\r\nContent here\r\n"
+    (skill_dir / "SKILL.md").write_bytes(crlf_content.encode("utf-8"))
+
+    (tmp_path / "hooks").mkdir()
+    target_hook = tmp_path / "hooks" / "session_start.py"
+    target_hook.write_text(HOOK_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(target_hook)],
+        capture_output=True, text=True, encoding="utf-8",
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0
+    # Frontmatter must be stripped even with CRLF
+    assert "name: using-atelier" not in result.stdout, (
+        f"frontmatter leaked into output: {result.stdout[:200]!r}"
+    )
+    assert "## Trigger contract" in result.stdout, "body content missing"

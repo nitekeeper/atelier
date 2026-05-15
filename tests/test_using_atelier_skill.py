@@ -25,6 +25,8 @@ def _parse_phases_from_migration():
     since the guidance table includes a row for handoff:complete).
     """
     text = MIGRATION_003.read_text(encoding="utf-8")
+    # Strip SQL line comments to avoid matching commented-out phase rows
+    text = re.sub(r"--[^\n]*", "", text)
     # Find rows like: ('phase:name', 'skill', 'state', 'desc', is_terminal, allow_from_any),
     rows = re.findall(
         r"\(\s*'([^']+)'\s*,\s*'[^']*'\s*,\s*'[^']*'\s*,\s*'[^']*'\s*,\s*([01])\s*,\s*[01]\s*\)",

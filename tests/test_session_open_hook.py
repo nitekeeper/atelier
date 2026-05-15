@@ -292,26 +292,18 @@ class TestGetPhaseGuidance:
         monkeypatch.setattr(session_open, "_USING_ATELIER_PATH", skill_path)
         assert session_open.get_phase_guidance("nonexistent:phase") is None
 
-    def test_missing_skill_file_returns_none(self, tmp_path):
+    def test_missing_skill_file_returns_none(self, tmp_path, monkeypatch):
         """If SKILL.md is missing, returns None without raising."""
-        orig = session_open._USING_ATELIER_PATH
-        try:
-            session_open._USING_ATELIER_PATH = tmp_path / "no_such_file.md"
-            result = session_open.get_phase_guidance("design:open")
-        finally:
-            session_open._USING_ATELIER_PATH = orig
+        monkeypatch.setattr(session_open, "_USING_ATELIER_PATH", tmp_path / "no_such_file.md")
+        result = session_open.get_phase_guidance("design:open")
         assert result is None
 
-    def test_malformed_skill_file_returns_none(self, tmp_path):
+    def test_malformed_skill_file_returns_none(self, tmp_path, monkeypatch):
         """If SKILL.md has no Phase guidance section, returns None."""
         fake = tmp_path / "SKILL.md"
         fake.write_text("# No phase guidance here\n", encoding="utf-8")
-        orig = session_open._USING_ATELIER_PATH
-        try:
-            session_open._USING_ATELIER_PATH = fake
-            result = session_open.get_phase_guidance("design:open")
-        finally:
-            session_open._USING_ATELIER_PATH = orig
+        monkeypatch.setattr(session_open, "_USING_ATELIER_PATH", fake)
+        result = session_open.get_phase_guidance("design:open")
         assert result is None
 
     def test_main_appends_guidance_after_phase_announcement(self, tmp_path, capsys):

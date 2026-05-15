@@ -1,20 +1,10 @@
 """Git worktree merge-back and cleanup for session close."""
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
-
-def _git(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git"] + args,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=check,
-    )
+from scripts.git_utils import git as _git
 
 
 def detect_worktree(cwd: Path) -> tuple[bool, str]:
@@ -33,7 +23,8 @@ def get_current_branch(cwd: Path) -> str:
 def parse_main_worktree(cwd: Path) -> tuple[str, str]:
     """Return (main_worktree_path, base_branch) from the first entry in worktree list."""
     result = _git(["worktree", "list", "--porcelain"], cwd)
-    blocks = result.stdout.strip().split("\n\n")
+    normalised = result.stdout.replace("\r\n", "\n").replace("\r", "\n")
+    blocks = normalised.strip().split("\n\n")
     main_block = blocks[0]
     worktree_path = ""
     branch = ""
@@ -56,7 +47,8 @@ def merge_back(worktree_dir: Path) -> None:
     delete the worktree and its branch.
 
     Aborts with clear instructions on merge conflict, dirty main workspace,
-    or detached HEAD.
+    or detached HEAD. Unlike auto_merge_to_main, this does NOT stash — the
+    developer is present and should handle their own workspace state.
     """
     # ── Detect ───────────────────────────────────────────────────────────────
     is_worktree, _ = detect_worktree(worktree_dir)

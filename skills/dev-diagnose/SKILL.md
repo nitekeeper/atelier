@@ -8,11 +8,15 @@ None — callable from any phase.
 
 ## Procedure
 
-1. Get the current phase before entering diagnose:
+1. Check the phase gate:
    ```
-   python atelier/scripts/workflow.py get-phase <project_id>
+   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:diagnose
    ```
-   Record this as `<pre_diagnose_phase>`.
+   Parse the JSON output `{"allowed": bool, "current_phase": str, "required_phase": str|null, "reason": str}`.
+   For this skill `allowed` is always `true` (no gate configured). Record `current_phase` for later use, then proceed to the next step.
+   - If the project does not exist, stop and tell the user to create one first with `project:create`.
+
+   *Note: the `current_phase` from check-gate is recorded as `<pre_diagnose_phase>` for restoration on resolve (step 13).*
 
 2. Write a session entry to record the diagnose entry and save the interrupted phase:
    ```

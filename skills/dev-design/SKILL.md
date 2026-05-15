@@ -8,7 +8,12 @@ No gate — requires only that a project exists. Run `project:read <project_id>`
 
 ## Procedure
 
-1. Run: `python atelier/scripts/workflow.py check-gate <project_id> dev:design`
+1. Check the phase gate:
+   ```
+   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:design
+   ```
+   Parse the JSON output `{"allowed": bool, "current_phase": str, "required_phase": str|null, "reason": str}`.
+   For this skill `allowed` is always `true` (no gate configured). Record `current_phase` for later use, then proceed to the next step.
    - If the project does not exist, stop and tell the user to create one first with `project:create`.
 
 2. **Grilling phase** — ask one question at a time until all of the following are unambiguous:

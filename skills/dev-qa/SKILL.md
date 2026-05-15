@@ -8,8 +8,25 @@ Requires `security:approved`.
 
 ## Procedure
 
-1. Run: `python atelier/scripts/workflow.py check-gate <project_id> dev:qa`
-   If the gate fails, state the current phase and stop.
+1. Check the phase gate:
+   ```
+   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:qa
+   ```
+   Parse the JSON output: `{"allowed": bool, "current_phase": str, "required_phase": str, "reason": str}`.
+
+   **If `allowed` is `true`**: record `current_phase` and proceed to the next step.
+
+   **If `allowed` is `false`** (soft wall): ask the user:
+
+   > *"Project is at `<current_phase>`. This skill normally requires `<required_phase>`. Proceed anyway? (yes / no)"*
+
+   - On **yes**: run:
+     ```
+     python atelier/scripts/workflow.py <db_path> log-bypass <project_id> dev:qa <current_phase> <required_phase>
+     ```
+     Optionally append `--agent <agent_id>` and `--note "<reason>"`. Then proceed to the next step.
+   - On **no**: stop. Tell the user:
+     > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
 2. Advance phase: `python atelier/scripts/workflow.py advance <project_id> qa:open`
 

@@ -94,6 +94,51 @@ def advance_phase(db_path: str, project_id: int, new_phase: str) -> str:
     return new_phase
 
 
+def log_bypass(
+    db_path: str,
+    project_id: int,
+    skill: str,
+    current_phase: str,
+    required_phase: str,
+    agent_id: str | None = None,
+    note: str | None = None,
+) -> int:
+    """Log a soft-wall bypass to phase_bypasses.
+
+    Idempotent: if a row with the same (project, skill, current_phase,
+    required_phase) was written within the last 60 seconds, returns that
+    row's id instead of inserting a new one.
+
+    Race condition note: the idempotency check uses a SELECT-then-INSERT
+    pattern. Under concurrent access, two callers could both pass the SELECT
+    before either INSERTs, resulting in duplicate rows. This race is
+    intentionally tolerated — soft-wall bypass logging is a rare, low-stakes
+    event and deduplication is best-effort. The window check prevents the
+    common case of accidental double-invocation from the same caller.
+    """
+    from contextlib import closing
+    with closing(get_connection(db_path)) as conn:
+        existing = conn.execute(
+            """SELECT id FROM phase_bypasses
+               WHERE project_id = ? AND skill = ?
+                 AND current_phase = ? AND required_phase = ?
+                 AND bypassed_at >= datetime('now', '-60 seconds')
+               LIMIT 1""",
+            (project_id, skill, current_phase, required_phase),
+        ).fetchone()
+        if existing is not None:
+            return existing[0]
+
+        cursor = conn.execute(
+            """INSERT INTO phase_bypasses
+                 (project_id, skill, current_phase, required_phase, agent_id, note)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (project_id, skill, current_phase, required_phase, agent_id, note),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
 def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
     """Check whether `skill` is in-phase for `project_id`.
 
@@ -145,16 +190,27 @@ def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
 
 
 if __name__ == "__main__":
-    db_path = ".ai/atelier.db"
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
+    # Usage: workflow.py <db_path> <command> [args...]
+    # db_path defaults to .ai/atelier.db when invoked without it for backward
+    # compatibility, but all CLI tests pass it explicitly.
+    if len(sys.argv) >= 3 and not sys.argv[1].startswith("-") and sys.argv[2] in (
+        "get-phase", "advance", "check-gate", "force-phase", "transitions", "log-bypass"
+    ):
+        db_path = sys.argv[1]
+        cmd = sys.argv[2]
+        _argv_offset = 3
+    else:
+        db_path = ".ai/atelier.db"
+        cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
+        _argv_offset = 2
 
     if cmd == "get-phase":
-        project_id = int(sys.argv[2])
+        project_id = int(sys.argv[_argv_offset])
         print(get_phase(db_path, project_id))
 
     elif cmd == "advance":
-        project_id = int(sys.argv[2])
-        new_phase = sys.argv[3]
+        project_id = int(sys.argv[_argv_offset])
+        new_phase = sys.argv[_argv_offset + 1]
         try:
             result = advance_phase(db_path, project_id, new_phase)
             print(f"Phase advanced to: {result}")
@@ -167,8 +223,8 @@ if __name__ == "__main__":
     # gate-not-met → exit 1. Consumers must parse the JSON `allowed` field.
     # Documented in CHANGELOG via Task 14.
     elif cmd == "check-gate":
-        project_id = int(sys.argv[2])
-        skill = sys.argv[3]
+        project_id = int(sys.argv[_argv_offset])
+        skill = sys.argv[_argv_offset + 1]
         result = check_gate(db_path, project_id, skill)
         print(json.dumps({
             "allowed": result.allowed,
@@ -179,16 +235,41 @@ if __name__ == "__main__":
         sys.exit(0)  # always 0 -- "not allowed" is no longer an error
 
     elif cmd == "force-phase":
-        project_id = int(sys.argv[2])
-        new_phase = sys.argv[3]
+        project_id = int(sys.argv[_argv_offset])
+        new_phase = sys.argv[_argv_offset + 1]
         update_project(db_path, project_id, phase=new_phase)
         print(f"Phase forced to: {new_phase}")
 
     elif cmd == "transitions":
-        from_phase = sys.argv[2]
+        from_phase = sys.argv[_argv_offset]
         transitions = get_valid_transitions(db_path, from_phase)
         print(f"From '{from_phase}': {transitions}")
 
+    elif cmd == "log-bypass":
+        project_id = int(sys.argv[_argv_offset])
+        skill = sys.argv[_argv_offset + 1]
+        current_phase = sys.argv[_argv_offset + 2]
+        required_phase = sys.argv[_argv_offset + 3]
+        agent_id = None
+        note = None
+        i = _argv_offset + 4
+        while i < len(sys.argv):
+            if sys.argv[i] == "--agent":
+                agent_id = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == "--note":
+                note = sys.argv[i + 1]
+                i += 2
+            else:
+                print(f"Unknown argument: {sys.argv[i]}", file=sys.stderr)
+                sys.exit(1)
+        bypass_id = log_bypass(
+            db_path, project_id, skill, current_phase, required_phase,
+            agent_id=agent_id, note=note,
+        )
+        print(json.dumps({"bypass_id": bypass_id}, sort_keys=True))
+        sys.exit(0)
+
     else:
-        print("Commands: get-phase, advance, check-gate, force-phase, transitions")
+        print("Commands: get-phase, advance, check-gate, force-phase, transitions, log-bypass")
         sys.exit(1)

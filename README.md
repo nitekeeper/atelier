@@ -94,6 +94,6 @@ pytest tests/
 
 - All deterministic operations are Python scripts in `scripts/`
 - Skill files in `skills/` are thin wrappers — they invoke scripts and handle language tasks only
-- State lives in `memex.db` (8 tables) and `.ai/work.md` (session state)
+- State lives in `memex.db` (9 tables, including `phase_bypasses` for soft-wall audit) and `.ai/work.md` (session state)
 - WAL mode required on `memex.db` for safe concurrent agent writes
 - Workspace commands require tmux via `libtmux`

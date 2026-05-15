@@ -38,7 +38,7 @@ All deterministic operations live in `scripts/`. Each script is callable from th
 | `scripts/documents.py` | Project document CRUD |
 | `scripts/tasks.py` | Task CRUD + assign/claim/complete flow |
 | `scripts/meetings.py` | Meeting CRUD + `.ai/meetings/*.md` file write |
-| `scripts/workflow.py` | Phase gate enforcement + transition validation |
+| `scripts/workflow.py` | Phase gate check (advisory, returns `GateResult`) + transition validation + bypass logging |
 | `scripts/workspace.py` | tmux session/window/pane management via libtmux |
 
 ## Skills
@@ -49,7 +49,7 @@ Skills live in `skills/<name>/SKILL.md`. Each is a thin wrapper that invokes a P
 
 1. **Never skip the Memex check.** Every command must verify Memex is present before acting.
 2. **Python scripts do the work.** Skill files handle only irreducible language tasks. Do not re-implement logic that belongs in a script.
-3. **Phase gates are strict.** `workflow.py` enforces valid transitions. Do not bypass them.
+3. **Phase gates are advisory.** `workflow.py:check_gate` returns a `GateResult`; it does NOT raise on phase mismatch. When `allowed=False`, follow the bypass-confirm-log flow documented in `skills/using-atelier/SKILL.md` (Bypass procedure). `workflow.py:advance_phase` still validates the transition graph and DOES raise `WorkflowError` on invalid transitions.
 4. **WAL mode is required.** All DB connections go through `scripts/db.py`. Never connect directly.
 5. **Meetings write two places.** `meetings.py` writes both a DB record and `.ai/meetings/YYYY-MM-DD-<slug>.md`. Both must stay in sync.
 

@@ -14,14 +14,15 @@
 ### Changed
 - `workflow.py check_gate` now returns a `GateResult` dataclass instead of raising `WorkflowError` on phase mismatch. Out-of-phase invocations no longer block — skills ask the user to confirm a bypass.
 - CLI `workflow.py check-gate` now outputs JSON (`{"allowed", "current_phase", "required_phase", "reason"}`) and always exits 0. **Breaking change**: scripts using shell exit code to detect gate-not-met must migrate to parsing the JSON `allowed` field.
-- All dev skills' (`dev:design`, `dev:plan`, `dev:tdd`, `dev:review`, `dev:security`, `dev:qa`, `dev:diagnose`, `dev:handoff`) step 1 updated for the new JSON-based `check-gate` contract and (where walled) the bypass flow.
+- All dev skills' (`dev:design`, `dev:plan`, `dev:tdd`, `dev:review`, `dev:security`, `dev:qa`, `dev:diagnose`, `dev:handoff`) step 1 updated for the new JSON-based `check-gate` contract and (where walled) the bypass flow. Note: skills shipped as one file per concern (`dev:tdd` is one skill handling all three TDD states red/green/refactor, etc.) — the v0.1.0 CHANGELOG entry listing them separately reflected an earlier naming intent.
 - `hooks/session_open.py` now appends phase-specific guidance derived from `using-atelier/SKILL.md`'s phase guidance table.
 
 ### Deprecated
 - `WorkflowError` raise behavior in `check_gate` on phase mismatch. The exception class itself remains for `workflow.py advance` invalid-transition errors and for `check_gate` invalid-project-id errors.
 
 ### Migration notes
-- Run `python scripts/migrate.py .ai/atelier.db` to apply migration 005.
+- Run `python scripts/migrate.py .ai/memex.db` to apply migration 005.
+- **Note:** Atelier scripts currently default to two different DB paths (`workflow.py`/`session.py` use `.ai/atelier.db`; CRUD scripts and `migrate.py` use `.ai/memex.db`). This inconsistency predates v0.2.0 and is tracked as a follow-up cleanup. Ensure both paths are migrated if your project has both.
 - Install the SessionStart hook per README "Auto-trigger setup" section.
 - (Optional) paste `templates/CLAUDE-snippet.md` into your project's `CLAUDE.md`.
 

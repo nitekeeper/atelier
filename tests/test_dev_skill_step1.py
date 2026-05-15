@@ -36,3 +36,26 @@ def test_walled_skill_implements_bypass_flow(skill):
     assert "Proceed anyway" in text, f"{skill}: must include the bypass prompt"
     assert "log-bypass" in text, f"{skill}: must call log-bypass on confirmed bypass"
     assert "advance" in text.lower(), f"{skill}: must tell user how to advance phase on bypass=no"
+
+
+@pytest.mark.parametrize("skill", UNWALLED + WALLED)
+def test_step_1_check_gate_uses_db_path_arg(skill):
+    """The check-gate invocation must include <db_path> as positional arg."""
+    path = SKILLS_DIR / skill / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    # Find the check-gate line(s) and verify <db_path> appears before check-gate
+    import re
+    matches = re.findall(r"workflow\.py\s+(\S+)\s+check-gate", text)
+    assert matches, f"{skill}: no check-gate invocation found"
+    for arg in matches:
+        assert arg == "<db_path>" or arg.startswith("<"), (
+            f"{skill}: check-gate first positional arg should be <db_path>, got '{arg}'"
+        )
+
+
+def test_diagnose_step_1_records_pre_diagnose_phase():
+    """dev-diagnose step 1 must document that current_phase is recorded as pre_diagnose_phase."""
+    text = (SKILLS_DIR / "dev-diagnose" / "SKILL.md").read_text(encoding="utf-8")
+    assert "pre_diagnose_phase" in text, (
+        "dev-diagnose: step 1 must record current_phase as <pre_diagnose_phase> for restoration"
+    )

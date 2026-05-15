@@ -18,7 +18,6 @@ None — callable from any phase.
 
    Determine current project state:
    ```
-   python atelier/scripts/workflow.py get-phase <project_id>
    python atelier/scripts/tasks.py list --project_id <project_id>
    ```
 
@@ -32,7 +31,7 @@ None — callable from any phase.
    ```
 
    Where:
-   - `<current_phase>`: result of `workflow.py get-phase`
+   - `<current_phase>`: captured from check-gate JSON response in step 1
    - `<status>`: `in-progress`, `blocked`, or `complete`
    - `--next-action`: specific imperative sentence naming the exact action (e.g. "Run `dev:tdd` for project 3")
    - `--blocking-reason` is required when `<status>` is `blocked`

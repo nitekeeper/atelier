@@ -1182,6 +1182,6 @@ def seed(db_path: str) -> tuple[int, int]:
 
 
 if __name__ == "__main__":
-    db_path = sys.argv[1] if len(sys.argv) > 1 else ".ai/atelier.db"
+    db_path = sys.argv[1] if len(sys.argv) > 1 else ".ai/memex.db"
     roles_added, agents_added = seed(db_path)
     print(f"Seeded: {roles_added} role(s), {agents_added} agent(s) added to {db_path}")

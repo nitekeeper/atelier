@@ -403,13 +403,13 @@ def project_at_phase(tmp_path):
     """Factory fixture: returns a callable that sets up a project at a given phase.
 
     Returns (db_path_str, project_id_str, working_dir).
-    The working_dir contains .ai/atelier.db and .ai/active_project as
+    The working_dir contains .ai/memex.db and .ai/active_project as
     session.py expects.
     """
     def _make(phase: str):
         ai_dir = tmp_path / ".ai"
         ai_dir.mkdir(exist_ok=True)
-        db_path = str(ai_dir / "atelier.db")
+        db_path = str(ai_dir / "memex.db")
         pid = _make_project_at_phase(db_path, phase)
         (ai_dir / "active_project").write_text(pid, encoding="utf-8")
         return db_path, pid, tmp_path

@@ -303,3 +303,20 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert not exp.exists()
+
+    def test_commit_cli_roundtrip(self, tmp_path, bare_remote, source_repo):
+        from scripts.self_improve import clone_repo, create_branch
+        dest = tmp_path / "clone"
+        clone_repo(str(bare_remote), dest)
+        create_branch(dest, 3)
+        (dest / "new.txt").write_text("change")
+        result = subprocess.run(
+            ["python", str(Path.cwd() / "scripts" / "self_improve.py"),
+             "commit", str(dest), "3", "test subject",
+             "Decision one|Decision two", "Dr. A|Dr. B", "5",
+             "docs/self-improve/minutes.md"],
+            capture_output=True, text=True,
+            env={**__import__("os").environ, "PYTHONPATH": str(Path.cwd())},
+        )
+        assert result.returncode == 0
+        assert "Committed." in result.stdout

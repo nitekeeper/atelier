@@ -137,8 +137,6 @@ if __name__ == "__main__":
     import json
     import sys
 
-    from scripts.destructive_check import get_diff, detect_destructive
-
     repo_dir = Path.cwd()
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 
@@ -153,6 +151,7 @@ if __name__ == "__main__":
         print(f"BRANCH={branch}")
 
     elif cmd == "check-destructive":
+        from scripts.destructive_check import get_diff, detect_destructive
         clone = Path(sys.argv[2])
         diff = get_diff(clone)
         issues = detect_destructive(diff, clone)
@@ -203,6 +202,7 @@ if __name__ == "__main__":
     else:
         print(
             "Commands: clone, check-destructive, run-tests, commit, "
-            "push-merge, cleanup, pull"
+            "push-merge, cleanup, pull",
+            file=sys.stderr,
         )
         sys.exit(1)

@@ -1,11 +1,9 @@
 """Atelier self-improvement cycle — git infrastructure CLI."""
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -107,10 +105,11 @@ def push_branch(clone_dir: Path, branch: str) -> None:
 
 
 def auto_merge_to_main(repo_dir: Path, branch: str) -> None:
-    """Merge branch into main in the production repo and push."""
+    """Merge branch into main in the production repo and push. Leaves repo on main."""
+    _git(["fetch", "origin"], repo_dir)
     _git(["checkout", "main"], repo_dir)
     _git(["pull", "origin", "main"], repo_dir)
-    _git(["merge", "--no-ff", branch, "-m", f"Merge {branch} into main"], repo_dir)
+    _git(["merge", "--no-ff", f"origin/{branch}", "-m", f"Merge {branch} into main"], repo_dir)
     _git(["push", "origin", "main"], repo_dir)
 
 

@@ -77,7 +77,7 @@ def test_phase_guidance_table_has_all_phases(skill_data):
 def test_dev_arc_references_canonical_flow(skill_data):
     """Dev arc section must mention every phase in canonical order."""
     _, body = skill_data
-    arc_section_match = re.search(r"## Dev arc\r?\n(.*?)(?=\r?\n## )", body, re.DOTALL)
+    arc_section_match = re.search(r"## Dev arc\r?\n(.*?)(?=\r?\n## |\Z)", body, re.DOTALL)
     assert arc_section_match is not None, "Dev arc section not found or improperly closed"
     arc = arc_section_match.group(1)
     for phase in ["design", "plan", "tdd", "review", "security", "qa", "handoff"]:

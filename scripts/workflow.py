@@ -8,7 +8,9 @@ and PHASE_GATES dicts.
 from __future__ import annotations
 
 import json
+import os
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from scripts.db import get_connection
 from scripts.projects import update_project
@@ -94,51 +96,6 @@ def advance_phase(db_path: str, project_id: int, new_phase: str) -> str:
     return new_phase
 
 
-def log_bypass(
-    db_path: str,
-    project_id: int,
-    skill: str,
-    current_phase: str,
-    required_phase: str,
-    agent_id: str | None = None,
-    note: str | None = None,
-) -> int:
-    """Log a soft-wall bypass to phase_bypasses.
-
-    Idempotent: if a row with the same (project, skill, current_phase,
-    required_phase) was written within the last 60 seconds, returns that
-    row's id instead of inserting a new one.
-
-    Race condition note: the idempotency check uses a SELECT-then-INSERT
-    pattern. Under concurrent access, two callers could both pass the SELECT
-    before either INSERTs, resulting in duplicate rows. This race is
-    intentionally tolerated — soft-wall bypass logging is a rare, low-stakes
-    event and deduplication is best-effort. The window check prevents the
-    common case of accidental double-invocation from the same caller.
-    """
-    from contextlib import closing
-    with closing(get_connection(db_path)) as conn:
-        existing = conn.execute(
-            """SELECT id FROM phase_bypasses
-               WHERE project_id = ? AND skill = ?
-                 AND current_phase = ? AND required_phase = ?
-                 AND bypassed_at >= datetime('now', '-60 seconds')
-               LIMIT 1""",
-            (project_id, skill, current_phase, required_phase),
-        ).fetchone()
-        if existing is not None:
-            return existing[0]
-
-        cursor = conn.execute(
-            """INSERT INTO phase_bypasses
-                 (project_id, skill, current_phase, required_phase, agent_id, note)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (project_id, skill, current_phase, required_phase, agent_id, note),
-        )
-        conn.commit()
-        return cursor.lastrowid
-
-
 def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
     """Check whether `skill` is in-phase for `project_id`.
 
@@ -187,6 +144,51 @@ def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
             "Bypass is available — confirm with user before proceeding."
         ),
     )
+
+
+def log_bypass(
+    db_path: str,
+    project_id: int,
+    skill: str,
+    current_phase: str,
+    required_phase: str,
+    agent_id: str | None = None,
+    note: str | None = None,
+) -> int:
+    """Log a soft-wall bypass to phase_bypasses.
+
+    Idempotent: if a row with the same (project, skill, current_phase,
+    required_phase) was written within the last 60 seconds, returns that
+    row's id instead of inserting a new one.
+
+    Race condition note: the idempotency check uses a SELECT-then-INSERT
+    pattern. Under concurrent access, two callers could both pass the SELECT
+    before either INSERTs, resulting in duplicate rows. This race is
+    intentionally tolerated — soft-wall bypass logging is a rare, low-stakes
+    event and deduplication is best-effort. The window check prevents the
+    common case of accidental double-invocation from the same caller.
+    """
+    with closing(get_connection(db_path)) as conn:
+        existing = conn.execute(
+            """SELECT id FROM phase_bypasses
+               WHERE project_id = ? AND skill = ?
+                 AND current_phase = ? AND required_phase = ?
+                 AND bypassed_at >= datetime('now', '-60 seconds')
+               LIMIT 1""",
+            (project_id, skill, current_phase, required_phase),
+        ).fetchone()
+        if existing is not None:
+            return existing[0]
+
+        cursor = conn.execute(
+            """INSERT INTO phase_bypasses
+                 (project_id, skill, current_phase, required_phase, agent_id, note)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (project_id, skill, current_phase, required_phase, agent_id, note),
+        )
+        conn.commit()
+        assert cursor.lastrowid is not None, "INSERT returned no rowid"
+        return cursor.lastrowid
 
 
 if __name__ == "__main__":
@@ -254,11 +256,16 @@ if __name__ == "__main__":
         note = None
         i = _argv_offset + 4
         while i < len(sys.argv):
-            if sys.argv[i] == "--agent":
-                agent_id = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--note":
-                note = sys.argv[i + 1]
+            if sys.argv[i] in ("--agent", "--note"):
+                if i + 1 >= len(sys.argv):
+                    print(f"{sys.argv[i]} requires a value", file=sys.stderr)
+                    sys.exit(1)
+                flag_name = sys.argv[i]
+                flag_value = sys.argv[i + 1]
+                if flag_name == "--agent":
+                    agent_id = flag_value
+                else:
+                    note = flag_value
                 i += 2
             else:
                 print(f"Unknown argument: {sys.argv[i]}", file=sys.stderr)

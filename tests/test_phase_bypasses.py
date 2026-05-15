@@ -1,4 +1,6 @@
 """Tests for the phase_bypasses table and the log-bypass workflow command."""
+import json
+import os
 import subprocess
 import sys
 from contextlib import closing
@@ -77,12 +79,73 @@ def test_log_bypass_cli_writes_row(project):
          "design:open", "design:approved",
          "--agent", "test-agent", "--note", "from CLI"],
         capture_output=True, text=True, encoding="utf-8",
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
     )
     assert result.returncode == 0, f"stderr: {result.stderr}"
 
+    output = json.loads(result.stdout)
+    bypass_id = output["bypass_id"]
+    assert isinstance(bypass_id, int) and bypass_id > 0
+
     with closing(get_connection(db_path)) as conn:
         row = conn.execute(
-            "SELECT skill, agent_id, note FROM phase_bypasses WHERE project_id = ?",
-            (pid,),
+            "SELECT skill, agent_id, note FROM phase_bypasses WHERE id = ?",
+            (bypass_id,),
         ).fetchone()
     assert row == ("dev:plan", "test-agent", "from CLI")
+
+
+def test_log_bypass_with_none_defaults_stores_null(project):
+    """When agent_id and note are omitted, the row stores SQL NULL for both."""
+    db_path, pid = project
+    bypass_id = workflow.log_bypass(
+        db_path, pid, skill="dev:plan",
+        current_phase="design:open", required_phase="design:approved",
+    )
+    with closing(get_connection(db_path)) as conn:
+        row = conn.execute(
+            "SELECT agent_id, note FROM phase_bypasses WHERE id = ?", (bypass_id,)
+        ).fetchone()
+    assert row[0] is None, "agent_id should be SQL NULL"
+    assert row[1] is None, "note should be SQL NULL"
+
+
+def test_log_bypass_creates_new_row_after_idempotency_window(project):
+    """Two bypasses separated by >60s produce distinct rows (idempotency window expired)."""
+    db_path, pid = project
+    first = workflow.log_bypass(
+        db_path, pid, skill="dev:plan",
+        current_phase="design:open", required_phase="design:approved",
+    )
+    # Backdate the first row past the 60-second window
+    with closing(get_connection(db_path)) as conn:
+        conn.execute(
+            "UPDATE phase_bypasses SET bypassed_at = datetime('now', '-61 seconds') WHERE id = ?",
+            (first,),
+        )
+        conn.commit()
+    second = workflow.log_bypass(
+        db_path, pid, skill="dev:plan",
+        current_phase="design:open", required_phase="design:approved",
+    )
+    assert second != first, "after window expiry, should create new row"
+    with closing(get_connection(db_path)) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM phase_bypasses WHERE project_id = ?", (pid,)
+        ).fetchone()[0]
+    assert count == 2
+
+
+def test_log_bypass_cli_missing_flag_value(project):
+    """--agent without a value exits 1 and prints error to stderr."""
+    db_path, pid = project
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "workflow.py"),
+         db_path, "log-bypass", str(pid), "dev:plan",
+         "design:open", "design:approved",
+         "--agent"],
+        capture_output=True, text=True, encoding="utf-8",
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+    )
+    assert result.returncode == 1
+    assert "requires a value" in result.stderr

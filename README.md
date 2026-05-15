@@ -13,9 +13,21 @@ A shared workspace for a human developer and a multi-agent system working togeth
 ```bash
 # 1. Install runtime dependencies
 pip install -r requirements.txt
+```
 
-# 2. Run the DB migration (from your project root)
+```bash
+# 2. Run the DB migration (from your project root) — macOS/Linux
 PYTHONPATH=/path/to/atelier python /path/to/atelier/scripts/migrate.py .ai/memex.db
+```
+
+```powershell
+# Windows (PowerShell)
+$env:PYTHONPATH = 'C:\path\to\atelier'; python C:\path\to\atelier\scripts\migrate.py .ai\memex.db
+```
+
+```cmd
+:: Windows (CMD)
+set PYTHONPATH=C:\path\to\atelier && python C:\path\to\atelier\scripts\migrate.py .ai\memex.db
 ```
 
 That's it. The migration is idempotent — safe to re-run.

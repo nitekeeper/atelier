@@ -11,7 +11,16 @@ Atelier is a shared workspace for a human developer and a multi-agent system wor
 1. Install runtime dependencies: `pip install -r requirements.txt`
 2. Run the DB migration from the **target project root**:
    ```bash
+   # macOS/Linux
    PYTHONPATH=/path/to/atelier python /path/to/atelier/scripts/migrate.py .ai/memex.db
+   ```
+   ```powershell
+   # Windows (PowerShell)
+   $env:PYTHONPATH = 'C:\path\to\atelier'; python C:\path\to\atelier\scripts\migrate.py .ai\memex.db
+   ```
+   ```cmd
+   :: Windows (CMD)
+   set PYTHONPATH=C:\path\to\atelier && python C:\path\to\atelier\scripts\migrate.py .ai\memex.db
    ```
    - `PYTHONPATH` must point to the Atelier root — the scripts use `from scripts.db import ...` internally
    - Default db path: `.ai/memex.db`

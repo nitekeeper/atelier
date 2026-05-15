@@ -7,18 +7,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-# ── Internal git helper ────────────────────────────────────────────────────
-
-def _git(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git"] + args,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=check,
-    )
+from scripts.git_utils import git as _git
 
 
 # ── Public functions ───────────────────────────────────────────────────────
@@ -59,10 +48,11 @@ def run_tests_in_clone(clone_dir: Path) -> tuple[bool, int]:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
         check=False,
     )
     count = 0
-    for line in result.stdout.splitlines():
+    for line in (result.stdout or "").splitlines():
         m = re.search(r"(\d+) passed", line)
         if m:
             count = int(m.group(1))
@@ -115,7 +105,7 @@ def auto_merge_to_main(repo_dir: Path, branch: str) -> None:
     _git(["pull", "origin", "main"], repo_dir)
 
     stash_result = _git(["stash", "push", "--include-untracked", "-m", "auto-stash before self-improve merge"], repo_dir, check=False)
-    stashed = "No local changes" not in stash_result.stdout and stash_result.returncode == 0
+    stashed = stash_result.stdout.strip().startswith("Saved working directory") and stash_result.returncode == 0
 
     try:
         _git(["merge", "--no-ff", f"origin/{branch}", "-m", f"Merge {branch} into main"], repo_dir)

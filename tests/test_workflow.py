@@ -7,7 +7,7 @@ from scripts.agents import create_agent
 from scripts.projects import create_project
 from scripts.workflow import (
     get_phase, advance_phase, check_gate,
-    get_valid_transitions, is_allow_from_any, WorkflowError,
+    get_valid_transitions, is_allow_from_any, WorkflowError, GateResult,
 )
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
@@ -48,19 +48,31 @@ def test_advance_phase_invalid_transition_raises(db_path, project_id):
 
 
 def test_check_gate_no_gate_always_passes(db_path, project_id):
+    """check_gate on an ungated skill returns GateResult(allowed=True, required_phase=None)."""
     # dev:design has no gate — passes even at design:open
-    check_gate(db_path, project_id, "dev:design")
+    result = check_gate(db_path, project_id, "dev:design")
+    assert isinstance(result, GateResult)
+    assert result.allowed is True
+    assert result.required_phase is None
 
 
 def test_check_gate_passes_when_met(db_path, project_id):
+    """check_gate returns allowed=True when the project satisfies the required phase."""
     advance_phase(db_path, project_id, "design:approved")
-    check_gate(db_path, project_id, "dev:plan")
+    result = check_gate(db_path, project_id, "dev:plan")
+    assert isinstance(result, GateResult)
+    assert result.allowed is True
+    assert result.required_phase == "design:approved"
 
 
 def test_check_gate_fails_when_not_met(db_path, project_id):
+    """check_gate returns GateResult(allowed=False) instead of raising WorkflowError."""
     # project is at design:open, dev:plan requires design:approved
-    with pytest.raises(WorkflowError, match="Gate not met"):
-        check_gate(db_path, project_id, "dev:plan")
+    result = check_gate(db_path, project_id, "dev:plan")
+    assert isinstance(result, GateResult)
+    assert result.allowed is False
+    assert result.current_phase == "design:open"
+    assert result.required_phase == "design:approved"
 
 
 def test_diagnose_allow_from_any_is_true(db_path):

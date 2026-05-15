@@ -7,9 +7,25 @@ and PHASE_GATES dicts.
 """
 from __future__ import annotations
 
+import json
 import sys
+from dataclasses import dataclass
 from scripts.db import get_connection
 from scripts.projects import update_project
+
+
+@dataclass(frozen=True)
+class GateResult:
+    """Result of a phase gate check.
+
+    `allowed=True` means the skill may proceed immediately.
+    `allowed=False` means a soft wall is hit; caller should ask user
+    to confirm bypass and then call `log_bypass`.
+    """
+    allowed: bool
+    current_phase: str
+    required_phase: str | None
+    reason: str
 
 
 class WorkflowError(Exception):
@@ -73,9 +89,12 @@ def advance_phase(db_path: str, project_id: int, new_phase: str) -> str:
     return new_phase
 
 
-def check_gate(db_path: str, project_id: int, skill: str) -> None:
-    """Raise WorkflowError if the project's current phase does not satisfy
-    the skill's entry gate. Passes silently if no gate is configured (NULL).
+def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
+    """Check whether `skill` is in-phase for `project_id`.
+
+    Returns a GateResult describing the outcome. Does NOT raise on mismatch.
+    Callers decide whether to proceed (typically: confirm with user, log bypass,
+    then proceed).
     """
     conn = get_connection(db_path)
     try:
@@ -85,15 +104,35 @@ def check_gate(db_path: str, project_id: int, skill: str) -> None:
     finally:
         conn.close()
 
-    if row is None or row[0] is None:
-        return  # No gate configured — always passes
-
-    required_phase = row[0]
     current = get_phase(db_path, project_id)
-    if current != required_phase:
-        raise WorkflowError(
-            f"Gate not met: project is at '{current}', requires '{required_phase}'"
+
+    # No row, or row's required_phase is NULL -> no gate
+    if row is None or row[0] is None:
+        return GateResult(
+            allowed=True,
+            current_phase=current,
+            required_phase=None,
+            reason="No gate configured for this skill",
         )
+
+    required = row[0]
+    if current == required:
+        return GateResult(
+            allowed=True,
+            current_phase=current,
+            required_phase=required,
+            reason=f"Project at '{current}' satisfies the gate",
+        )
+
+    return GateResult(
+        allowed=False,
+        current_phase=current,
+        required_phase=required,
+        reason=(
+            f"Project is at '{current}', this skill normally requires '{required}'. "
+            "Bypass is available — confirm with user before proceeding."
+        ),
+    )
 
 
 if __name__ == "__main__":
@@ -117,12 +156,14 @@ if __name__ == "__main__":
     elif cmd == "check-gate":
         project_id = int(sys.argv[2])
         skill = sys.argv[3]
-        try:
-            check_gate(db_path, project_id, skill)
-            print(f"Gate passed. Current phase: {get_phase(db_path, project_id)}")
-        except WorkflowError as e:
-            print(f"Gate failed: {e}")
-            sys.exit(1)
+        result = check_gate(db_path, project_id, skill)
+        print(json.dumps({
+            "allowed": result.allowed,
+            "current_phase": result.current_phase,
+            "required_phase": result.required_phase,
+            "reason": result.reason,
+        }))
+        sys.exit(0)  # always 0 -- "not allowed" is no longer an error
 
     elif cmd == "force-phase":
         project_id = int(sys.argv[2])

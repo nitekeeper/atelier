@@ -3,6 +3,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from scripts.db import get_connection
 
+MIGRATIONS_DIR: Path = Path(__file__).parent.parent / "migrations"
+
 
 def apply_migrations(db_path: str, migrations_dir: Path) -> None:
     conn = get_connection(db_path)

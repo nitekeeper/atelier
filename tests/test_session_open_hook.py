@@ -273,7 +273,7 @@ class TestGetPhaseGuidance:
             "## Other section\nfoo\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(session_open, "_INITIATE_PATH", skill_path)
+        monkeypatch.setattr(session_open, "_EXECUTE_PATH", skill_path)
         result = session_open.get_phase_guidance("design:open")
         assert result is not None
         assert "Continue grilling" in result
@@ -289,12 +289,12 @@ class TestGetPhaseGuidance:
             "| `design:open` | foo | `bar` |\n\n## Other\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(session_open, "_INITIATE_PATH", skill_path)
+        monkeypatch.setattr(session_open, "_EXECUTE_PATH", skill_path)
         assert session_open.get_phase_guidance("nonexistent:phase") is None
 
     def test_missing_skill_file_returns_none(self, tmp_path, monkeypatch):
         """If SKILL.md is missing, returns None without raising."""
-        monkeypatch.setattr(session_open, "_INITIATE_PATH", tmp_path / "no_such_file.md")
+        monkeypatch.setattr(session_open, "_EXECUTE_PATH", tmp_path / "no_such_file.md")
         result = session_open.get_phase_guidance("design:open")
         assert result is None
 
@@ -302,7 +302,7 @@ class TestGetPhaseGuidance:
         """If SKILL.md has no Phase guidance section, returns None."""
         fake = tmp_path / "SKILL.md"
         fake.write_text("# No phase guidance here\n", encoding="utf-8")
-        monkeypatch.setattr(session_open, "_INITIATE_PATH", fake)
+        monkeypatch.setattr(session_open, "_EXECUTE_PATH", fake)
         result = session_open.get_phase_guidance("design:open")
         assert result is None
 
@@ -443,12 +443,12 @@ def test_hook_appends_phase_guidance(project_at_phase, phase, expected_skill):
 
 
 def test_hook_handles_missing_using_atelier_gracefully(project_at_phase, tmp_path):
-    """If initiate/SKILL.md is missing, hook still announces phase."""
+    """If execute/SKILL.md is missing, hook still announces phase."""
     import shutil
     db_path, pid, cwd = project_at_phase("design:open")
 
     # Create an isolated directory tree in tmp_path with the hook and scripts
-    # copied, but NO skills/initiate/SKILL.md — that's the test condition.
+    # copied, but NO skills/execute/SKILL.md — that's the test condition.
     (tmp_path / "hooks").mkdir(exist_ok=True)
     (tmp_path / "skills").mkdir(exist_ok=True)
     shutil.copytree(str(REPO_ROOT / "scripts"), str(tmp_path / "scripts"))

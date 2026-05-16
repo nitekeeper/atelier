@@ -11,7 +11,7 @@ HOOK_PATH = REPO_ROOT / "hooks" / "session_start.py"
 
 
 def test_hook_outputs_skill_body():
-    """Hook stdout contains the body of initiate/SKILL.md."""
+    """Hook stdout contains the body of execute/SKILL.md."""
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         capture_output=True, text=True, encoding="utf-8",
@@ -32,13 +32,13 @@ def test_hook_does_not_emit_frontmatter():
         env={**os.environ, "PYTHONUTF8": "1"},
     )
     # The hook strips the frontmatter block before printing
-    assert "name: initiate" not in result.stdout
+    assert "name: execute" not in result.stdout
     assert not result.stdout.lstrip().startswith("---")
 
 
 def test_hook_exits_zero_when_skill_missing(tmp_path):
-    """If initiate/SKILL.md is missing, hook exits 0 (does not block session)."""
-    # Create a fake atelier root in tmp_path with NO skills/initiate/SKILL.md
+    """If execute/SKILL.md is missing, hook exits 0 (does not block session)."""
+    # Create a fake atelier root in tmp_path with NO skills/execute/SKILL.md
     (tmp_path / "skills").mkdir()
     (tmp_path / "hooks").mkdir()
     target_hook = tmp_path / "hooks" / "session_start.py"
@@ -57,7 +57,7 @@ def test_hook_exits_zero_when_skill_missing(tmp_path):
 def test_hook_strips_frontmatter_with_crlf_line_endings(tmp_path):
     """Hook strips frontmatter even when SKILL.md has CRLF line endings (Windows checkout)."""
     # Create a fake atelier root with a CRLF-encoded SKILL.md
-    skill_dir = tmp_path / "skills" / "initiate"
+    skill_dir = tmp_path / "skills" / "execute"
     skill_dir.mkdir(parents=True)
     crlf_content = "---\r\nname: initiate\r\ndescription: Test\r\n---\r\n# Body\r\n## Trigger contract\r\nContent here\r\n"
     (skill_dir / "SKILL.md").write_bytes(crlf_content.encode("utf-8"))
@@ -74,7 +74,7 @@ def test_hook_strips_frontmatter_with_crlf_line_endings(tmp_path):
     )
     assert result.returncode == 0
     # Frontmatter must be stripped even with CRLF
-    assert "name: initiate" not in result.stdout, (
+    assert "name: execute" not in result.stdout, (
         f"frontmatter leaked into output: {result.stdout[:200]!r}"
     )
     assert "## Trigger contract" in result.stdout, "body content missing"

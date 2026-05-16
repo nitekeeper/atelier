@@ -1,11 +1,11 @@
-"""Validates skills/initiate/SKILL.md is parseable and complete."""
+"""Validates skills/execute/SKILL.md is parseable and complete."""
 import re
 from pathlib import Path
 
 import pytest
 import yaml
 
-SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "initiate" / "SKILL.md"
+SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "execute" / "SKILL.md"
 MIGRATION_003 = Path(__file__).resolve().parent.parent / "migrations" / "003_phases.sql"
 
 
@@ -40,7 +40,7 @@ def test_frontmatter_has_required_keys(skill_data):
     which Claude Code auto-derives from the skill directory)."""
     frontmatter, _ = skill_data
     assert "name" not in frontmatter, (
-        "initiate frontmatter must NOT include 'name' "
+        "execute frontmatter must NOT include 'name' "
         "(Claude Code auto-derives the skill name from the directory)"
     )
     assert "description" in frontmatter

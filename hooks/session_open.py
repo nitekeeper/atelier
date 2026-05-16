@@ -31,7 +31,7 @@ from pathlib import Path
 # hooks/ is at atelier-root/hooks/; scripts/ is at atelier-root/scripts/.
 _HOOK_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _HOOK_DIR.parent / "scripts"
-_INITIATE_PATH = _HOOK_DIR.parent / "skills" / "initiate" / "SKILL.md"
+_EXECUTE_PATH = _HOOK_DIR.parent / "skills" / "execute" / "SKILL.md"
 
 # Flag to prevent announcing more than once per session.
 _FLAG_NAME = ".atelier-session-announced"
@@ -98,14 +98,14 @@ def build_announcement(project_id: str, session: dict | None) -> str:
 
 
 def get_phase_guidance(phase: str) -> str | None:
-    """Read the phase guidance table from initiate/SKILL.md and return the
+    """Read the phase guidance table from execute/SKILL.md and return the
     line for `phase`, formatted for hook output. Returns None on any failure
     (missing file, table not found, phase not present) -- caller should not
     block the session on a None return."""
     try:
-        if not _INITIATE_PATH.exists():
+        if not _EXECUTE_PATH.exists():
             return None
-        text = _INITIATE_PATH.read_text(encoding="utf-8")
+        text = _EXECUTE_PATH.read_text(encoding="utf-8")
         # CRLF-tolerant section match
         section = re.search(r"## Phase guidance\r?\n(.*?)(?=\r?\n## )", text, re.DOTALL)
         if not section:

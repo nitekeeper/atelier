@@ -20,6 +20,19 @@ def get_current_branch(cwd: Path) -> str:
     return result.stdout.strip()
 
 
+def classify_status(porcelain_output: str) -> tuple[list[str], list[str], list[str]]:
+    """Split `git status --porcelain` lines into (dirty_tracked, untracked_claude, untracked_other).
+
+    `.claude/` is Claude Code's worktree-local harness storage — not project files,
+    so it is broken out from the other-untracked bucket and ignored by sync flows.
+    """
+    lines = porcelain_output.splitlines()
+    dirty = [l for l in lines if not l.startswith("??")]
+    untracked_claude = [l for l in lines if l.startswith("?? ") and l[3:].startswith(".claude/")]
+    untracked_other = [l for l in lines if l.startswith("?? ") and not l[3:].startswith(".claude/")]
+    return dirty, untracked_claude, untracked_other
+
+
 def parse_main_worktree(cwd: Path) -> tuple[str, str]:
     """Return (main_worktree_path, base_branch) from the first entry in worktree list."""
     result = _git(["worktree", "list", "--porcelain"], cwd)
@@ -89,10 +102,7 @@ def merge_back(worktree_dir: Path) -> None:
         sys.exit(1)
 
     main_status = _git(["status", "--porcelain"], main_path)
-    status_lines = main_status.stdout.splitlines()
-    dirty_lines = [l for l in status_lines if not l.startswith("??")]
-    untracked_claude = [l for l in status_lines if l.startswith("?? ") and l[3:].startswith(".claude/")]
-    untracked_other = [l for l in status_lines if l.startswith("?? ") and not l[3:].startswith(".claude/")]
+    dirty_lines, untracked_claude, untracked_other = classify_status(main_status.stdout)
 
     if dirty_lines or untracked_other:
         print(

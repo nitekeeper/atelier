@@ -128,6 +128,48 @@ def pull_main(repo_dir: Path) -> None:
     _git(["pull", "origin", "main"], repo_dir)
 
 
+def sync_worktree_with_main(worktree_dir: Path) -> str:
+    """Fast-forward the worktree's branch to main when safe.
+
+    Classifies the worktree's `git status --porcelain` into three buckets:
+      * tracked-dirty → skip (ff-only would clobber unstaged work)
+      * untracked under .claude/ → safe; .claude/ is harness state, not project files
+      * untracked elsewhere → warn but still attempt ff-only; git surfaces collisions
+
+    Returns a human-readable status string; never raises.
+    """
+    from scripts.worktree import get_current_branch, classify_status
+
+    wt_branch = get_current_branch(worktree_dir)
+    status = _git(["status", "--porcelain"], worktree_dir, check=False)
+    dirty, _untracked_claude, untracked_other = classify_status(status.stdout)
+
+    if dirty:
+        return (
+            f"Note: Worktree branch '{wt_branch}' has uncommitted tracked changes — "
+            f"skipping sync with main.\n"
+            f"To sync manually once your working tree is clean:\n"
+            f"  git -C {worktree_dir} merge --ff-only main"
+        )
+
+    prefix = ""
+    if untracked_other:
+        prefix = (
+            f"Warning: {len(untracked_other)} untracked file(s) outside .claude/ in worktree; "
+            f"attempting ff-only sync anyway.\n"
+        )
+
+    ff = _git(["merge", "--ff-only", "main"], worktree_dir, check=False)
+    if ff.returncode == 0:
+        return f"{prefix}Worktree branch '{wt_branch}' fast-forwarded to main."
+    return (
+        f"{prefix}Note: Worktree branch '{wt_branch}' fast-forward to main failed "
+        f"(diverged commits or collision with untracked files).\n"
+        f"To sync with main manually:\n"
+        f"  git -C {worktree_dir} merge main"
+    )
+
+
 if __name__ == "__main__":
     # Usage patterns:
     #   python scripts/self_improve.py clone <cycle_n>
@@ -195,25 +237,7 @@ if __name__ == "__main__":
             pull_main(repo_dir)
             print(f"Merged {branch} into main and pulled.")
             if _is_wt:
-                from scripts.worktree import get_current_branch
-                wt_branch = get_current_branch(_cwd)
-                wt_status = _git(["status", "--porcelain"], _cwd, check=False)
-                if wt_status.stdout.strip():
-                    print(
-                        f"Note: Worktree branch '{wt_branch}' has uncommitted changes — skipping sync with main.\n"
-                        f"To sync manually once your working tree is clean:\n"
-                        f"  git -C {_cwd} merge --ff-only main"
-                    )
-                else:
-                    ff = _git(["merge", "--ff-only", "main"], _cwd, check=False)
-                    if ff.returncode == 0:
-                        print(f"Worktree branch '{wt_branch}' fast-forwarded to main.")
-                    else:
-                        print(
-                            f"Note: Worktree branch '{wt_branch}' has local commits — fast-forward not possible.\n"
-                            f"To sync with main manually:\n"
-                            f"  git -C {_cwd} merge main"
-                        )
+                print(sync_worktree_with_main(_cwd))
         else:
             print(f"Branch {branch} pushed. Awaiting human approval to merge.")
 

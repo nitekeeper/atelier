@@ -267,6 +267,65 @@ class TestAutoMergeToMain:
         assert "Merge" in result.stdout
 
 
+# ── sync_worktree_with_main ───────────────────────────────────────────────
+
+@pytest.fixture
+def worktree_behind_main(tmp_path, bare_remote, source_repo):
+    """A linked worktree on a feature branch that is 1 commit behind main.
+
+    Returns (main_repo, worktree_path). Calling sync_worktree_with_main(worktree)
+    on a clean worktree must fast-forward it to main's HEAD.
+    """
+    wt_path = tmp_path / "worktree"
+    _git(["worktree", "add", "-b", "claude/wt-test", str(wt_path)], source_repo)
+    # Advance main by one commit, leaving the worktree branch behind
+    (source_repo / "advance.txt").write_text("main has moved\n")
+    _git(["add", "."], source_repo)
+    _git(["commit", "-m", "advance main"], source_repo)
+    return source_repo, wt_path
+
+
+class TestSyncWorktreeWithMain:
+    def test_clean_worktree_fast_forwards(self, worktree_behind_main):
+        from scripts.self_improve import sync_worktree_with_main
+        _main, wt = worktree_behind_main
+        msg = sync_worktree_with_main(wt)
+        assert "fast-forwarded to main" in msg
+        assert (wt / "advance.txt").exists()
+
+    def test_untracked_claude_only_still_fast_forwards(self, worktree_behind_main):
+        from scripts.self_improve import sync_worktree_with_main
+        _main, wt = worktree_behind_main
+        (wt / ".claude").mkdir()
+        (wt / ".claude" / "session.json").write_text("{}")
+        msg = sync_worktree_with_main(wt)
+        assert "fast-forwarded to main" in msg
+        assert "Warning" not in msg  # .claude/ is silently ignored
+        assert (wt / "advance.txt").exists()
+
+    def test_untracked_other_warns_but_still_fast_forwards(self, worktree_behind_main):
+        from scripts.self_improve import sync_worktree_with_main
+        _main, wt = worktree_behind_main
+        (wt / "scratch.tmp").write_text("local note")
+        msg = sync_worktree_with_main(wt)
+        assert "Warning" in msg
+        assert "fast-forwarded to main" in msg
+        assert (wt / "advance.txt").exists()
+        # Untracked file is preserved
+        assert (wt / "scratch.tmp").read_text() == "local note"
+
+    def test_tracked_dirty_skips_sync(self, worktree_behind_main):
+        from scripts.self_improve import sync_worktree_with_main
+        _main, wt = worktree_behind_main
+        # Modify a tracked file
+        (wt / "README.md").write_text("# Atelier (locally modified)\n")
+        msg = sync_worktree_with_main(wt)
+        assert "skipping sync" in msg
+        assert "uncommitted tracked changes" in msg
+        # main's new file must NOT have arrived
+        assert not (wt / "advance.txt").exists()
+
+
 # ── cleanup_experiment ────────────────────────────────────────────────────
 
 class TestCleanupExperiment:

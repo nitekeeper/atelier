@@ -56,8 +56,8 @@ Atelier ships two kinds of agent-facing markdown:
 
 | Location | Discoverable by Claude Code? | Audience | Count |
 |---|---|---|---|
-| `skills/<name>/SKILL.md` | Yes — exposed as `/atelier:<name>` slash commands | Humans + Claude | 5 (load, save, ingest, execute, self-improve) |
-| `internal/<name>/SKILL.md` | No — plain markdown procedure files | Agents/subagents only, reached by reading the file | 22 (13 dev-* + 9 CRUD) |
+| `skills/<name>/SKILL.md` | Yes — exposed as `/atelier:<name>` slash commands | Humans + Claude | 4 (load, save, ingest, execute) |
+| `internal/<name>/SKILL.md` | No — plain markdown procedure files | Agents/subagents only, reached by reading the file | 23 (13 dev-* + 9 CRUD + self-improve) |
 
 Public skills wrap session lifecycle and the methodology entry. Internal procedures hold the dev arc (design → plan → tdd → review → security → qa → handoff) and project DB CRUD. Agents reach the internal procedures by reading the file via the Read tool, then following the steps inline — `execute` is the routing index that tells the agent which internal file to read for the current phase.
 

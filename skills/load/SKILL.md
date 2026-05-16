@@ -21,7 +21,7 @@ Call `load` at the start of every session, before any other action.
 
    - If **exactly one** project exists: use it automatically. Announce: "Found project: **[name]** (ID [id], phase: [phase])."
    - If **multiple** exist: display the list (id, name, phase) and ask the user: "Which project are you resuming?" Wait for a response, then confirm: "Resuming **[name]** (ID [id], phase: [phase]). Correct? (yes/no)"
-   - If **none** exist: announce "No projects found. Run `project:create` to set up a project first." Stop.
+   - If **none** exist: announce "No projects found. Run `internal/project/SKILL.md` (`create`) to set up a project first." Stop.
 
 2. **Read the latest session.**
    Run:

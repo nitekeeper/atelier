@@ -50,9 +50,18 @@ All deterministic operations live in `scripts/`. Each script is callable from th
 | `scripts/workflow.py` | Phase gate check (advisory, returns `GateResult`) + transition validation + bypass logging |
 | `scripts/workspace.py` | tmux session/window/pane management via libtmux |
 
-## Skills
+## Skills and procedures (two-directory split)
 
-Skills live in `skills/<name>/SKILL.md`. Each is a thin wrapper that invokes a Python script and handles language tasks (grilling, summarizing, generating documents). Invoke via the `Skill` tool.
+Atelier ships two kinds of agent-facing markdown:
+
+| Location | Discoverable by Claude Code? | Audience | Count |
+|---|---|---|---|
+| `skills/<name>/SKILL.md` | Yes — exposed as `/atelier:<name>` slash commands | Humans + Claude | 5 (load, save, ingest, using-atelier, self-improve) |
+| `internal/<name>/SKILL.md` | No — plain markdown procedure files | Agents/subagents only, reached by reading the file | 22 (13 dev-* + 9 CRUD) |
+
+Public skills wrap session lifecycle and the methodology entry. Internal procedures hold the dev arc (design → plan → tdd → review → security → qa → handoff) and project DB CRUD. Agents reach the internal procedures by reading the file via the Read tool, then following the steps inline — `using-atelier` is the routing index that tells the agent which internal file to read for the current phase.
+
+Each markdown file is a thin wrapper that invokes a Python script in `scripts/` and handles language tasks (grilling, summarizing, generating documents).
 
 ## Working rules
 
@@ -79,13 +88,13 @@ When the methodology changes, edit only `skills/using-atelier/SKILL.md`. The hoo
 
 ## Soft walls
 
-Phase gates (in `skill_gates` table) are advisory, not enforced. `workflow.py check_gate` returns a `GateResult` describing whether the current phase satisfies the gate; it never raises on phase mismatch (it CAN raise `WorkflowError` for unknown `project_id` — a programming error, not a soft-wall concern). Skills are responsible for the bypass-confirm-log flow when `allowed=False`. Bypasses are recorded in `phase_bypasses` and surfaced by `dev:handoff` retros.
+Phase gates (in `skill_gates` table) are advisory, not enforced. `workflow.py check_gate` returns a `GateResult` describing whether the current phase satisfies the gate; it never raises on phase mismatch (it CAN raise `WorkflowError` for unknown `project_id` — a programming error, not a soft-wall concern). Skills are responsible for the bypass-confirm-log flow when `allowed=False`. Bypasses are recorded in `phase_bypasses` and surfaced by `internal/dev-handoff/SKILL.md` retros.
 
 Hard rule: **never reintroduce raising in `check_gate` for phase mismatch.** If a downstream change makes the soft-wall flow feel insufficient, fix it at the policy layer (the `using-atelier` bypass procedure), not by re-walling the gate.
 
 ## Skill frontmatter convention
 
-Every skill at `skills/<name>/SKILL.md` MUST carry YAML frontmatter with a `description` (the routing trigger contract for Claude Code's plugin marketplace):
+Every public skill at `skills/<name>/SKILL.md` MUST carry YAML frontmatter with a `description` (the routing trigger contract for Claude Code's plugin marketplace):
 
 ```yaml
 ---
@@ -95,23 +104,14 @@ description: Use when <trigger condition> — <effect summary>.
 
 Do NOT include a `name:` field. Per Anthropic's plugin docs, Claude Code automatically derives the slash command as `/<plugin-name>:<dir-name>` from `.claude-plugin/plugin.json`'s `name` field plus the skill's directory name.
 
-### Two tiers: human-invocable vs Claude-only
+Internal procedure files at `internal/<name>/SKILL.md` may keep frontmatter (description) for documentation but it is not read by Claude Code (these files are not registered as plugin skills). Agents reach them by reading the file directly.
 
-Most atelier skills are invoked by agents/subagents through `using-atelier`'s routing or by other skills' procedures — humans don't type them directly. These set `user-invocable: false`:
+### Adding a new procedure
 
-```yaml
----
-description: Use to create, list, update, or complete tasks in the current Atelier project.
-user-invocable: false
----
-```
-
-Effect: hidden from the `/atelier:` slash-command autocomplete; description still loaded into Claude's context so agents/subagents can find and route to them. This is Anthropic's canonical pattern for "skill exists, agents use it, isn't a direct human command" — see the skills docs section on `user-invocable`.
-
-**5 public skills (human types them directly):** `load`, `save`, `ingest`, `using-atelier`, `self-improve` — session lifecycle + methodology entry + improvement cycle.
-
-**22 internal skills (`user-invocable: false`):**
-- 13 dev-* methodology: `dev-design`, `dev-diagnose`, `dev-finish`, `dev-handoff`, `dev-plan`, `dev-qa`, `dev-receive-review`, `dev-review`, `dev-security`, `dev-subagent`, `dev-tdd`, `dev-verify`, `dev-write-skill`
-- 9 CRUD: `agent`, `agent-desk`, `doc`, `meeting`, `project`, `role`, `room`, `task`, `workspace`
-
-When adding a new skill: create the directory, write the SKILL.md with the description-only frontmatter, decide whether it's internal (add `user-invocable: false`) or public (omit the flag), then increment `.claude-plugin/plugin.json`'s `version` field. Re-register in agora afterward via `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.
+1. Decide whether it's a public slash command or an internal procedure invoked by other skills:
+   - **Public:** `skills/<name>/SKILL.md` — appears in `/atelier:` autocomplete. Use for session lifecycle, methodology entry, or commands the human directly types.
+   - **Internal:** `internal/<name>/SKILL.md` — invisible to Claude Code's plugin discovery, reached only via Read tool from another skill's procedure. Use for dev workflow steps and CRUD operations.
+2. Write the SKILL.md with the description-only frontmatter (or add `user-invocable: false` if it's public-discoverable but Claude-only).
+3. If internal, update `skills/using-atelier/SKILL.md` to reference the new file in the Phase guidance table or the appropriate routing section.
+4. Increment `.claude-plugin/plugin.json`'s `version` field.
+5. Re-register in agora afterward: `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.

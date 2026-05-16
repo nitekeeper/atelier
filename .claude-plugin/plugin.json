@@ -1,6 +1,6 @@
 {
   "name": "atelier",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Shared workspace methodology and dev workflow for human-AI development teams",
   "author": {
     "name": "nitekeeper"

@@ -36,10 +36,13 @@ def _parse_phases_from_migration():
 
 
 def test_frontmatter_has_required_keys(skill_data):
-    """Frontmatter must define name=using-atelier and a Use-when description."""
+    """Frontmatter must define a Use-when description (and must NOT include name,
+    which Claude Code auto-derives from the skill directory)."""
     frontmatter, _ = skill_data
-    assert "name" in frontmatter
-    assert frontmatter["name"] == "using-atelier"
+    assert "name" not in frontmatter, (
+        "using-atelier frontmatter must NOT include 'name' "
+        "(Claude Code auto-derives the skill name from the directory)"
+    )
     assert "description" in frontmatter
     assert "Use when" in frontmatter["description"]
 

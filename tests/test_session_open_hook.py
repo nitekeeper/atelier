@@ -327,7 +327,7 @@ class TestGetPhaseGuidance:
         captured = capsys.readouterr()
         assert "design:open" in captured.out
         assert "Recommended next action:" in captured.out
-        assert "dev:design" in captured.out
+        assert "internal/dev-design/SKILL.md" in captured.out
 
     def test_main_no_guidance_when_result_is_none(self, tmp_path, capsys):
         """main() does not print guidance when there is no prior session (result is None)."""
@@ -420,11 +420,11 @@ _HOOK_ENV = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "PYTHONUTF8": "1"}
 
 
 @pytest.mark.parametrize("phase,expected_skill", [
-    ("design:open", "dev:design"),
-    ("plan:approved", "dev:tdd"),
-    ("tdd:clean", "dev:review"),
-    ("review:approved", "dev:security"),
-    ("qa:approved", "dev:finish"),
+    ("design:open", "internal/dev-design/SKILL.md"),
+    ("plan:approved", "internal/dev-tdd/SKILL.md"),
+    ("tdd:clean", "internal/dev-review/SKILL.md"),
+    ("review:approved", "internal/dev-security/SKILL.md"),
+    ("qa:approved", "internal/dev-finish/SKILL.md"),
 ])
 def test_hook_appends_phase_guidance(project_at_phase, phase, expected_skill):
     """For each phase, the hook output mentions the phase and the recommended skill."""

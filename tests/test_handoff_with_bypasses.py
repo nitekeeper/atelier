@@ -3,12 +3,12 @@ from pathlib import Path
 
 import pytest
 
-SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+INTERNAL_DIR = Path(__file__).resolve().parent.parent / "internal"
 
 
 def test_handoff_skill_references_phase_bypasses_query():
     """dev-handoff must query phase_bypasses to surface bypasses in retro."""
-    path = SKILLS_DIR / "dev-handoff" / "SKILL.md"
+    path = INTERNAL_DIR / "dev-handoff" / "SKILL.md"
     text = path.read_text(encoding="utf-8")
     assert "phase_bypasses" in text, (
         "dev-handoff must query phase_bypasses to surface bypasses in retro"
@@ -19,14 +19,14 @@ def test_handoff_skill_references_phase_bypasses_query():
 
 def test_handoff_describes_bypass_section_in_retro():
     """dev-handoff retro must include a Bypasses section."""
-    path = SKILLS_DIR / "dev-handoff" / "SKILL.md"
+    path = INTERNAL_DIR / "dev-handoff" / "SKILL.md"
     text = path.read_text(encoding="utf-8")
     assert "Bypass" in text or "bypass" in text
 
 
 def test_handoff_handles_no_bypasses_gracefully():
     """The retro must describe the empty-bypasses case."""
-    path = SKILLS_DIR / "dev-handoff" / "SKILL.md"
+    path = INTERNAL_DIR / "dev-handoff" / "SKILL.md"
     text = path.read_text(encoding="utf-8")
     # Look for a phrase indicating empty handling
     assert (

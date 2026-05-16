@@ -17,7 +17,10 @@ def test_session_skill_has_frontmatter(skill_name):
     m = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n", text, re.DOTALL)
     assert m, f"{skill_name}: SKILL.md missing YAML frontmatter delimited by ---"
     data = yaml.safe_load(m.group(1))
-    assert data.get("name") == skill_name, f"{skill_name}: frontmatter name mismatch"
+    assert "name" not in data, (
+        f"{skill_name}: frontmatter must NOT include 'name' "
+        "(Claude Code auto-derives the skill name from the directory)"
+    )
     assert "description" in data, f"{skill_name}: description key missing"
     assert "Use when" in data["description"], (
         f"{skill_name}: description must start with 'Use when' trigger phrasing"

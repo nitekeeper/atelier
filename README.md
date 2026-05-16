@@ -92,7 +92,7 @@ pytest tests/
 
 | Category | Skills |
 |---|---|
-| Session | `execute`, `ingest`, `save`, `load` |
+| Session | `run`, `ingest`, `save`, `load` |
 | Dev workflow | `dev:design`, `dev:plan`, `dev:tdd`, `dev:review`, `dev:security`, `dev:qa`, `dev:diagnose`, `dev:handoff` |
 | Projects | `project:create/read/update/delete/list/search` |
 | Documents | `doc:create/read/update/delete/list/search` |

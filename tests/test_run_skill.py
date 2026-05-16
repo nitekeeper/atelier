@@ -1,11 +1,11 @@
-"""Validates skills/execute/SKILL.md is parseable and complete."""
+"""Validates skills/run/SKILL.md is parseable and complete."""
 import re
 from pathlib import Path
 
 import pytest
 import yaml
 
-SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "execute" / "SKILL.md"
+SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "run" / "SKILL.md"
 MIGRATION_003 = Path(__file__).resolve().parent.parent / "migrations" / "003_phases.sql"
 
 

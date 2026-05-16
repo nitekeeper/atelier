@@ -2,7 +2,7 @@
 """
 Atelier SessionStart hook.
 
-Reads skills/execute/SKILL.md and prints its body (frontmatter stripped)
+Reads skills/run/SKILL.md and prints its body (frontmatter stripped)
 to stdout. Claude Code injects stdout as system context for the new session,
 giving the agent the trigger contract and bypass procedure from the first
 user message.
@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 _HOOK_DIR = Path(__file__).resolve().parent
-_SKILL_PATH = _HOOK_DIR.parent / "skills" / "execute" / "SKILL.md"
+_SKILL_PATH = _HOOK_DIR.parent / "skills" / "run" / "SKILL.md"
 
 
 def main() -> int:

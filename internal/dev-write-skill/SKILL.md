@@ -16,7 +16,7 @@ None — callable from any phase.
 
 - Directory: `skills/<name>/` — kebab-case, no `dev:` prefix in the folder name (the prefix is the invocation alias only).
 - File: `skills/<name>/SKILL.md`
-- Frontmatter: add YAML frontmatter (`name:`, `description:`) **only** for session-lifecycle skills (`ingest`, `save`, `load`) or the methodology loader (`execute`). Dev-workflow and CRUD skills omit frontmatter — they are routed through `execute`'s trigger contract, not by description scan. Adding frontmatter to a dev skill creates phantom triggers.
+- Frontmatter: add YAML frontmatter (`name:`, `description:`) **only** for session-lifecycle skills (`ingest`, `save`, `load`) or the methodology loader (`run`). Dev-workflow and CRUD skills omit frontmatter — they are routed through `run`'s trigger contract, not by description scan. Adding frontmatter to a dev skill creates phantom triggers.
 
 ### 2. Required sections (in order)
 
@@ -31,7 +31,7 @@ None — callable from any phase.
 - Each step has exactly one imperative verb. "Read X and decide Y" is two steps.
 - Steps that call a script include the exact command with placeholder tokens (e.g. `<project_id>`).
 - Decision branches are inline (if/else), not deferred to a later step.
-- The bypass procedure for phase-gated skills must be copied verbatim from `execute/SKILL.md` — do not paraphrase it.
+- The bypass procedure for phase-gated skills must be copied verbatim from `run/SKILL.md` — do not paraphrase it.
 - Every output artifact is named: file path, DB record, or phase transition.
 
 ### 4. Self-review gate
@@ -79,7 +79,7 @@ Skill discovery is file-based — no registration script exists. After writing:
 
 - Never add frontmatter to dev-workflow or CRUD skills.
 - Never embed deterministic logic in a skill step — if it can be a Python function, it belongs in `scripts/`.
-- Never paraphrase the bypass procedure — copy it verbatim from `execute/SKILL.md`.
+- Never paraphrase the bypass procedure — copy it verbatim from `run/SKILL.md`.
 - A skill with any ambiguous step must not be committed — fix first.
 - Self-review gate runs before writing the file, not after.
 - Skills that add or modify enforcement behavior (Iron Law, Hard rules) require explicit user review before verification.

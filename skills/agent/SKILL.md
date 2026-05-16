@@ -1,5 +1,6 @@
 ---
 description: Use to create, read, update, delete, list, or search agents (human or AI participants) in Atelier.
+user-invocable: false
 ---
 
 # agent

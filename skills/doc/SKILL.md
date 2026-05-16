@@ -1,5 +1,6 @@
 ---
 description: Use to create, read, update, delete, list, or search documents attached to Atelier projects.
+user-invocable: false
 ---
 
 # doc

@@ -93,6 +93,21 @@ description: Use when <trigger condition> — <effect summary>.
 ---
 ```
 
-Do NOT include a `name:` field. Per Anthropic's plugin docs, Claude Code automatically derives the slash command as `/<plugin-name>:<dir-name>` from `.claude-plugin/plugin.json`'s `name` field plus the skill's directory name. Adding a `name:` field in SKILL.md is redundant.
+Do NOT include a `name:` field. Per Anthropic's plugin docs, Claude Code automatically derives the slash command as `/<plugin-name>:<dir-name>` from `.claude-plugin/plugin.json`'s `name` field plus the skill's directory name.
 
-When adding a new skill: create the directory, write the SKILL.md with the description-only frontmatter above, then increment `.claude-plugin/plugin.json`'s `version` field. Re-register in agora afterward via `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.
+### Two tiers: human-invocable vs Claude-only
+
+Skills that aren't meaningful direct human actions — primarily CRUD operations on the project DB (`agent`, `role`, `doc`, `project`, `task`, `meeting`, `room`, `workspace`, `agent-desk`) — set `user-invocable: false`:
+
+```yaml
+---
+description: Use to create, list, update, or complete tasks in the current Atelier project.
+user-invocable: false
+---
+```
+
+Effect: hidden from the `/atelier:` slash-command autocomplete; description still loaded into Claude's context so `using-atelier` can route to them when the user expresses intent in natural language ("create a task to fix the auth bug"). This is Anthropic's canonical pattern for "skill exists but isn't a direct human action" — see the skills docs section on `user-invocable`.
+
+Tier-1 (human-invocable) skills omit the flag (default `true`): `load`, `save`, `ingest`, `using-atelier`, `self-improve`, and all 13 `dev-*` methodology skills.
+
+When adding a new skill: create the directory, write the SKILL.md with the description-only frontmatter, decide whether it's Claude-only (add `user-invocable: false`) or human-invocable (omit the flag), then increment `.claude-plugin/plugin.json`'s `version` field. Re-register in agora afterward via `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.

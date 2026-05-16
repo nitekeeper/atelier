@@ -1,5 +1,6 @@
 ---
 description: Use to create, join, list, or leave tmux workspaces for multi-agent team sessions.
+user-invocable: false
 ---
 
 # workspace

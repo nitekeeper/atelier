@@ -1,5 +1,6 @@
 ---
 description: Use to create, read, update, delete, list, or search agent roles in Atelier.
+user-invocable: false
 ---
 
 # role

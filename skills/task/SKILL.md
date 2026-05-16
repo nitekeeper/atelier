@@ -1,5 +1,6 @@
 ---
 description: Use to create, assign, claim, update, complete, list, or search tasks in the current Atelier project.
+user-invocable: false
 ---
 
 # task

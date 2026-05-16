@@ -1,5 +1,6 @@
 ---
 description: Use to create, join, list, or close tmux rooms (windows) within a workspace.
+user-invocable: false
 ---
 
 # room

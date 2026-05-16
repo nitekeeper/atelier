@@ -1,5 +1,6 @@
 ---
 description: Use to join or leave a tmux agent desk (pane) within a room.
+user-invocable: false
 ---
 
 # agent-desk

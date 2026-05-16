@@ -75,6 +75,42 @@ class TestGetCurrentBranch:
         assert branch == "claude/wt-1"
 
 
+# ── classify_status ────────────────────────────────────────────────────────
+
+class TestClassifyStatus:
+    def test_empty_input_returns_empty_buckets(self):
+        from scripts.worktree import classify_status
+        dirty, claude, other = classify_status("")
+        assert dirty == []
+        assert claude == []
+        assert other == []
+
+    def test_dirty_tracked_only(self):
+        from scripts.worktree import classify_status
+        out = " M src/foo.py\nA  new.txt\nMM index.html\n"
+        dirty, claude, other = classify_status(out)
+        assert len(dirty) == 3
+        assert claude == []
+        assert other == []
+
+    def test_untracked_claude_isolated_from_other(self):
+        from scripts.worktree import classify_status
+        out = "?? .claude/state.json\n?? .claude/foo/bar.txt\n?? notes.txt\n"
+        dirty, claude, other = classify_status(out)
+        assert dirty == []
+        assert len(claude) == 2
+        assert len(other) == 1
+        assert other[0].endswith("notes.txt")
+
+    def test_mixed_all_three_buckets(self):
+        from scripts.worktree import classify_status
+        out = " M src/foo.py\n?? .claude/x.json\n?? scratch.tmp\n"
+        dirty, claude, other = classify_status(out)
+        assert len(dirty) == 1
+        assert len(claude) == 1
+        assert len(other) == 1
+
+
 # ── parse_main_worktree ───────────────────────────────────────────────────
 
 class TestParseMainWorktree:

@@ -1,5 +1,4 @@
 ---
-name: atelier:dev-review
 description: Use when implementation is complete — examines code for correctness, maintainability, and spec compliance.
 ---
 

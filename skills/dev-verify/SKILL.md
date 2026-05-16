@@ -1,5 +1,4 @@
 ---
-name: atelier:dev-verify
 description: Use when about to claim any work is complete, fixed, or passing — runs the five-step gate before any success assertion.
 ---
 

@@ -1,5 +1,4 @@
 ---
-name: atelier:using-atelier
 description: Use when starting any session in a project that uses Atelier — establishes the trigger contract for new-work requests and the soft-wall bypass procedure.
 ---
 

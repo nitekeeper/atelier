@@ -1,5 +1,4 @@
 ---
-name: atelier:dev-qa
 description: Use when security is approved and deployment is imminent — verifies all gates are clean and acceptance criteria are met.
 ---
 

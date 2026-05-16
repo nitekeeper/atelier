@@ -1,5 +1,4 @@
 ---
-name: atelier:role
 description: Use to create, read, update, delete, list, or search agent roles in Atelier.
 ---
 

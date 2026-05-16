@@ -1,5 +1,4 @@
 ---
-name: atelier:self-improve
 description: Use when improving Atelier's own code, skills, or structure — multi-agent autonomous improvement with isolated clone and unanimous consensus before merging.
 ---
 

@@ -1,5 +1,4 @@
 ---
-name: atelier:agent-desk
 description: Use to join or leave a tmux agent desk (pane) within a room.
 ---
 

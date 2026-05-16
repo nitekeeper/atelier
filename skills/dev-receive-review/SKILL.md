@@ -1,5 +1,4 @@
 ---
-name: atelier:dev-receive-review
 description: Use when review feedback has been posted — evaluates each item, pushes back on factual errors with evidence, implements accepted changes, and requests re-review.
 ---
 

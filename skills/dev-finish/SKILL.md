@@ -1,5 +1,4 @@
 ---
-name: atelier:dev-finish
 description: Use when QA is approved and the work is ready to integrate — guides merge, PR, or abandon with pre-flight checks and phase completion.
 ---
 

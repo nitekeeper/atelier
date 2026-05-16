@@ -85,15 +85,14 @@ Hard rule: **never reintroduce raising in `check_gate` for phase mismatch.** If 
 
 ## Skill frontmatter convention
 
-Every skill at `skills/<name>/SKILL.md` MUST carry YAML frontmatter so Claude Code's plugin marketplace can discover and route it as a slash command:
+Every skill at `skills/<name>/SKILL.md` MUST carry YAML frontmatter with a `description` (the routing trigger contract for Claude Code's plugin marketplace):
 
 ```yaml
 ---
-name: atelier:<skill-name>
 description: Use when <trigger condition> — <effect summary>.
 ---
 ```
 
-The `name` field is plugin-prefixed with a colon separator (`atelier:<skill-name>`) — Claude Code uses this as the slash-command identifier. The `description` is the routing trigger contract for the agent and for Claude Code's autocomplete UI.
+Do NOT include a `name:` field. Per Anthropic's plugin docs, Claude Code automatically derives the slash command as `/<plugin-name>:<dir-name>` from `.claude-plugin/plugin.json`'s `name` field plus the skill's directory name. Adding a `name:` field in SKILL.md is redundant.
 
-When adding a new skill: create the directory, write the SKILL.md with the frontmatter above, then increment `.claude-plugin/plugin.json`'s `version` field. Re-register in agora afterward via `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.
+When adding a new skill: create the directory, write the SKILL.md with the description-only frontmatter above, then increment `.claude-plugin/plugin.json`'s `version` field. Re-register in agora afterward via `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.

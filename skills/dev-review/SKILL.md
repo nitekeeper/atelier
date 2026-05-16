@@ -1,5 +1,6 @@
 ---
 description: Use when implementation is complete — examines code for correctness, maintainability, and spec compliance.
+user-invocable: false
 ---
 
 # dev:review

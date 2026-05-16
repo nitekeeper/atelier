@@ -1,5 +1,6 @@
 ---
 description: Use when executing an approved implementation plan — dispatches fresh subagents per task with two-stage review (spec compliance then code quality).
+user-invocable: false
 ---
 
 # dev:subagent

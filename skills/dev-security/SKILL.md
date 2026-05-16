@@ -1,5 +1,6 @@
 ---
 description: Use when review is approved and before QA — checks for vulnerabilities, exposed secrets, and insecure patterns.
+user-invocable: false
 ---
 
 # dev:security

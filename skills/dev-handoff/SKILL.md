@@ -1,5 +1,6 @@
 ---
 description: Use at the end of any session — records current state to the DB so the next session can resume.
+user-invocable: false
 ---
 
 # dev:handoff

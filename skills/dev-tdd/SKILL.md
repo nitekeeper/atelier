@@ -1,5 +1,6 @@
 ---
 description: Use when implementing a plan task — drives red/green/clean TDD cycles one task at a time.
+user-invocable: false
 ---
 
 # dev:tdd

@@ -97,7 +97,7 @@ Do NOT include a `name:` field. Per Anthropic's plugin docs, Claude Code automat
 
 ### Two tiers: human-invocable vs Claude-only
 
-Skills that aren't meaningful direct human actions — primarily CRUD operations on the project DB (`agent`, `role`, `doc`, `project`, `task`, `meeting`, `room`, `workspace`, `agent-desk`) — set `user-invocable: false`:
+Most atelier skills are invoked by agents/subagents through `using-atelier`'s routing or by other skills' procedures — humans don't type them directly. These set `user-invocable: false`:
 
 ```yaml
 ---
@@ -106,8 +106,12 @@ user-invocable: false
 ---
 ```
 
-Effect: hidden from the `/atelier:` slash-command autocomplete; description still loaded into Claude's context so `using-atelier` can route to them when the user expresses intent in natural language ("create a task to fix the auth bug"). This is Anthropic's canonical pattern for "skill exists but isn't a direct human action" — see the skills docs section on `user-invocable`.
+Effect: hidden from the `/atelier:` slash-command autocomplete; description still loaded into Claude's context so agents/subagents can find and route to them. This is Anthropic's canonical pattern for "skill exists, agents use it, isn't a direct human command" — see the skills docs section on `user-invocable`.
 
-Tier-1 (human-invocable) skills omit the flag (default `true`): `load`, `save`, `ingest`, `using-atelier`, `self-improve`, and all 13 `dev-*` methodology skills.
+**5 public skills (human types them directly):** `load`, `save`, `ingest`, `using-atelier`, `self-improve` — session lifecycle + methodology entry + improvement cycle.
 
-When adding a new skill: create the directory, write the SKILL.md with the description-only frontmatter, decide whether it's Claude-only (add `user-invocable: false`) or human-invocable (omit the flag), then increment `.claude-plugin/plugin.json`'s `version` field. Re-register in agora afterward via `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.
+**22 internal skills (`user-invocable: false`):**
+- 13 dev-* methodology: `dev-design`, `dev-diagnose`, `dev-finish`, `dev-handoff`, `dev-plan`, `dev-qa`, `dev-receive-review`, `dev-review`, `dev-security`, `dev-subagent`, `dev-tdd`, `dev-verify`, `dev-write-skill`
+- 9 CRUD: `agent`, `agent-desk`, `doc`, `meeting`, `project`, `role`, `room`, `task`, `workspace`
+
+When adding a new skill: create the directory, write the SKILL.md with the description-only frontmatter, decide whether it's internal (add `user-invocable: false`) or public (omit the flag), then increment `.claude-plugin/plugin.json`'s `version` field. Re-register in agora afterward via `agora:plugin-register --url https://github.com/nitekeeper/atelier.git`.

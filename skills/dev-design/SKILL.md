@@ -1,5 +1,6 @@
 ---
 description: Use when starting any new project, feature, or initiative — PM agent grills requirements until all design decisions are resolved.
+user-invocable: false
 ---
 
 # dev:design

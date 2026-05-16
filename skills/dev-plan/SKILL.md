@@ -1,5 +1,6 @@
 ---
 description: Use when a design is approved and ready for implementation — translates the design into a concrete task list.
+user-invocable: false
 ---
 
 # dev:plan

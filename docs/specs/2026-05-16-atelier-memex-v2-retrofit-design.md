@@ -687,95 +687,315 @@ This matches the §7 design that "Local mode keeps roles + agents in the project
 
 ## 11. Schema
 
-Atelier's migrations live under `migrations/shared/` (consumed by both backends) and `migrations/local-only/` (consumed only by Local mode). The retrofit ships these additions on top of the existing v1.0.13 schema:
+v1.1.0 is a major version bump with a brand-new bootstrap path: Memex-mode users get a fresh `~/.memex/atelier.db`; Local-mode v1.0.13 users get translated through `scripts/migrate_to_memex.py` (which reads the v1 schema as a parser, not as a migration target). There is no v1.0.13 → v1.1.0 in-place ALTER path. We therefore ship a **clean schema**, not additive migrations stacked on the v1 layout.
 
 ### 11.1 Migration layout
 
 ```
 migrations/shared/
-  001_initial_schema.sql       MODIFIED — drop CREATE TABLE for roles, agents
-  002_sessions.sql             unchanged
-  003_phases.sql               unchanged
-  004_tasks_parallel.sql       unchanged
-  005_soft_walls.sql           unchanged
-  006_index_ids.sql            NEW — index_id columns on indexed tables
-  007_workspaces.sql           NEW — workspaces table + projects.workspace_id FK
-  008_subdomains.sql           NEW — subdomain TEXT columns where applicable
-  009_doc_kinds.sql            NEW — project_documents schema clean-up (type column policy)
+  001_v110_schema.sql          v1.1.0 schema — single file, full DDL, full phase seed
+                               (consumed by both Memex-mode bootstrap and Local-mode setup)
 
 migrations/local-only/
-  100_local_roles_agents.sql   NEW — Local-mode keeps roles + agents in atelier.db
+  050_local_roles_agents.sql   Local-mode-only: roles + agents tables Local needs because
+                               there's no ~/.memex/agents.db to defer to
 ```
 
-Memex-mode bootstrap supplies only `shared/` to `memex:core:create-store`. Local-mode setup supplies both directories in order. The `migrations` tracking table inside each store guarantees idempotency.
+Memex-mode bootstrap supplies only `shared/` to `memex:core:create-store`. Local-mode setup supplies both directories in order. The `migrations` tracking table inside each store guarantees idempotency for future evolution (`002_*`, `003_*`, etc.).
 
-### 11.2 New table — `workspaces`
+The v1.0.13 migrations (`001_initial_schema.sql` through `005_soft_walls.sql`) are **deleted** from the repo. The v1 schema lives only inside `scripts/migrate_to_memex.py`'s legacy reader — a small set of `SELECT`-only queries that know v1's table layout well enough to extract rows for translation.
 
-```sql
--- migrations/shared/007_workspaces.sql
-CREATE TABLE IF NOT EXISTS workspaces (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    slug        TEXT UNIQUE NOT NULL,   -- used in keys per §6.7
-    identity    TEXT UNIQUE NOT NULL,   -- repo_url or realpath(git_root)
-    name        TEXT NOT NULL,          -- human-readable
-    description TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_workspaces_identity ON workspaces(identity);
-
-ALTER TABLE projects ADD COLUMN workspace_id INTEGER REFERENCES workspaces(id);
-ALTER TABLE projects ADD COLUMN slug TEXT;  -- per-workspace project slug; (workspace_id, slug) unique by app convention
-CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_projects_workspace_slug ON projects(workspace_id, slug);
-```
-
-`projects.workspace_id` is nullable temporarily to allow the migration to land on existing data. Bootstrap (§5) backfills NULL workspace_ids by creating a synthetic workspace per distinct existing project, then a later migration can be authored to enforce NOT NULL. v1 of the retrofit accepts the nullable column.
-
-### 11.3 New columns — `subdomain`
+### 11.2 v1.1.0 schema (single file)
 
 ```sql
--- migrations/shared/008_subdomains.sql
-ALTER TABLE tasks              ADD COLUMN subdomain TEXT;
-ALTER TABLE meeting_minutes    ADD COLUMN subdomain TEXT;
-ALTER TABLE project_documents  ADD COLUMN subdomain TEXT;
-CREATE INDEX IF NOT EXISTS idx_tasks_subdomain    ON tasks(subdomain);
-CREATE INDEX IF NOT EXISTS idx_meetings_subdomain ON meeting_minutes(subdomain);
-CREATE INDEX IF NOT EXISTS idx_docs_subdomain     ON project_documents(subdomain);
-```
-
-`projects` and `adr`-flavored docs don't carry subdomain (atomic per §6.4); the column is omitted on those tables.
-
-### 11.4 Schema clean-up — `project_documents`
-
-```sql
--- migrations/shared/009_doc_kinds.sql
--- The existing `type` column carries the kind of document (design/plan/adr/
--- research/postmortem/log). Per §6.4, some of these now ship as their own
--- domain in the Memex Index. The Atelier-side `type` column stays as the
--- finer-grained label; it's also written to `documents.domain` for the
--- promoted kinds, or to `documents.domain = 'project_doc'` for unpromoted
--- kinds (plan, runbook, etc.).
+-- migrations/shared/001_v110_schema.sql
+-- Atelier v1.1.0 schema. Clean redesign for Memex-v2 integration.
 --
--- No DDL change; this migration is documentation only (a comment-only file
--- recorded in the migrations table so future readers see the policy).
-SELECT 1;  -- noop migration; the policy lives in scripts/domain_vocabulary.py
+-- This is THE schema. There is no v1.0.13 → v1.1.0 ALTER path; the
+-- migration replay reads v1 rows via scripts.migrate_to_memex's legacy
+-- reader and translates them into this layout.
+--
+-- Both Memex-mode bootstrap (via memex:core:create-store) and Local-mode
+-- setup consume this file. Local mode additionally consumes
+-- migrations/local-only/050_local_roles_agents.sql.
+
+PRAGMA foreign_keys = ON;
+
+------------------------------------------------------------------------
+-- workspaces — one row per repository on disk
+------------------------------------------------------------------------
+CREATE TABLE workspaces (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug        TEXT UNIQUE NOT NULL,            -- §0.2 slug(), used in keys per §6.7
+    identity    TEXT UNIQUE NOT NULL,            -- repo_url if remote exists else realpath(git_root)
+    name        TEXT NOT NULL,                   -- human-readable, original casing
+    description TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX idx_workspaces_identity ON workspaces(identity);
+
+------------------------------------------------------------------------
+-- projects — logical work efforts within a workspace
+------------------------------------------------------------------------
+CREATE TABLE projects (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+    slug         TEXT NOT NULL,                  -- unique within (workspace_id, slug)
+    name         TEXT NOT NULL,                  -- original casing
+    description  TEXT,
+    phase        TEXT NOT NULL DEFAULT 'design:open',
+    created_by   TEXT NOT NULL,                  -- agents.id string; resolved via Memex agents.db or local agents
+    index_id     TEXT,                           -- ~/.memex/index.db.documents.index_id backlink
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    UNIQUE(workspace_id, slug)
+);
+CREATE INDEX idx_projects_workspace ON projects(workspace_id);
+CREATE INDEX idx_projects_phase     ON projects(phase);
+CREATE INDEX idx_projects_index_id  ON projects(index_id);
+-- NOTE: v1.0.13's `repo` column is REMOVED — workspaces.identity owns that fact.
+
+------------------------------------------------------------------------
+-- project_documents — pointer-rows to markdown files on disk
+------------------------------------------------------------------------
+CREATE TABLE project_documents (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL REFERENCES workspaces(id),     -- denormalized for cross-project query
+    project_id   INTEGER NOT NULL REFERENCES projects(id),
+    domain       TEXT NOT NULL,                  -- design / adr / research / postmortem / log / project_doc (per §6.4)
+    subdomain    TEXT,                           -- plan / runbook / api / data / ... (soft-validated; §6.4)
+    title        TEXT NOT NULL,                  -- original casing
+    filename     TEXT NOT NULL,                  -- relative to workspace_root
+    created_by   TEXT NOT NULL,
+    index_id     TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX idx_docs_workspace  ON project_documents(workspace_id);
+CREATE INDEX idx_docs_project    ON project_documents(project_id);
+CREATE INDEX idx_docs_domain     ON project_documents(domain);
+CREATE INDEX idx_docs_subdomain  ON project_documents(subdomain);
+CREATE INDEX idx_docs_index_id   ON project_documents(index_id);
+-- NOTE: v1.0.13's `type` column is REMOVED. The v1.0.13 type values
+-- (design/plan/adr/research/...) are translated by the legacy reader
+-- into (domain, subdomain) via scripts.domain_vocabulary.TYPE_TO_DOMAIN.
+
+------------------------------------------------------------------------
+-- tasks — atomic work items within a project
+------------------------------------------------------------------------
+CREATE TABLE tasks (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id   INTEGER NOT NULL REFERENCES projects(id),
+    title        TEXT NOT NULL,
+    description  TEXT,
+    subdomain    TEXT,                           -- bug / feature / chore / spike / refactor (soft; §6.4)
+    status       TEXT NOT NULL DEFAULT 'pending',
+    priority     INTEGER DEFAULT 0,
+    notes        TEXT,
+    created_by   TEXT NOT NULL,
+    assigned_to  TEXT,
+    claimed_at   TEXT,
+    completed_at TEXT,
+    index_id     TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX idx_tasks_project    ON tasks(project_id);
+CREATE INDEX idx_tasks_status     ON tasks(status);
+CREATE INDEX idx_tasks_assigned   ON tasks(assigned_to);
+CREATE INDEX idx_tasks_subdomain  ON tasks(subdomain);
+CREATE INDEX idx_tasks_index_id   ON tasks(index_id);
+
+------------------------------------------------------------------------
+-- meeting_minutes — meetings; may be workspace-level (no project)
+------------------------------------------------------------------------
+CREATE TABLE meeting_minutes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+    project_id   INTEGER REFERENCES projects(id),                 -- nullable for workspace-level meetings
+    title        TEXT NOT NULL,
+    date         TEXT NOT NULL,                  -- YYYY-MM-DD per §0.2
+    subdomain    TEXT,                           -- standup / design-review / retro / 1-1 / ... (soft; §6.4)
+    filename     TEXT,                           -- nullable; relative to workspace_root if exported
+    summary      TEXT,
+    decisions    TEXT,
+    created_by   TEXT NOT NULL,
+    index_id     TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX idx_meetings_workspace ON meeting_minutes(workspace_id);
+CREATE INDEX idx_meetings_project   ON meeting_minutes(project_id);
+CREATE INDEX idx_meetings_date      ON meeting_minutes(date);
+CREATE INDEX idx_meetings_subdomain ON meeting_minutes(subdomain);
+CREATE INDEX idx_meetings_index_id  ON meeting_minutes(index_id);
+
+------------------------------------------------------------------------
+-- meeting_participants — join table
+------------------------------------------------------------------------
+CREATE TABLE meeting_participants (
+    meeting_id INTEGER NOT NULL REFERENCES meeting_minutes(id) ON DELETE CASCADE,
+    agent_id   TEXT NOT NULL,
+    PRIMARY KEY (meeting_id, agent_id)
+);
+
+------------------------------------------------------------------------
+-- sessions — PM working memory; one per work session, prunable (Tier 1 storage)
+------------------------------------------------------------------------
+CREATE TABLE sessions (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id       INTEGER NOT NULL REFERENCES workspaces(id),
+    project_id         INTEGER NOT NULL REFERENCES projects(id),
+    agent_id           TEXT NOT NULL,
+    phase              TEXT,
+    pre_diagnose_phase TEXT,
+    current_tasks      TEXT,
+    accomplished       TEXT,
+    next_action        TEXT,
+    status             TEXT NOT NULL DEFAULT 'in-progress'
+                          CHECK(status IN ('in-progress', 'blocked', 'complete')),
+    blocking_reason    TEXT,
+    pm_notes           TEXT,
+    opened_at          TEXT,
+    closed_at          TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
+CREATE INDEX idx_sessions_project   ON sessions(project_id);
+CREATE INDEX idx_sessions_agent     ON sessions(agent_id);
+CREATE INDEX idx_sessions_status    ON sessions(status);
+
+------------------------------------------------------------------------
+-- Phase machine — static catalog tables (identical to v1.0.13 except for inline seed)
+------------------------------------------------------------------------
+CREATE TABLE phases (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT UNIQUE NOT NULL,
+    skill           TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    is_terminal     BOOLEAN NOT NULL DEFAULT FALSE,
+    allow_from_any  BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE phase_transitions (
+    from_phase TEXT NOT NULL REFERENCES phases(name),
+    to_phase   TEXT NOT NULL REFERENCES phases(name),
+    PRIMARY KEY (from_phase, to_phase)
+);
+
+CREATE TABLE skill_gates (
+    skill          TEXT PRIMARY KEY,
+    required_phase TEXT REFERENCES phases(name)
+);
+
+CREATE TABLE phase_bypasses (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  INTEGER NOT NULL REFERENCES projects(id),
+    from_phase  TEXT NOT NULL,
+    to_phase    TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    agent_id    TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_bypasses_project ON phase_bypasses(project_id);
+
+-- Phase seed (19 phases, transitions, skill_gates) inlined from v1.0.13's
+-- 003_phases.sql so a fresh install gets the full catalog in one file.
+INSERT OR IGNORE INTO phases (name, skill, state, description, is_terminal, allow_from_any) VALUES
+    ('design:open',     'dev:design',   'open',     'Grilling and drafting in progress',         0, 0),
+    ('design:approved', 'dev:design',   'approved', 'Design document approved by user',          0, 0),
+    ('plan:open',       'dev:plan',     'open',     'Implementation plan being written',         0, 0),
+    ('plan:approved',   'dev:plan',     'approved', 'Plan approved, ready for TDD',              0, 0),
+    ('tdd:red',         'dev:tdd',      'red',      'Failing tests written',                     0, 0),
+    ('tdd:green',       'dev:tdd',      'green',    'Tests passing with minimal implementation', 0, 0);
+    -- ... (full 19-row seed; verbatim from v1.0.13 003_phases.sql)
+
+-- (INSERT OR IGNORE INTO phase_transitions ...)
+-- (INSERT OR IGNORE INTO skill_gates ...)
 ```
 
-The `type` column policy moves to code (`scripts.domain_vocabulary.TYPE_TO_DOMAIN`) so the source of truth is testable and a future audit can roll up frequencies. SQL-level enforcement (e.g., CHECK constraint) is rejected — it makes future taxonomy evolution into a destructive migration.
+```sql
+-- migrations/local-only/050_local_roles_agents.sql
+-- Local mode owns its own roles + agents tables; Memex mode defers to
+-- ~/.memex/agents.db (§6.5).
 
-### 11.5 Removed from Memex-mode store
+CREATE TABLE roles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT UNIQUE NOT NULL,
+    description TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 
-The Memex-mode `atelier.db` has **no** `roles`/`agents` tables — those live in `~/.memex/agents.db` (§6.5). This is enforced by `migrations/shared/001_initial_schema.sql` having the CREATE TABLE statements stripped. Local mode adds them back via `migrations/local-only/100_local_roles_agents.sql`.
+CREATE TABLE agents (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    role_id    INTEGER NOT NULL REFERENCES roles(id),
+    profile    TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+```
 
-### 11.6 Required columns for Memex Index linkback
+### 11.3 What changed from v1.0.13
 
-Tables that participate in Tier 2 writes need `index_id TEXT` columns (added in `006_index_ids.sql` per Plan 1 Task 5):
+| v1.0.13 | v1.1.0 | Reason |
+|---|---|---|
+| `projects.repo TEXT` | **dropped** | `workspaces.identity` is the single source of truth |
+| `projects.workspace_id` (none) | **added NOT NULL** | Required for two-layer scope |
+| `projects.slug` (none) | **added; unique within workspace** | Per §0.2 slug rules; used in keys |
+| `projects.index_id` (none) | **added** | Memex Index backlink |
+| `project_documents.type TEXT` | **dropped** | Replaced by `(domain, subdomain)`; legacy reader translates |
+| `project_documents.workspace_id` (none) | **added NOT NULL, denormalized** | Cross-workspace queries without a join |
+| `project_documents.domain` (none) | **added NOT NULL** | Per §6.4 |
+| `project_documents.subdomain` (none) | **added; nullable** | Per §6.4 |
+| `project_documents.index_id` (none) | **added** | Memex Index backlink |
+| `tasks.subdomain` (none) | **added; nullable** | Per §6.4 |
+| `tasks.claimed_at` / `completed_at` | **added** | Lifecycle timestamps that v1 packed into `notes` |
+| `tasks.index_id` (none) | **added** | Memex Index backlink |
+| `meeting_minutes.workspace_id` (none) | **added NOT NULL** | Required so workspace-level meetings are representable |
+| `meeting_minutes.project_id` NOT NULL | **made nullable** | Same |
+| `meeting_minutes.subdomain` (none) | **added; nullable** | Per §6.4 |
+| `meeting_minutes.index_id` (none) | **added** | Memex Index backlink |
+| `sessions.workspace_id` (none) | **added NOT NULL** | Cross-project session listing |
+| `roles`, `agents` | **dropped from Memex mode**; preserved in Local mode | Per §6.5 |
 
-- `projects.index_id`
-- `tasks.index_id`
-- `meeting_minutes.index_id`
-- `project_documents.index_id`
+### 11.4 Legacy reader (v1.0.13 → v1.1.0 translation)
+
+`scripts/migrate_to_memex.py` knows v1.0.13's schema by hand-coded query strings, not by running migrations. Pseudocode:
+
+```python
+def read_v1_documents(v1_db_path: Path) -> Iterable[dict]:
+    """Read v1.0.13 project_documents rows, translate to v1.1.0 shape."""
+    con = sqlite3.connect(v1_db_path)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        "SELECT id, project_id, type, title, filename, created_by, "
+        "created_at, updated_at FROM project_documents"
+    ).fetchall()
+    for r in rows:
+        domain, subdomain = TYPE_TO_DOMAIN.get(r["type"], ("project_doc", r["type"]))
+        yield {
+            "v1_id":       r["id"],   # caller maps to new id via translation map
+            "project_id":  r["project_id"],
+            "domain":      domain,
+            "subdomain":   subdomain,
+            "title":       r["title"],
+            "filename":    r["filename"],
+            "created_by":  r["created_by"],
+            "created_at":  r["created_at"],
+            "updated_at":  r["updated_at"],
+        }
+```
+
+Same pattern for `projects`, `tasks`, `meeting_minutes`, `sessions`. The reader has no knowledge of the v1.1.0 schema; it just yields translated dicts that the migrator writes through the v1.1.0 `backend.*` API.
+
+Test coverage for the reader: fixture v1.0.13 DBs with known content, assert every row round-trips correctly.
 
 `workspaces.index_id` is **not** added — workspaces are pure scope containers; they don't carry a Memex Index document. (Open question: should they? Cross-workspace recall on workspace metadata isn't a common query — skip in v1.)
 
@@ -823,7 +1043,7 @@ Wave-based per the user's intent for the implementation plan; this section docum
 | 9 | `key` collisions on same-title same-day docs | §6.7 builds keys from `(workspace, project, domain, date, title, seq)`. The seq allocator queries the Index per write. Tests in §12 verify 50 same-title docs get distinct seqs. |
 | 10 | Workspace/project ambiguity blocks first Atelier command in a new repo | `resolve_scope()` auto-creates the workspace and auto-selects the sole project when there's only one. The prompt only fires on multi-project workspaces — uncommon enough that the friction is acceptable. |
 | 11 | Memex Index doesn't support the metadata filtering / relation traversal Atelier queries assume | §6.10 documents the capability checks. If a capability is missing, Atelier falls back to a two-step query (FTS5 hit → Atelier-side filter via `memex:core:query`); documented in `internal/memex/atelier-search-shims.md`. No hard blocker — just slower queries. |
-| 12 | Migration replay (§8) needs to walk new workspace + project + subdomain columns | Plan 4 migration tasks must order: (a) walk projects, build a synthetic workspace per distinct project, (b) replay projects, (c) replay tasks/meetings/docs in dependency order, (d) populate subdomain from existing `type` column heuristics. Crash-safety unchanged. |
+| 12 | Legacy v1.0.13 → v1.1.0 translation has many shape changes (projects.repo dropped, project_documents.type dropped, workspace_id required, project_id on meetings now nullable) | The legacy reader (§11.4) owns this translation in one place: hand-coded `SELECT` queries against v1's schema, dict outputs that match the v1.1.0 `backend.*` API. The migration loop synthesizes workspaces first, then projects, then dependent rows, recording id translations in-memory. Round-trip fixture tests with known v1 databases pin the contract. |
 
 ## 14. Out of scope (do not implement without spec revision)
 
@@ -846,7 +1066,7 @@ These do not block design approval but are decisions the plan-writer will need t
 5. **Memex-side capability gaps (§6.10)** — Plan 2 Task 3 (reads) is BLOCKED until the three questions in §6.10 are answered by reading Memex's `internal/index/search/SKILL.md`. The plan-writer must add this as a Wave-1 precondition.
 6. **Workspace identity hashing** — `identity` column uses `repo_url` if a remote exists, else `realpath(git_root)`. What if a user clones the same repo to two paths? Treat as one workspace (remote URL match) — but if the repo has no remote yet (fresh `git init`), the two checkouts become two workspaces. Edge case; document the rule, accept the corner.
 7. **Project-switch UX** — `atelier project switch <slug>` is an internal procedure; the user-facing surface could be a flag on `/atelier:load` (`/atelier:load --project oauth-rewrite`) instead of a dedicated skill. Plan 4 picks.
-8. **Existing data backfill on first bootstrap** — users upgrading from v1.0.13 have existing `projects` rows with no `workspace_id`. The §11.2 migration is non-destructive; bootstrap can backfill by inferring one workspace per distinct project (1:1 mapping), preserving v1 semantics. Plan 4 Task 1 (migration) handles this.
+8. **Legacy reader workspace synthesis** — `scripts/migrate_to_memex.py` (§11.4) reads v1.0.13 `projects` rows that have no `workspace_id`. The reader synthesizes one workspace per distinct project's `repo` URL (or per project name if no `repo` was set), writes the workspace first, then writes the project with the new `workspace_id`. v1.0.13 → v1.1.0 mapping is recorded in an in-memory translation table during the migration. Plan 4 Task 1 (migration) implements this.
 
 ## 16. Wave structure (preview for `writing-plans`)
 
@@ -857,9 +1077,11 @@ Wave 0 — Foundations                                       [all parallel]
   - Persistence facade signature (scripts/backend.py skeleton)
   - Mode-detection module
   - Atelier role + agent seed JSON in templates/
-  - migrations/ split: shared/ + local-only/
-  - NEW: workspaces table + projects.workspace_id (migration 007)
-  - NEW: subdomain columns (migration 008)
+  - migrations/shared/001_v110_schema.sql — single-file clean v1.1.0 schema
+        (workspaces + redesigned projects/tasks/meetings/sessions/project_documents +
+        phase machine + phase seed data, all inlined)
+  - migrations/local-only/050_local_roles_agents.sql — Local-mode roles/agents
+  - DELETE: v1.0.13 migrations/001_*.sql through 005_*.sql (no in-place upgrade path)
   - NEW: domain vocabulary + subdomain catalog + type→domain mapping
         (scripts/domain_vocabulary.py + internal/memex/domain-vocabulary.md)
   - NEW: §6.10 Memex-side capability verification — read Memex's
@@ -899,11 +1121,13 @@ Wave 2 — Business-logic rewrites                           [parallel; depends 
 
 Wave 3 — Migration                                         [serial; depends W2]
   - internal/migrate-local-to-memex
+  - scripts/migrate_to_memex.py legacy reader (§11.4) — hand-coded queries
+        against v1.0.13 schema; translates rows to v1.1.0 shape via
+        TYPE_TO_DOMAIN + workspace synthesis
   - Per-project markers (.ai/atelier.migrated, .ai/atelier.local-only)
   - User-prompt UX in the entry skills
   - Crash-safety tests
-  - NEW: workspace backfill for v1.0.13 → v1.1.0 upgrades (one synthetic workspace
-        per distinct project; preserves v1 semantics)
+  - Round-trip fixture tests: known v1.0.13 DB → translated v1.1.0 rows
 
 Wave 4 — Surface + docs                                    [parallel; depends W2]
   - Update .claude-plugin/plugin.json (verify only 4 surfaced skills)

@@ -7,6 +7,100 @@
 
 ---
 
+## 0. Glossary and conventions
+
+This spec uses several terms with project-specific meanings. The definitions here are normative — every later section conforms to them. If a section appears to drift, it's a spec bug; file a fix.
+
+### 0.1 Core terms
+
+| Term | Definition |
+|---|---|
+| **Workspace** | A repository (git root). One repo on disk = one workspace. Identity is `repo_url` if a remote exists, else `realpath(git_root)`. The top-level scope in Atelier; auto-detected from CWD. Stored in `atelier.db.workspaces`. (§10.1) |
+| **Project** | A logical work effort within a workspace. 1..N per workspace; user-managed (explicitly created, switched, listed). The unit that tasks, meetings, and project_documents belong to via `project_id`. Stored in `atelier.db.projects`. (§10.1) |
+| **Scope** | The `(workspace, project)` tuple resolved for the current Atelier command by `resolve_scope()`. Workspace from CWD; project from per-workspace session state with auto-select / prompt fallbacks. (§10.2) |
+| **Mode** | `"memex"` or `"local"` — whether Atelier persists through Memex v2 or through a project-local SQLite. Auto-detected per process; cached for the process lifetime. (§4.2) |
+| **Backend** | The persistence implementation behind the facade. `scripts/backend.py` is mode-dispatched; `scripts/backend_memex.py` and `scripts/backend_local.py` are the two backends. (§4.3) |
+| **Tier** | The kind of write being performed: **Tier 1** = pure-state mutation (Memex Core direct, no Index touch). **Tier 2** = structured-row create/edit (caller-built `librarian_output`, no LLM). **Tier 3** = prose ingest (Librarian subagent dispatch, LLM call). (§6.1–§6.3) |
+| **Tier 2 invariant** | The architectural promise that no Atelier business operation (task/project/meeting/doc create or content edit) ever dispatches the Librarian subagent. Enforced in `backend_memex.py` and tested in §12. |
+| **Domain** | An entry in a small, cross-plugin-stable vocabulary that classifies what kind of thing a row IS. Written to `~/.memex/index.db.documents.domain` so other Memex consumers can filter by it. Atelier's set: `project`, `task`, `meeting`, `design`, `adr`, `research`, `postmortem`, `log`, `project_doc`. (§6.4) |
+| **Subdomain** | A finer-grained classifier inside a domain. Atelier-internal — lives on Atelier-table columns (`tasks.subdomain`, `meeting_minutes.subdomain`, `project_documents.subdomain`). Never written to Memex Index. Soft-validated. (§6.4) |
+| **Type** (legacy) | The free-form `project_documents.type` column from v1.0.13. v1.1.0 keeps the column for back-compat but treats `(domain, subdomain)` as the canonical taxonomy. `scripts/domain_vocabulary.TYPE_TO_DOMAIN` is the migration mapping. (§6.4, §11.4) |
+| **Key** | A human-readable stable identifier for an indexed document. Format: `<workspace_slug>/<project_slug>/<domain>/<date>-<title_slug>-<seq>`. Used in search-result rendering and citations. Memex Index doesn't enforce uniqueness — `index_id` is the unique handle. (§6.7) |
+| **index_id** | A UUIDv7 assigned per indexed document. Globally unique across `~/.memex/index.db.documents`. The cross-document reference handle. |
+| **Searchable** | The text field FTS5 indexes. Composed of `title + body + narrative metadata`, no truncation. If a substring isn't here, no `memex:brain:ask` query can find the document. (§6.8) |
+| **Payload** | The dict of column values Atelier passes to `librarian.write_entry`. Maps 1:1 to the target table's columns. Does NOT include `index_id` — `write_entry` adds that. (§6.2) |
+| **librarian_output** | The classification dict: `{index_id, key, domain, searchable, metadata, relations}`. Built by Atelier (Tier 2) or returned by the Librarian subagent (Tier 3). Validated by Memex's `librarian.validate_output()`. (§6.2) |
+| **target_store / target_table** | The Memex Core store name (`"atelier"`) and table name (`"tasks"`, `"projects"`, …) the row lands in. **Not** the same as `domain` — multiple domains can share a target_table (e.g., `design` and `adr` both → `project_documents`). |
+| **Relations** | Edges in `~/.memex/index.db.relations`. Atelier auto-populates `part_of` (task→project, meeting→project, doc→project) and `supersedes` (content-edit chain). Callers can supply `derives_from`, `decided`, `implements`, `recaps`. (§6.9) |
+| **rel_type** | The label on a relation edge — open-ended TEXT in Memex's schema, but Atelier maintains a stable controlled set: `part_of`, `supersedes`, `derives_from`, `decided`, `implements`, `recaps`. (§6.9) |
+| **Bootstrap** | The idempotent first-run procedure (§5) that seeds Atelier's roles + agent profiles into `~/.memex/agents.db` and creates the `atelier` store via `memex:core:create-store`. Marker at `~/.memex/atelier.bootstrap.json`. |
+| **Raw archive** | Content-addressable storage of original document bodies. `~/.memex/raw/` in Memex mode (managed by Memex's Archivist); `<workspace_root>/.ai/raw/` in Local mode. |
+| **Session state** | `~/.atelier/state.json` — per-workspace pointers to the current project plus timestamps. **Not** to be confused with `sessions` (the Atelier table). (§10.3) |
+| **Sessions** (table) | The `atelier.db.sessions` table — PM working-memory rows, one per work session, prunable. Tier 1 storage. (Unchanged from v1.0.13.) |
+| **Marker files** | Per-workspace files in `<workspace_root>/.ai/` that record migration state: `atelier.migrated` (Local→Memex replay completed), `atelier.local-only` (user declined). (§8) |
+| **Atelier document** | A row in `atelier.db.project_documents` — a pointer-row with `filename`, `type`, `subdomain`, and an `index_id` linkback to its Memex Index row. The actual markdown content lives on disk at `<workspace_root>/<filename>` AND in the raw archive. |
+| **Memex Index document** | A row in `~/.memex/index.db.documents`. One per indexed row across **all** target stores (Atelier rows, Memex Brain articles, future consumers). Carries `domain`, `key`, `searchable`, `embedding`, FK-style pointer to the target row via `(store, table_name, row_id)`. |
+
+When the spec says "document" without qualification, it means an **Atelier document** (the project_documents row). When it means the Index row, the spec says "Index document" or "documents row" explicitly.
+
+### 0.2 Naming conventions
+
+These rules apply to every identifier the spec or implementation creates. Bugs in any of these are blockers.
+
+#### Slug algorithm
+
+A `slug()` helper transforms arbitrary user input into a stable identifier safe for use in `key` components, filenames, and URLs. The canonical implementation:
+
+```python
+def slug(text: str, max_length: int = 64) -> str:
+    """Lowercase, ASCII, kebab-case. Strips non-alphanumeric to single dashes."""
+    s = text.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    return s[:max_length].rstrip("-")
+```
+
+Rules:
+- Output character set is `[a-z0-9-]`.
+- Repeated dashes collapse to one.
+- Leading and trailing dashes are stripped (including after truncation).
+- Empty input produces empty string; callers must reject empty slugs.
+- Unicode is transliterated lossily (everything not in `[a-z0-9]` becomes a dash).
+
+Per-context length caps:
+
+| Use | `max_length` | Source |
+|---|---|---|
+| `workspaces.slug` | 48 | Workspace identity derivative |
+| `projects.slug` | 48 | Per-workspace |
+| Key's `title_slug` component | 48 | §6.7 |
+| Filenames (`atelier/raw/<slug>-<hash>.md`) | 64 | Local-mode raw archive |
+
+#### Case and separator rules
+
+- All slugs: **lowercase kebab-case** (`auth-service`, never `AuthService` or `auth_service`).
+- All file paths: **forward slashes** in the spec and in `key` even on Windows. The Python layer uses `pathlib` and normalizes.
+- All dates in `key`: **ISO `YYYY-MM-DD`** in UTC.
+- All timestamps in payloads: **ISO 8601 with timezone offset**, e.g. `2026-05-16T14:30:00+00:00`.
+
+#### Identifier naming
+
+- Python module names: `snake_case`.
+- Python function names: `snake_case`.
+- Python class names: `PascalCase`.
+- SQL table names: `snake_case`, plural where they hold rows (e.g., `tasks`, `meeting_minutes`).
+- SQL column names: `snake_case`.
+- SKILL.md procedure paths: `internal/<category>/<kebab-case-name>/SKILL.md`.
+- Agent ids: `atelier-<role>-<seq>` (e.g., `atelier-pm-1`, `atelier-engineer-1`).
+- Workspace identity strings: untouched URL or path (NOT slugged); only the derived `workspaces.slug` is slugged.
+
+#### When to slug vs. when to preserve
+
+- **Slug** user-facing-but-machine-handled fields: workspace name, project name, document title (for the key component, not the column).
+- **Preserve** user-typed display fields: `projects.name`, `project_documents.title`, `meeting_minutes.title`. These keep their original casing and punctuation; the slug derivative goes elsewhere.
+
+---
+
 ## 1. Context and motivation
 
 Atelier was built against Memex v1 — a per-project SQLite file at `.ai/memex.db` containing both Memex v1's wiki content and Atelier's own tables. Atelier's [CLAUDE.md](../../CLAUDE.md) still enforces "Memex must be set up before any Atelier command will work" against that v1 model.
@@ -296,7 +390,7 @@ Components:
 | `project_slug` | `projects.slug` | `no-project` | Literal placeholder for workspace-scoped docs (e.g., a daily `log` not bound to a project) |
 | `domain` | `librarian_output.domain` | required | One of `DOMAINS` |
 | `date` | `created_at.date()` ISO `YYYY-MM-DD` | required | UTC date of creation |
-| `title_slug` | `slug(title)[:48]` | required | Lower-snake (`-`), max 48 chars |
+| `title_slug` | `slug(title, max_length=48)` | required | Per §0.2 `slug()` helper |
 | `seq` | smallest unused integer ≥ 1 for the same (`workspace/project/domain/date/title`) prefix | required | Disambiguates same-title-same-day; written explicitly so the key is deterministic |
 
 Examples:
@@ -315,9 +409,9 @@ On every Tier 2 write, Atelier queries the Index for existing keys matching the 
 
 #### Length and characters
 
-- All slug components: lower-case ASCII, `[a-z0-9-]+`, leading/trailing dashes stripped, repeated dashes collapsed.
+- All slug components produced via §0.2's `slug()` helper.
 - No length cap on the assembled `key`; typical 60–120 chars. Memex Index `key` column is TEXT — unbounded.
-- `(no-project)` is the literal string used when `project_slug` is unset (workspace-level documents).
+- `(no-project)` is the literal string used when `project_slug` is unset (workspace-level documents). The parentheses are part of the string; they're an intentional visual marker that this slot is "empty".
 
 #### Why not just rely on `index_id`?
 

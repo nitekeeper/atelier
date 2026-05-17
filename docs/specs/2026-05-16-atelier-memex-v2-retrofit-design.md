@@ -84,7 +84,7 @@ Otherwise returns `"local"`. Result is cached for the lifetime of the Python pro
 # Document-shaped writes (go through Librarian in Memex mode;
 # FTS5-indexed in Local mode)
 backend.write_document(domain, title, body, metadata, caller_agent_id) -> dict
-backend.write_task(title, description, ...) -> dict  # also Librarian-routed per §6
+backend.write_task(title, description, ...) -> dict  # Tier 2 — caller-built librarian_output per §6.2
 backend.write_meeting(...) -> dict
 
 # Operational state (direct CRUD in both modes)
@@ -119,48 +119,112 @@ On every Atelier command in Memex mode, before any other work, run the bootstrap
 
 Bootstrap is fast in steady state (one file read, version compare) and self-healing — if a user reinstalls Memex from scratch, the next Atelier command will repopulate.
 
-## 6. Memex mode — write paths
+## 6. Memex mode — write paths (three-tier model)
 
-### 6.1 Document writes (through the Librarian)
+**Prerequisite:** This retrofit targets **Memex v2.2.0 or later** — the version where `memex:index:write` first accepts an optional caller-built `librarian_output` and ships `librarian.validate_output()` as the shared schema check. Memex's [docs/specs/2026-05-16-memex-v2-redesign-design.md §6.3](../../../memex/docs/specs/2026-05-16-memex-v2-redesign-design.md) documents the dual-mode contract.
 
-These rows are document-shaped — they carry searchable text that benefits from FTS5 + (optional) vector retrieval:
+Atelier writes fall into three tiers based on what kind of mutation they represent. Each tier has a distinct Memex surface and cost profile.
 
-- `projects` — rendered as `<name>: <description>` with metadata (repo, phase, created_by)
-- `project_documents` — pointer-rows; the actual markdown file is what gets archived + indexed
-- `meeting_minutes` — title + summary + decisions → searchable; raw markdown file goes to Archivist
-- `tasks` — per explicit user decision, **every task write goes through the Librarian**, including status updates and notes appends
+### 6.1 Tier 1 — Pure-state mutation (direct Memex Core, no Index touch)
 
-Each goes through `memex:index:write` (the Librarian subagent dispatch). The Librarian:
-- Assigns an `index_id` (UUID v7)
-- Computes a stable `key` slug
-- Classifies the `domain` (`project`, `document`, `meeting`, `task` — currently Brain uses `article` etc.; Atelier-domains will be added to the Librarian's known taxonomy via its system prompt update)
-- Builds the `searchable` text
-- Extracts metadata + relations to prior indexed rows
-- Archivist preserves the raw body (where one exists) to `~/.memex/raw/`
-- Memex Core writes the row to `~/.memex/atelier.db.<table>` with the `index_id` linkback
+Rows where mutation does **not** change the Index's `searchable` text and which never need free-text search:
 
-### 6.2 Operational state (direct Core CRUD)
+| Atelier operation | Atelier table | Memex surface |
+|---|---|---|
+| `update_task_status` | `tasks` | `memex:core:update` |
+| `transition_phase` | `projects.phase` column | `memex:core:update` |
+| `record_phase_bypass` | `phase_bypasses` | `memex:core:insert` |
+| `upsert_session` | `sessions` | `memex:core:insert / update` |
+| `add_participant` | `meeting_participants` | `memex:core:insert` |
+| `assign_task` | `tasks.assigned_to` column | `memex:core:update` |
 
-These rows are state-shaped, high-churn, low-search-value. They never go through the Librarian:
+These rows either have no `index_id` column (`sessions`, `phases`, etc.) or have one but the mutation doesn't affect what's already in the Index (e.g., a status flip doesn't change the task's title or description, so the FTS5 row is still correct).
 
-- `sessions` — PM working memory
-- `phases`, `phase_transitions`, `skill_gates` — static catalog (seeded once)
-- `phase_bypasses` — soft-wall audit log
-- `meeting_participants` — join table
+**Cost:** one SQL UPDATE/INSERT. No LLM call. No Index touch.
 
-Writes call `memex:core:insert / update / delete` directly. No `index_id` column on these tables.
+### 6.2 Tier 2 — Structured-row create / content edit (caller-built `librarian_output`)
 
-### 6.3 Roles and agents (Memex mode)
+Rows where Atelier creates a new document or edits its content; Atelier knows the domain and can build a deterministic classification:
+
+| Atelier operation | Atelier table | Domain |
+|---|---|---|
+| `create_project`, `update_project` (name/description) | `projects` | `project` |
+| `create_task`, content edits to `description`/`notes` | `tasks` | `task` |
+| `create_document`, `update_document` (filename/title) | `project_documents` | `project_doc` |
+| `create_meeting` | `meeting_minutes` | `meeting` |
+
+Each write goes through `memex:index:write` with a **caller-built `librarian_output`** (Memex v2.2.0+ contract):
+
+```python
+from scripts.agents import librarian as memex_librarian   # via plugin cache
+from scripts import embeddings as memex_embeddings
+
+output = memex_librarian.validate_output({
+    "index_id":   _new_uuid7(),
+    "key":        _slug(title),
+    "domain":     "task",                                  # Atelier's fixed vocabulary
+    "searchable": f"{title}. {body[:1500]}",
+    "metadata":   {"project_id": project_id, "priority": priority},
+    "relations":  [{"to_index_id": project_index_id, "rel_type": "part_of"}],
+})
+try:
+    embedding = memex_embeddings.encode(output["searchable"])
+except Exception:
+    embedding = None
+
+memex_librarian.write_entry(
+    payload=row_to_insert,
+    librarian_output=output,
+    target_store="atelier",
+    target_table="tasks",
+    caller_agent_id="atelier-pm-1",
+    embedding=embedding,
+)
+```
+
+**Cost:** one SQL INSERT + one Index INSERT + one embedding call. **No LLM dispatch.** Synchronous Python end-to-end.
+
+`relations` is caller-built — for structured graph edges (`task part_of project`, `meeting produced decision`) this is *strictly more accurate* than what the Librarian subagent would extract from prose.
+
+### 6.3 Tier 3 — Prose ingest (full Librarian subagent dispatch)
+
+Atelier's `/atelier:ingest` skill, when given an external article, transcript, or research dump where the domain and relations must be extracted from the text. This is the only Atelier path that pays the LLM cost.
+
+Flow uses Memex's Option-B Task-tool dispatch pattern (the same one Memex Brain uses for its `ingest` op):
+
+1. Python `ingest_prepare(...)` builds the Librarian's prompt via `librarian.build_prompt(payload, target_store="atelier", caller_agent_id=...)`.
+2. Atelier's `/atelier:ingest` SKILL.md dispatches the Task tool with that prompt.
+3. Subagent returns JSON classification.
+4. Python `librarian.parse_response(...)` validates.
+5. Python `librarian.write_entry(...)` persists.
+
+**Cost:** one LLM call per ingest. Justified — only invoked when domain/relations genuinely need extraction.
+
+### 6.4 Atelier domain vocabulary (Tier 2 invariant)
+
+Atelier owns the `domain` field for its rows. Memex doesn't enforce an enum — the contract is "use a small, stable, documented set". v1 vocabulary:
+
+| Domain | Used for |
+|---|---|
+| `project` | `projects` table rows |
+| `task` | `tasks` table rows |
+| `meeting` | `meeting_minutes` table rows |
+| `project_doc` | `project_documents` table rows |
+| `adr` | Architecture Decision Records — future, subset of `project_doc` |
+
+This vocabulary is documented in `internal/memex/domain-vocabulary.md` (shipped by Plan 1 Task 5) and validated as a constant in `scripts/backend_memex.py`. Adding a new domain is a deliberate spec-revision step, not an inline decision.
+
+### 6.5 Roles and agents (Memex mode)
 
 In Memex mode, Atelier's `~/.memex/atelier.db` has **no** `roles` or `agents` tables — those live in `~/.memex/agents.db` (Memex's machine-global agents store) and are shared with every Memex consumer. Atelier's bootstrap (§5) seeds Atelier-specific roles and shipped agent profiles into that store via `memex:core:register-role` / `register-agent`. Foreign-key columns like `tasks.assigned_to` and `meetings.created_by` continue to hold an agent_id string; resolution goes through `memex:core:get-agent`.
 
 Local mode is different — see §7 for how Local mode handles roles/agents in the project-local DB.
 
-### 6.4 Trade-off acknowledged: tasks-through-Librarian cost
+### 6.6 Re-interpretation of the "always through Librarian" brainstorm decision
 
-Per §6.1, every task write — including a 1-byte status flip — dispatches the Librarian subagent (an LLM call). On a busy project this is real cost. We accept this in v1 of the retrofit because the user explicitly chose maximum freshness over minimum cost in the brainstorm. Mitigation if cost becomes painful:
-- Add a `lite_update` write path that updates the target row + the `searchable` column directly (FTS5 trigger keeps the Index in sync) without re-dispatching the Librarian. Status-only changes route through `lite_update`; description/title/notes changes still get full Librarian classification.
-- This optimization is **deferred** to a follow-up; not in the v1 scope.
+The brainstorm picked "always through Librarian" for tasks. With the Memex v2.2.0 contract, that wish is more usefully restated as **"always indexed in Memex, via `librarian.write_entry`"**. The Librarian LLM dispatch is a separate axis. Atelier honors the spirit of the decision (every content write lands in the federated Index) without paying the LLM cost on every status flip. Tier 1 covers status-only mutations; Tier 2 covers content writes; Tier 3 is reserved for prose where the LLM earns its keep.
+
+The earlier "deferred `lite_update`" mitigation is no longer needed — Tier 1 IS that mitigation, shipped in v1.
 
 ## 7. Local mode — slim backend
 
@@ -283,7 +347,7 @@ Wave-based per the user's intent for the implementation plan; this section docum
 
 | # | Risk | Mitigation |
 |---|---|---|
-| 1 | Tasks-through-Librarian cost balloons | Deferred `lite_update` path documented (§6.4); cost is measurable per-project and bounded |
+| 1 | Atelier accidentally falls into Tier 3 (LLM dispatch) for routine writes | The tier mapping in §6.1–§6.3 is enforced in `backend_memex.py` — `write_task` / `write_meeting` / `write_document` / `write_project` ALWAYS take the Tier 2 path. Tier 3 is reachable only through Atelier's `/atelier:ingest` skill with `--external-prose` semantics. Unit test asserts no Tier 2 write reaches `librarian.build_prompt`. |
 | 2 | Bootstrap fails mid-step (e.g., register-role succeeds, create-store fails) | Each step is idempotent; no marker is written until all steps complete. Next run retries. |
 | 3 | Local mode + Memex mode drift in schemas over time | Single `migrations/shared/` directory is the source of truth for both backends. CI test asserts schema parity. |
 | 4 | A user with both a local DB and a Memex install runs many projects from different working directories without migrating | Per-project markers solve this: each project's migration choice is recorded in `.ai/atelier.migrated` or `.ai/atelier.local-only`. Atelier prompts once per project. |
@@ -299,7 +363,7 @@ Wave-based per the user's intent for the implementation plan; this section docum
 - Per-project Atelier stores registered against the global Memex registry (rejected in brainstorm — machine-global was chosen).
 - Embedding provider configuration distinct from Memex's.
 - Migration from the legacy v1-era `.ai/memex.db` files (separate concern; clean-slate).
-- The `lite_update` task write path (§6.4) — explicitly deferred.
+- A `lite_update` task write path that bypasses Memex Index entirely on content edits — Tier 1 (§6.1) already handles status-only mutations and content edits use Tier 2 (no LLM cost). No further mitigation needed in v1.
 
 ## 15. Open implementation decisions deferred to `writing-plans`
 

@@ -886,27 +886,37 @@ git commit -m "docs(README): wave-4 v2 dual-mode setup and migration"
 **Memex v2 integration.** Atelier now writes through Memex v2 when
 installed, with a slim project-local fallback otherwise.
 
+**Memex compatibility:** requires Memex **v2.2.0 or later**. Bootstrap
+refuses to run against older Memex installs (the caller-built
+`librarian_output` contract Atelier depends on landed in Memex v2.2.0).
+
 ### Added
 - Dual-mode persistence facade (`scripts/backend.py`) — auto-selects
   between Memex Core and project-local SQLite.
-- `scripts/backend_memex.py` — dispatches to Memex Core CRUD and Memex
-  Index write; tasks routed through the Librarian per design §6.
+- `scripts/backend_memex.py` — Tier 2 writes through
+  `librarian.write_entry()` with caller-built `librarian_output` (no LLM
+  dispatch for Atelier's structured domains); Tier 1 state mutations via
+  Memex Core direct.
 - `scripts/backend_local.py` — slim SQLite with FTS5 over a local
   `documents` table; raw bodies archived to `.ai/raw/`.
 - `scripts/bootstrap.py` — idempotent Memex-mode bootstrap (seeds
   Atelier roles + shipped agents into `~/.memex/agents.db`; creates
-  the `atelier` store).
+  the `atelier` store; enforces Memex v2.2.0+).
 - `scripts/migrate_to_memex.py` — one-shot per-project replay from
   Local to Memex; crash-safe (no marker without full success).
 - `scripts/atelier_entrypoint.py:startup_check()` — pre-flight for the
   four user-facing skills; handles bootstrap + migration prompt.
+- `scripts/domain_vocabulary.py` — fixed Atelier domain set
+  (`project` / `task` / `meeting` / `project_doc` / `adr`); validated
+  on every Tier 2 write.
 - `templates/roles.json` + `templates/agents/*.json` — Atelier-shipped
   role + agent seed data, used by both modes.
 - `migrations/shared/` + `migrations/local-only/` — split so Memex mode
   consumes only schema-without-roles-or-agents (Memex's agents.db
-  owns those tables).
-- 7 new internal procedures under `internal/{memex,local,bootstrap-memex,
-  migrate-local-to-memex}/`.
+  owns those tables). `migrations/shared/006_index_ids.sql` adds
+  `index_id` columns required by `librarian.write_entry`.
+- 8 new internal procedures under `internal/{memex,local,bootstrap-memex,
+  migrate-local-to-memex}/` plus `internal/memex/domain-vocabulary.md`.
 
 ### Changed
 - `scripts/{projects,tasks,documents,meetings,session,workflow,roles,

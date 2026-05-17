@@ -15,15 +15,15 @@
 ## Parallel dispatch map
 
 ```
-Wave 0 — all parallel, 5 independent tasks
-┌────────────────┐ ┌────────────────┐ ┌─────────────────┐ ┌────────────────┐ ┌─────────────────┐
-│ Task 1         │ │ Task 2         │ │ Task 3          │ │ Task 4         │ │ Task 5          │
-│ backend.py     │ │ mode_detector  │ │ roles seed JSON │ │ agents seed    │ │ migrations split│
-│ facade skeleton│ │ + tests        │ │ + loader        │ │ JSON + loader  │ │ shared/local-only│
-└────────────────┘ └────────────────┘ └─────────────────┘ └────────────────┘ └─────────────────┘
+Wave 0 — all parallel, 6 independent tasks
+┌────────────────┐ ┌────────────────┐ ┌─────────────────┐ ┌────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│ Task 1         │ │ Task 2         │ │ Task 3          │ │ Task 4         │ │ Task 5          │ │ Task 6          │
+│ backend.py     │ │ mode_detector  │ │ roles seed JSON │ │ agents seed    │ │ migrations split│ │ domain          │
+│ facade skeleton│ │ + tests        │ │ + loader        │ │ JSON + loader  │ │ shared/local-only│ │ vocabulary doc  │
+└────────────────┘ └────────────────┘ └─────────────────┘ └────────────────┘ └─────────────────┘ └─────────────────┘
 ```
 
-All 5 tasks touch disjoint files. Dispatch all five as parallel subagents per `superpowers:dispatching-parallel-agents`.
+All 6 tasks touch disjoint files. Dispatch all six as parallel subagents per `superpowers:dispatching-parallel-agents`.
 
 ---
 
@@ -891,13 +891,155 @@ git commit -m "feat(migrations): wave-0 split into shared/ + local-only/ + index
 
 ---
 
+### Task 6: Atelier domain vocabulary doc
+
+**Files:**
+- Create: `internal/memex/domain-vocabulary.md`
+- Create: `scripts/domain_vocabulary.py`
+- Test: `tests/test_domain_vocabulary.py`
+
+Spec §6.4 fixes Atelier's `domain` vocabulary as a small documented set used by every Tier 2 write. The Python module exposes it as a `frozenset` so `backend_memex.py` can validate before passing `librarian_output` to Memex. The markdown file documents the rationale + addition policy for future contributors.
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+# tests/test_domain_vocabulary.py
+from pathlib import Path
+import pytest
+from scripts import domain_vocabulary as dv
+
+
+def test_canonical_domains_present():
+    assert "project" in dv.DOMAINS
+    assert "task" in dv.DOMAINS
+    assert "meeting" in dv.DOMAINS
+    assert "project_doc" in dv.DOMAINS
+    assert "adr" in dv.DOMAINS
+
+
+def test_domains_is_frozenset():
+    assert isinstance(dv.DOMAINS, frozenset)
+
+
+def test_assert_valid_accepts_known():
+    dv.assert_valid("task")  # must not raise
+
+
+def test_assert_valid_rejects_unknown():
+    with pytest.raises(ValueError, match="unknown domain"):
+        dv.assert_valid("blog_post")
+
+
+def test_vocabulary_doc_exists():
+    f = Path(__file__).parent.parent / "internal" / "memex" / "domain-vocabulary.md"
+    assert f.exists()
+    text = f.read_text(encoding="utf-8")
+    for d in ("project", "task", "meeting", "project_doc", "adr"):
+        assert d in text
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```
+pytest tests/test_domain_vocabulary.py -v
+```
+
+- [ ] **Step 3: Create `scripts/domain_vocabulary.py`**
+
+```python
+# scripts/domain_vocabulary.py
+"""Atelier's domain vocabulary for Tier 2 writes through Memex Index.
+
+Memex doesn't enforce a domain enum — Atelier owns the small, stable set.
+Adding a new domain is a deliberate spec revision, not an inline call.
+See internal/memex/domain-vocabulary.md for the policy."""
+from __future__ import annotations
+
+DOMAINS: frozenset[str] = frozenset({
+    "project",       # atelier.db.projects rows
+    "task",          # atelier.db.tasks rows
+    "meeting",       # atelier.db.meeting_minutes rows
+    "project_doc",   # atelier.db.project_documents rows
+    "adr",           # ADRs — subset of project_doc; reserved for future use
+})
+
+
+def assert_valid(domain: str) -> None:
+    if domain not in DOMAINS:
+        raise ValueError(
+            f"unknown domain {domain!r}; valid Atelier domains: "
+            f"{sorted(DOMAINS)}. Adding one requires a spec amendment "
+            f"(see internal/memex/domain-vocabulary.md)."
+        )
+```
+
+- [ ] **Step 4: Create `internal/memex/domain-vocabulary.md`**
+
+```markdown
+# Atelier domain vocabulary (Memex Index)
+
+Atelier-side rows in `~/.memex/index.db.documents.domain` use this fixed
+vocabulary when written via Tier 2 (caller-built `librarian_output`).
+Memex does not enforce a domain enum — this list IS the enforcement,
+maintained by Atelier and validated by `scripts.domain_vocabulary.assert_valid()`.
+
+## Current vocabulary
+
+| Domain | Atelier source table | Notes |
+|---|---|---|
+| `project`     | `projects`           | One row per Atelier project. |
+| `task`        | `tasks`              | Created/edited via Tier 2. Status flips are Tier 1 (no Index write). |
+| `meeting`     | `meeting_minutes`    | Summary + decisions indexed. Raw markdown body archived via Archivist. |
+| `project_doc` | `project_documents`  | Pointer-rows for arbitrary project markdown files. |
+| `adr`         | `project_documents`  | Reserved future subset for Architecture Decision Records. |
+
+## Addition policy
+
+A new domain is a spec change, not an inline decision. To add one:
+
+1. Open a spec amendment against
+   `docs/specs/2026-05-16-atelier-memex-v2-retrofit-design.md` §6.4
+   adding the row.
+2. Update `scripts/domain_vocabulary.py:DOMAINS` to match.
+3. Add a test case to `tests/test_domain_vocabulary.py`.
+4. Document the source table + retrieval expectations.
+
+The reason for the friction: cross-plugin search relies on stable domain
+strings. Adding a domain that overlaps with Memex Brain's own taxonomy
+(`article`, `capture`, `synthesis`) would muddle `memex:brain:ask`
+results. Worth the spec round-trip.
+
+## Future considerations
+
+- If Atelier grows substantially more document types (lessons, retros,
+  postmortems), consider namespacing as `atelier:lesson` etc. to make
+  the cross-plugin query story explicit. v1 keeps the flat vocabulary
+  because all current domains are unambiguously Atelier-scoped.
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+```
+pytest tests/test_domain_vocabulary.py -v
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/domain_vocabulary.py internal/memex/domain-vocabulary.md tests/test_domain_vocabulary.py
+git commit -m "feat(domain-vocab): wave-0 fixed Atelier domain set for Tier 2 writes"
+```
+
+---
+
 ## Wave 0 acceptance
 
-- All 5 tasks merged.
+- All 6 tasks merged.
 - `pytest tests/` green.
 - `scripts/backend.py` exists with 11 NotImplementedError methods.
 - `scripts/mode_detector.py:detect_mode()` is cached + tested.
 - `templates/roles.json` and `templates/agents/*.json` exist and load.
 - `migrations/shared/` and `migrations/local-only/` exist; no shared migration defines roles or agents.
+- `scripts/domain_vocabulary.DOMAINS` is a frozenset of 5 strings; validation enforced.
 
-Hand-off: Wave 1 (Plan 2) reads `backend.py` signatures and replaces NotImplementedError bodies with Memex-dispatched implementations; Wave 1' does the same with Local SQLite.
+Hand-off: Wave 1 (Plan 2) reads `backend.py` signatures and replaces NotImplementedError bodies with Memex-dispatched implementations using `librarian.write_entry` directly + caller-built `librarian_output` per spec §6.2. Wave 1' does the same with Local SQLite.

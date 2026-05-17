@@ -34,13 +34,15 @@ Tasks 1–8 touch disjoint files. Dispatch all 8 as parallel subagents. Tasks 9 
 
 ---
 
-### Task 1: Memex backend — document writes
+### Task 1: Memex backend — document writes (Tier 2)
 
 **Files:**
 - Create: `scripts/backend_memex.py` (this task starts the file; Tasks 2-3 append to it)
 - Test: `tests/test_backend_memex_documents.py`
 
-Implements `write_document`, `write_task`, `write_meeting`. All three route through Memex's index-write path (which invokes the Librarian subagent). The Python side here calls `memex:run`'s ingest entry by invoking the cached plugin's `scripts/brain.py:ingest_prepare/complete` directly (Memex is a sibling plugin; we import its module by adding the plugin's path).
+Implements `write_document`, `write_task`, `write_meeting`. Each routes through Memex's **Tier 2 path** per spec §6.2: caller-built `librarian_output` validated by `librarian.validate_output()` and persisted via `librarian.write_entry()`. **No Librarian LLM dispatch.** Atelier owns the domain (`scripts/domain_vocabulary.DOMAINS` from Plan 1 Task 6) and builds the classification deterministically.
+
+Memex contract version: **v2.2.0+** — earlier versions don't accept caller-built `librarian_output` and will reject the schema. Task 10 adds the version guard at bootstrap; Task 1 trusts it.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -48,63 +50,143 @@ Implements `write_document`, `write_task`, `write_meeting`. All three route thro
 # tests/test_backend_memex_documents.py
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pytest
 from scripts import backend_memex
 
 
 @pytest.fixture
 def fake_memex(tmp_path, monkeypatch):
-    """Stand up a temp ~/.memex/ structure + fake brain module."""
+    """Stand up a temp ~/.memex/ structure + a registry pointing at a
+    temp atelier.db. The Memex-side modules (librarian, embeddings) are
+    patched in each test so we don't need a real Memex install."""
     memex_home = tmp_path / ".memex"
     memex_home.mkdir()
-    (memex_home / "registry.json").write_text('{"stores": {"atelier": {"path": "%s"}}}' %
-                                              (memex_home / "atelier.db").as_posix())
-    monkeypatch.setenv("MEMEX_HOME_OVERRIDE", str(memex_home))
+    (memex_home / "registry.json").write_text(
+        '{"stores": {"atelier": {"path": "%s"}}}' %
+        (memex_home / "atelier.db").as_posix())
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     return memex_home
 
 
-def test_write_document_returns_index_id(fake_memex):
-    with patch.object(backend_memex, "_memex_ingest", return_value={
-        "status": "ingested", "index_id": "01abc-test", "key": "design-auth",
-        "domain": "design", "row_id": 42, "relations": [],
-    }):
-        result = backend_memex.write_document(
-            domain="design", title="Auth Design", body="# Body",
-            metadata={"project_id": 1}, caller_agent_id="atelier-pm-1",
+def test_write_document_validates_domain(fake_memex):
+    """An unknown domain must be rejected before any Memex call."""
+    with pytest.raises(ValueError, match="unknown domain"):
+        backend_memex.write_document(
+            domain="blog_post",  # not in DOMAINS
+            title="x", body="x", metadata={}, caller_agent_id="atelier-pm-1",
         )
-    assert result["index_id"] == "01abc-test"
+
+
+def test_write_document_builds_librarian_output_and_writes(fake_memex,
+                                                            monkeypatch):
+    captured = {}
+
+    def fake_validate(d):
+        captured["validated"] = d
+        return d
+
+    def fake_write_entry(*, payload, librarian_output, target_store,
+                         target_table, caller_agent_id, embedding):
+        captured["payload"] = payload
+        captured["librarian_output"] = librarian_output
+        captured["target_store"] = target_store
+        captured["target_table"] = target_table
+        captured["caller_agent_id"] = caller_agent_id
+        return {"status": "ingested",
+                "index_id": librarian_output["index_id"],
+                "key": librarian_output["key"],
+                "domain": librarian_output["domain"],
+                "row_id": 42, "relations": []}
+
+    monkeypatch.setattr(backend_memex, "_memex_validate_output", fake_validate)
+    monkeypatch.setattr(backend_memex, "_memex_write_entry", fake_write_entry)
+    monkeypatch.setattr(backend_memex, "_memex_embed",
+                        lambda text: b"\x00" * 16)
+
+    result = backend_memex.write_document(
+        domain="project_doc", title="Auth Design",
+        body="OAuth2 flow with refresh tokens.",
+        metadata={"project_id": 1, "filename": "DESIGN.md"},
+        caller_agent_id="atelier-pm-1",
+    )
+
     assert result["row_id"] == 42
+    assert captured["target_store"] == "atelier"
+    assert captured["target_table"] == "project_documents"
+    assert captured["librarian_output"]["domain"] == "project_doc"
+    assert captured["librarian_output"]["key"]  # non-empty slug
+    assert "Auth Design" in captured["librarian_output"]["searchable"]
+    assert captured["librarian_output"]["metadata"]["project_id"] == 1
 
 
-def test_write_task_routes_through_librarian(fake_memex):
-    with patch.object(backend_memex, "_memex_ingest", return_value={
-        "status": "ingested", "index_id": "01task-1", "key": "task-1",
-        "domain": "task", "row_id": 1, "relations": [],
-    }) as m:
-        result = backend_memex.write_task(
-            title="Fix auth bug", description="OAuth flow returns 500",
-            project_id=1, created_by="atelier-engineer-1",
-        )
-    assert result["index_id"] == "01task-1"
-    assert m.call_args.kwargs["domain"] == "task"
-    assert m.call_args.kwargs["caller_agent_id"] == "atelier-engineer-1"
+def test_write_task_targets_tasks_table_with_task_domain(fake_memex,
+                                                          monkeypatch):
+    captured = {}
+    monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
+    monkeypatch.setattr(backend_memex, "_memex_write_entry",
+        lambda **k: (captured.update(k), {"status": "ingested",
+                                          "index_id": k["librarian_output"]["index_id"],
+                                          "key": k["librarian_output"]["key"],
+                                          "domain": "task",
+                                          "row_id": 1, "relations": []})[1])
+    monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
+
+    backend_memex.write_task(
+        title="Fix auth bug", description="OAuth returns 500",
+        project_id=1, created_by="atelier-engineer-1",
+        priority=5, notes="repro: hit /oauth/callback twice",
+    )
+    assert captured["target_table"] == "tasks"
+    assert captured["librarian_output"]["domain"] == "task"
+    assert captured["payload"]["priority"] == 5
+    assert "repro" in captured["payload"]["notes"]
 
 
-def test_write_meeting_writes_raw_markdown(fake_memex):
-    with patch.object(backend_memex, "_memex_ingest", return_value={
-        "status": "ingested", "index_id": "01meet-1", "key": "kickoff-1",
-        "domain": "meeting", "row_id": 1, "relations": [],
-    }) as m:
-        result = backend_memex.write_meeting(
-            title="Kickoff", date="2026-05-16",
-            summary="Discussed scope.", decisions="Use OAuth2.",
-            created_by="atelier-pm-1",
-        )
-    # The body sent to Librarian includes both summary and decisions
-    body_arg = m.call_args.kwargs["body"]
-    assert "Discussed scope." in body_arg
-    assert "Use OAuth2." in body_arg
+def test_write_meeting_targets_meeting_minutes(fake_memex, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
+    monkeypatch.setattr(backend_memex, "_memex_write_entry",
+        lambda **k: (captured.update(k), {"status": "ingested",
+                                          "index_id": k["librarian_output"]["index_id"],
+                                          "key": k["librarian_output"]["key"],
+                                          "domain": "meeting",
+                                          "row_id": 1, "relations": []})[1])
+    monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
+
+    backend_memex.write_meeting(
+        title="Kickoff", date="2026-05-16",
+        summary="Discussed scope.", decisions="Use OAuth2.",
+        created_by="atelier-pm-1",
+    )
+    assert captured["target_table"] == "meeting_minutes"
+    assert captured["librarian_output"]["domain"] == "meeting"
+    assert "Discussed scope." in captured["librarian_output"]["searchable"]
+
+
+def test_embedding_failure_is_swallowed(fake_memex, monkeypatch):
+    """When embeddings.encode raises, persist with embedding=None."""
+    captured_embedding = {}
+
+    def boom(text):
+        raise RuntimeError("openai not installed")
+
+    def fake_write_entry(**kwargs):
+        captured_embedding["embedding"] = kwargs["embedding"]
+        return {"status": "ingested",
+                "index_id": kwargs["librarian_output"]["index_id"],
+                "key": kwargs["librarian_output"]["key"],
+                "domain": kwargs["librarian_output"]["domain"],
+                "row_id": 1, "relations": []}
+
+    monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
+    monkeypatch.setattr(backend_memex, "_memex_embed", boom)
+    monkeypatch.setattr(backend_memex, "_memex_write_entry", fake_write_entry)
+
+    backend_memex.write_task(
+        title="x", description="y", project_id=1, created_by="atelier-pm-1",
+    )
+    assert captured_embedding["embedding"] is None
 ```
 
 - [ ] **Step 2: Run tests — expect failure**
@@ -118,18 +200,25 @@ Expected: `ModuleNotFoundError: scripts.backend_memex`.
 
 ```python
 # scripts/backend_memex.py
-"""Memex-mode backend.
+"""Memex-mode backend (Tier 2 caller-built librarian_output path).
 
-Imports Memex's brain module from the installed plugin cache and routes
-through it. All document-shaped writes go through the Librarian
-subagent (via memex:run ingest). Operational writes go through Memex
-Core insert/update/delete (added in Task 2). Reads in Task 3.
+Writes through memex:index:write WITHOUT the Librarian LLM dispatch —
+Atelier knows its domain, builds the classification deterministically,
+and calls librarian.write_entry() directly. See spec §6.2.
+
+Requires Memex v2.2.0+ (the version that ships librarian.validate_output
+and the optional librarian_output parameter on memex:index:write).
 """
 from __future__ import annotations
 import json
-import os
+import re
 import sys
+import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+
+from scripts import domain_vocabulary
 
 
 def _memex_plugin_dir() -> Path:
@@ -137,8 +226,11 @@ def _memex_plugin_dir() -> Path:
     base = Path.home() / ".claude" / "plugins" / "cache" / "agora" / "memex"
     versions = sorted(base.iterdir()) if base.exists() else []
     if not versions:
-        raise RuntimeError("Memex plugin not found in Claude Code cache.")
-    return versions[-1]  # latest installed version
+        raise RuntimeError(
+            "Memex plugin not found in Claude Code cache; expected at "
+            f"{base}. Atelier should be in Local mode — check mode_detector."
+        )
+    return versions[-1]
 
 
 def _ensure_memex_importable() -> None:
@@ -147,51 +239,47 @@ def _ensure_memex_importable() -> None:
         sys.path.insert(0, p)
 
 
-def _memex_ingest(*, title: str, body: str, caller_agent_id: str,
-                  source_url: str | None = None, domain_hint: str | None = None) -> dict:
-    """Synchronous wrapper around Memex Brain's ingest_prepare+complete.
+# ── Memex Tier 2 thin wrappers (also serve as patch surfaces in tests) ─────
 
-    NOTE: the Librarian-subagent dispatch is normally driven by a skill's
-    Task tool invocation. From inside an Atelier Python script we run the
-    prepare→write_entry path WITHOUT the Librarian LLM call by relying
-    on Memex's deterministic-fallback helper (added in Memex v2.1 via
-    the Option-B work). When Atelier needs a real Librarian classification
-    it routes via the Task tool from within a SKILL.md instead — see
-    internal/memex/dispatch-write/SKILL.md.
-
-    Inputs:
-        domain_hint: 'design'|'plan'|'meeting'|'task'|'project'|'document'
-                     Used to bypass the Librarian for routine Atelier rows
-                     where the domain is already known.
-    """
+def _memex_validate_output(librarian_output: dict) -> dict:
+    """Delegate to Memex's librarian.validate_output."""
     _ensure_memex_importable()
-    from scripts import brain as memex_brain                # type: ignore
     from scripts.agents import librarian as memex_librarian  # type: ignore
-    prep = memex_brain.ingest_prepare(
-        title=title, body=body,
-        caller_agent_id=caller_agent_id, source_url=source_url,
+    return memex_librarian.validate_output(librarian_output)
+
+
+def _memex_write_entry(*, payload: dict, librarian_output: dict,
+                       target_store: str, target_table: str,
+                       caller_agent_id: str,
+                       embedding: bytes | None) -> dict:
+    """Delegate to Memex's librarian.write_entry."""
+    _ensure_memex_importable()
+    from scripts.agents import librarian as memex_librarian  # type: ignore
+    return memex_librarian.write_entry(
+        payload=payload,
+        librarian_output=librarian_output,
+        target_store=target_store,
+        target_table=target_table,
+        caller_agent_id=caller_agent_id,
+        embedding=embedding,
     )
-    if prep["status"] == "skipped":
-        return {"status": "skipped",
-                "index_id": prep["existing_index_id"],
-                "row_id": None, "key": None, "domain": domain_hint,
-                "relations": []}
-    # Deterministic classification for known Atelier domains — no LLM call.
-    deterministic = {
-        "index_id": _new_uuid7(),
-        "key": _slug(title),
-        "domain": domain_hint or "document",
-        "searchable": f"{title}. {body[:1500]}",
-        "metadata": {},
-        "relations": [],
-    }
-    result = memex_brain.ingest_complete(prep, deterministic, embedding=None)
-    return result
+
+
+def _memex_embed(text: str) -> bytes | None:
+    """Best-effort wrapper around Memex's embeddings.encode."""
+    _ensure_memex_importable()
+    from scripts import embeddings as memex_embeddings  # type: ignore
+    return memex_embeddings.encode(text)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _new_uuid7() -> str:
-    import uuid, time
-    # Simple UUID v7 derivation: ms timestamp prefix + random tail
+    """UUID v7-style: ms timestamp prefix + random tail."""
     ms = int(time.time() * 1000)
     hex_ms = f"{ms:012x}"
     rand = uuid.uuid4().hex[12:]
@@ -199,18 +287,78 @@ def _new_uuid7() -> str:
 
 
 def _slug(text: str) -> str:
-    import re
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:64]
+
+
+def _try_embed(text: str) -> bytes | None:
+    """Best-effort embedding — swallow provider errors, return None."""
+    try:
+        return _memex_embed(text)
+    except Exception:
+        return None
+
+
+def _atelier_write(*, target_table: str, domain: str, title: str,
+                   body: str, payload: dict, metadata: dict,
+                   relations: list, caller_agent_id: str) -> dict:
+    """Tier 2 atelier write — synchronous, no LLM dispatch.
+
+    Builds librarian_output deterministically, validates via Memex, and
+    persists via librarian.write_entry. The target row goes into
+    ~/.memex/atelier.db.<target_table> with an index_id linkback;
+    the matching documents row goes into ~/.memex/index.db.
+    """
+    domain_vocabulary.assert_valid(domain)
+
+    output = _memex_validate_output({
+        "index_id":   _new_uuid7(),
+        "key":        _slug(title),
+        "domain":     domain,
+        "searchable": f"{title}. {body[:1500]}",
+        "metadata":   metadata,
+        "relations":  relations,
+    })
+    embedding = _try_embed(output["searchable"])
+    return _memex_write_entry(
+        payload=payload,
+        librarian_output=output,
+        target_store="atelier",
+        target_table=target_table,
+        caller_agent_id=caller_agent_id,
+        embedding=embedding,
+    )
 
 
 # ── Document writes ────────────────────────────────────────────────────────
 
+# Map Atelier domain → target table in ~/.memex/atelier.db.
+_DOMAIN_TO_TABLE = {
+    "project":     "projects",
+    "task":        "tasks",
+    "meeting":     "meeting_minutes",
+    "project_doc": "project_documents",
+    "adr":         "project_documents",
+}
+
+
 def write_document(*, domain: str, title: str, body: str,
                    metadata: dict, caller_agent_id: str,
                    source_url: str | None = None) -> dict:
-    return _memex_ingest(
-        title=title, body=body, caller_agent_id=caller_agent_id,
-        source_url=source_url, domain_hint=domain,
+    target_table = _DOMAIN_TO_TABLE.get(domain) or "project_documents"
+    payload = {
+        "title": title,
+        "filename": (metadata or {}).get("filename", _slug(title) + ".md"),
+        "project_id": (metadata or {}).get("project_id"),
+        "type": domain,
+        "created_by": caller_agent_id,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    return _atelier_write(
+        target_table=target_table, domain=domain,
+        title=title, body=body, payload=payload,
+        metadata=metadata or {}, relations=[],
+        caller_agent_id=caller_agent_id,
     )
 
 
@@ -221,19 +369,44 @@ def write_task(*, title: str, description: str, project_id: int,
     if notes:
         body_lines += ["", "## Notes", notes]
     body = "\n".join(body_lines)
-    return _memex_ingest(
-        title=title, body=body, caller_agent_id=created_by,
-        domain_hint="task",
+    payload = {
+        "title": title, "description": description, "project_id": project_id,
+        "created_by": created_by, "assigned_to": assigned_to,
+        "priority": priority, "notes": notes, "status": "pending",
+        "created_at": _now(), "updated_at": _now(),
+    }
+    metadata = {"project_id": project_id, "priority": priority}
+    if assigned_to:
+        metadata["assigned_to"] = assigned_to
+    return _atelier_write(
+        target_table="tasks", domain="task",
+        title=title, body=body, payload=payload,
+        metadata=metadata, relations=[],
+        caller_agent_id=created_by,
     )
 
 
 def write_meeting(*, title: str, date: str, summary: str,
                   decisions: str, created_by: str,
                   project_id: int | None = None) -> dict:
-    body = f"# {title}\n\nDate: {date}\n\n## Summary\n\n{summary}\n\n## Decisions\n\n{decisions}\n"
-    return _memex_ingest(
-        title=title, body=body, caller_agent_id=created_by,
-        domain_hint="meeting",
+    body = (f"# {title}\n\nDate: {date}\n\n"
+            f"## Summary\n\n{summary}\n\n"
+            f"## Decisions\n\n{decisions}\n")
+    payload = {
+        "title": title, "date": date,
+        "filename": f"{date}-{_slug(title)}.md",
+        "summary": summary, "decisions": decisions,
+        "created_by": created_by,
+        "created_at": _now(), "updated_at": _now(),
+    }
+    metadata: dict = {"date": date}
+    if project_id is not None:
+        metadata["project_id"] = project_id
+    return _atelier_write(
+        target_table="meeting_minutes", domain="meeting",
+        title=title, body=body, payload=payload,
+        metadata=metadata, relations=[],
+        caller_agent_id=created_by,
     )
 ```
 
@@ -242,13 +415,13 @@ def write_meeting(*, title: str, date: str, summary: str,
 ```
 pytest tests/test_backend_memex_documents.py -v
 ```
-Expected: 3 passed.
+Expected: 5 passed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add scripts/backend_memex.py tests/test_backend_memex_documents.py
-git commit -m "feat(backend-memex): wave-1 document writes (docs, tasks, meetings)"
+git commit -m "feat(backend-memex): wave-1 Tier 2 document writes (caller-built librarian_output)"
 ```
 
 ---
@@ -611,46 +784,49 @@ def test_bootstrap_skill_present():
 
 ```markdown
 ---
-description: Internal — routes an Atelier document write through Memex's Librarian via the Task tool. Not user-visible. Read by Atelier's user-facing skills when mode=memex.
+description: Internal — Tier 2 (structured-row) Atelier writes through memex:index:write. Caller-built librarian_output; no LLM dispatch. Not user-visible.
 ---
 
 # memex/dispatch-write (internal)
 
 ## When invoked
 
-An Atelier business operation (create project, write meeting minutes, etc.)
-needs an Atelier-domain row indexed in Memex's federated Index, with the
-Librarian subagent providing the classification.
+An Atelier business operation (create project, write meeting minutes,
+new task, content edit on an existing row) needs an Atelier-domain row
+indexed in Memex's federated Index. Atelier knows the `domain` (per
+`scripts/domain_vocabulary.DOMAINS`) so this is **Tier 2**: caller-built
+`librarian_output`, no Librarian subagent dispatch, no LLM call.
+
+For Tier 3 (prose ingest where the domain must be extracted from text)
+use `internal/memex/dispatch-ingest/SKILL.md` instead — that path
+dispatches the Librarian subagent via the Task tool.
 
 ## Inputs
 
-- `domain` — one of: `project`, `design`, `plan`, `meeting`, `task`, `document`
-- `title`
-- `body` (markdown)
-- `caller_agent_id` (an Atelier-seeded agent: `atelier-pm-1`, etc.)
-- `source_url` (optional)
-- `metadata` (optional dict — extra metadata to pass to the Librarian)
+- `domain` — must be in `scripts.domain_vocabulary.DOMAINS`
+- `title`, `body` — what gets indexed in FTS5 (`searchable` = `"{title}. {body[:1500]}"`)
+- `payload` — dict of target-table columns (will be persisted in `~/.memex/atelier.db.<table>`)
+- `target_table` — one of `projects`, `tasks`, `meeting_minutes`, `project_documents`
+- `caller_agent_id` — an Atelier-seeded agent (`atelier-pm-1`, etc.)
+- `metadata` — optional dict written to `index.db.documents.metadata`
+- `relations` — optional list of `{"to_index_id": ..., "rel_type": ...}` for explicit graph edges
 
 ## Recipe
 
-1. Call `scripts.backend_memex._memex_ingest(...)` which:
-   1. Runs `memex.brain.ingest_prepare(title, body, caller_agent_id, source_url)`.
-   2. If `prep["status"] == "skipped"` (source-hash match): return immediately.
-   3. If `prep["status"] == "ready"`:
-      - For ATELIER domains we use a **deterministic classification** (no
-        Librarian LLM dispatch) because the domain is already known. The
-        Atelier row gets the index_id and key Python generates.
-      - For richer classification (e.g., free-form ingested external docs)
-        a future `dispatch-write-full` variant can route through the
-        Task tool to the Librarian. Not in this wave.
-2. Return `{"status": "ingested", "index_id": ..., "row_id": ..., "key": ..., "domain": ...}`.
+The procedure body is `scripts.backend_memex._atelier_write(...)`. It:
+
+1. Calls `domain_vocabulary.assert_valid(domain)` — rejects unknown domains.
+2. Builds the classification dict (`index_id` UUID v7, `key` slug, `domain`, `searchable`, `metadata`, `relations`) and runs it through `librarian.validate_output()` — the shared schema check Memex v2.2.0 exposes.
+3. Best-effort embedding via `embeddings.encode(searchable)` — `None` if the provider is unavailable.
+4. Calls `librarian.write_entry(payload, librarian_output, target_store="atelier", target_table, caller_agent_id, embedding)` — Memex's canonical two-stage write (Index row → target-store row → row_id backlink).
+5. Returns `{"status": "ingested", "index_id", "key", "domain", "row_id", "relations"}`.
 
 ## Errors
 
-- `RuntimeError: Memex plugin not found` — Memex isn't installed despite mode=memex.
-  Recover: re-run `mode_detector._clear_cache()` and re-detect; fall back to local.
-- `ValueError: Unknown store: atelier` — bootstrap has not run. Caller must run
-  `internal/bootstrap-memex/SKILL.md` first.
+- `RuntimeError: Memex plugin not found` — Memex isn't installed despite `mode_detector` returning `memex`. Recover: re-run `mode_detector._clear_cache()` and re-detect; fall back to Local.
+- `ValueError: unknown domain` — caller passed a domain outside `DOMAINS`. Use one of the vocabulary entries or amend the spec (see `internal/memex/domain-vocabulary.md`).
+- `ValueError: Unknown store: atelier` — bootstrap has not run. Caller must run `internal/bootstrap-memex/SKILL.md` first.
+- `ValueError: librarian_output missing fields` — shouldn't happen since `_atelier_write` builds the dict; if seen, it indicates a Memex schema bump. Pin the Memex version requirement and update Atelier.
 ```
 
 - [ ] **Step 3: Create `internal/memex/dispatch-core/SKILL.md`**
@@ -1664,7 +1840,7 @@ def fake_memex_install(tmp_path, monkeypatch):
     plugin_root = tmp_path / "memex_plugin"
     (plugin_root / ".claude-plugin").mkdir(parents=True)
     (plugin_root / ".claude-plugin" / "plugin.json").write_text(json.dumps({
-        "name": "memex", "version": "2.1.0",
+        "name": "memex", "version": "2.2.0",
     }))
     # Real Memex's scripts/ are required; copy from the actual install if available
     real_memex = Path.home() / "Documents" / "Skills" / "memex"
@@ -1673,7 +1849,7 @@ def fake_memex_install(tmp_path, monkeypatch):
     shutil.copytree(real_memex / "scripts", plugin_root / "scripts")
 
     # Patch the plugin-cache location
-    cache_root = tmp_path / "claude" / "plugins" / "cache" / "agora" / "memex" / "2.1.0"
+    cache_root = tmp_path / "claude" / "plugins" / "cache" / "agora" / "memex" / "2.2.0"
     cache_root.parent.mkdir(parents=True)
     shutil.copytree(plugin_root, cache_root)
 
@@ -1721,6 +1897,24 @@ def test_bootstrap_is_idempotent(fake_memex_install):
     # Each role appears exactly once
     names = [r["name"] for r in roles]
     assert len(names) == len(set(names))
+
+
+def test_bootstrap_rejects_old_memex(fake_memex_install, tmp_path,
+                                      monkeypatch):
+    """Bootstrap MUST refuse to run against Memex < v2.2.0 because the
+    caller-built librarian_output contract isn't there."""
+    # Rewrite the fake plugin's manifest to claim v2.1.0
+    cache_root = (tmp_path / "claude" / "plugins" / "cache" / "agora"
+                  / "memex" / "2.2.0")
+    manifest = cache_root / ".claude-plugin" / "plugin.json"
+    manifest.write_text(json.dumps({"name": "memex", "version": "2.1.0"}))
+    # Force re-detection from the patched dir
+    from scripts import backend_memex
+    monkeypatch.setattr(backend_memex, "_memex_plugin_dir",
+                        lambda: cache_root)
+    from scripts.bootstrap import run_bootstrap
+    with pytest.raises(RuntimeError, match="requires Memex v2.2.0"):
+        run_bootstrap()
 ```
 
 - [ ] **Step 2: Create `scripts/bootstrap.py` containing the Python the SKILL.md procedure invokes**
@@ -1739,8 +1933,29 @@ from scripts import seed_data
 from scripts import backend_memex
 
 
+MIN_MEMEX_VERSION = (2, 2, 0)
+
+
+def _require_memex_version() -> str:
+    """Atelier Tier 2 writes require Memex v2.2.0+ (caller-built
+    librarian_output + librarian.validate_output). Raise if older."""
+    manifest = backend_memex._memex_plugin_dir() / ".claude-plugin" / "plugin.json"
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    version_str = data.get("version", "0.0.0")
+    parts = tuple(int(p) for p in version_str.split(".")[:3])
+    if parts < MIN_MEMEX_VERSION:
+        raise RuntimeError(
+            f"Atelier requires Memex v2.2.0+ (caller-built librarian_output). "
+            f"Installed: v{version_str}. Upgrade memex via agora "
+            f"(`claude plugin update memex`) or fall back to Atelier Local mode "
+            f"by uninstalling Memex."
+        )
+    return version_str
+
+
 def run_bootstrap() -> dict:
     backend_memex._ensure_memex_importable()
+    memex_version = _require_memex_version()
     from scripts import roles as memex_roles, agents as memex_agents, stores as memex_stores  # type: ignore
 
     memex_home = Path.home() / ".memex"
@@ -1779,9 +1994,10 @@ def run_bootstrap() -> dict:
     marker = memex_home / "atelier.bootstrap.json"
     marker.write_text(json.dumps({
         "version": version,
+        "memex_version": memex_version,
         "bootstrapped_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }, indent=2), encoding="utf-8")
-    return {"version": version, "marker": str(marker)}
+    return {"version": version, "memex_version": memex_version, "marker": str(marker)}
 ```
 
 - [ ] **Step 3: Run e2e tests**

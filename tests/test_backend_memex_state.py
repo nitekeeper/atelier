@@ -73,7 +73,7 @@ def test_upsert_session_updates_when_existing(mock_core):
 # ── transition_phase ─────────────────────────────────────────────────────
 
 
-def test_transition_phase_writes_to_sessions_phase_column(mock_core):
+def test_transition_phase_writes_to_projects_phase_column(mock_core):
     """Project row located by id → phase column updated in the projects
     table. Spec §4.3 puts the canonical phase on projects.phase, not on
     sessions — sessions snapshot a phase for retro purposes only."""

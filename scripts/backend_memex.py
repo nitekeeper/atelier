@@ -19,12 +19,15 @@ This module is built in three logical sections matching Plan 2 tasks 1-3:
 """
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
 import re
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 
 from scripts import domain_vocabulary
 
@@ -85,9 +88,70 @@ _memex_plugin_dir = _memex_plugin_root
 
 
 def _ensure_memex_importable() -> None:
+    """Legacy compat hook — historically appended the Memex plugin root
+    to `sys.path` so `from scripts.agents import librarian` would resolve
+    Memex's package rather than Atelier's `scripts/agents.py` module.
+
+    That approach was broken by design: Python caches the first
+    `scripts.agents` import in `sys.modules` (Atelier's single-file
+    module loads first, since `from scripts import domain_vocabulary` at
+    the top of this file triggers it), so the Memex package was never
+    actually reachable through normal imports. Production code now uses
+    `_load_memex_module` (file-path-based, bypasses sys.modules) and
+    this function is preserved only because several tests monkeypatch
+    it to a no-op. New code paths should call `_load_memex_module`.
+    """
     p = str(_memex_plugin_root())
     if p not in sys.path:
         sys.path.insert(0, p)
+
+
+@functools.lru_cache(maxsize=None)
+def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
+    """Load `<plugin_root>/scripts/<dotted-path>.py` (or the matching
+    package `__init__.py`) as an isolated module, sidestepping the
+    `sys.modules['scripts.agents']` shadow planted by Atelier's
+    `scripts/agents.py`.
+
+    The loaded module is given a synthetic name (`_memex_<dotted>`) so
+    it never collides with anything already in `sys.modules`. The
+    `lru_cache` decorator keeps each `(plugin_root, dotted)` pair from
+    paying the spec/exec cost more than once per process.
+
+    Tests that want to inject a stub module should call
+    `_load_memex_module.cache_clear()` and then either pre-populate the
+    cache with `cache_setdefault`-style monkeypatching or simply patch
+    the attributes on the returned module.
+    """
+    rel = dotted.replace(".", "/")
+    candidates = [
+        plugin_root / "scripts" / f"{rel}.py",
+        plugin_root / "scripts" / rel / "__init__.py",
+    ]
+    for path in candidates:
+        if path.is_file():
+            mod_name = f"_memex_{dotted.replace('.', '_')}"
+            spec = importlib.util.spec_from_file_location(mod_name, path)
+            if spec is None or spec.loader is None:  # pragma: no cover
+                raise ImportError(
+                    f"failed to build import spec for {path}")
+            module = importlib.util.module_from_spec(spec)
+            # Register under the synthetic name BEFORE exec_module so
+            # any internal relative imports the package may attempt can
+            # find their siblings. We do NOT shadow the real
+            # `scripts.<name>` entries.
+            sys.modules[mod_name] = module
+            spec.loader.exec_module(module)
+            return module
+    raise ImportError(
+        f"memex module {dotted!r} not found under {plugin_root / 'scripts'}")
+
+
+def _memex_module(dotted: str) -> ModuleType:
+    """Thin wrapper that pairs `_memex_plugin_root` with
+    `_load_memex_module` so every call site stays one line.
+    """
+    return _load_memex_module(_memex_plugin_root(), dotted)
 
 
 # ── Memex Tier 2 thin wrappers (also serve as patch surfaces in tests) ─────
@@ -95,9 +159,8 @@ def _ensure_memex_importable() -> None:
 
 def _memex_validate_output(librarian_output: dict) -> dict:
     """Delegate to Memex's librarian.validate_output."""
-    _ensure_memex_importable()
-    from scripts.agents import librarian as memex_librarian  # type: ignore
-    return memex_librarian.validate_output(librarian_output)
+    librarian = _memex_module("agents.librarian")
+    return librarian.validate_output(librarian_output)
 
 
 def _memex_write_entry(*, payload: dict, librarian_output: dict,
@@ -105,9 +168,8 @@ def _memex_write_entry(*, payload: dict, librarian_output: dict,
                        caller_agent_id: str,
                        embedding: bytes | None) -> dict:
     """Delegate to Memex's librarian.write_entry."""
-    _ensure_memex_importable()
-    from scripts.agents import librarian as memex_librarian  # type: ignore
-    return memex_librarian.write_entry(
+    librarian = _memex_module("agents.librarian")
+    return librarian.write_entry(
         payload=payload,
         librarian_output=librarian_output,
         target_store=target_store,
@@ -121,17 +183,15 @@ def _memex_embed(text: str) -> bytes | None:
     """Direct wrapper around Memex's embeddings.encode. Raises
     embeddings.EmbeddingUnavailable on provider miss — caller handles
     audit logging."""
-    _ensure_memex_importable()
-    from scripts import embeddings as memex_embeddings  # type: ignore
-    return memex_embeddings.encode(text)
+    embeddings = _memex_module("embeddings")
+    return embeddings.encode(text)
 
 
 def _memex_log_embedding_skip(exc, *, caller_agent_id: str,
                               index_id: str, input_chars: int) -> None:
     """Forward to Memex's structured audit log per v2.4.1 contract."""
-    _ensure_memex_importable()
-    from scripts import embeddings as memex_embeddings  # type: ignore
-    memex_embeddings.log_skip(
+    embeddings = _memex_module("embeddings")
+    embeddings.log_skip(
         exc,
         caller_agent_id=caller_agent_id,
         index_id=index_id,
@@ -161,6 +221,9 @@ def _metadata_narrative(metadata: dict) -> str:
     if not metadata:
         return ""
     parts: list[str] = []
+    # Iteration follows dict insertion order (Python 3.7+ guarantee), so
+    # callers that care about narrative ordering can control it by the
+    # order they assemble the metadata dict.
     for value in metadata.values():
         if isinstance(value, str) and value.strip():
             parts.append(value.strip())
@@ -190,8 +253,7 @@ def _next_seq(workspace_slug: str, project_slug: str, domain: str,
               date_str: str, title_slug: str) -> int:
     """Smallest unused integer ≥ 1 for the (workspace/project/domain/date/title)
     prefix. Runs a `key LIKE prefix%` scan over `index.documents`."""
-    _ensure_memex_importable()
-    from scripts import stores as memex_stores  # type: ignore
+    memex_stores = _memex_module("stores")
     prefix = (
         f"{workspace_slug}/{project_slug}/{domain}/{date_str}-{title_slug}-"
     )
@@ -247,14 +309,13 @@ def _is_embedding_unavailable(exc: BaseException) -> bool:
     """Lazy check: True iff `exc` is Memex's `EmbeddingUnavailable`.
 
     Same deferred-import pattern as `_is_duplicate_key_error` — keeps
-    the happy path free of an unconditional `scripts.embeddings` import,
+    the happy path free of an unconditional `scripts.embeddings` load,
     which is fragile under the Atelier/Memex namespace collision.
     """
     if type(exc).__name__ == "EmbeddingUnavailable":
         return True
     try:
-        _ensure_memex_importable()
-        from scripts import embeddings as memex_embeddings  # type: ignore
+        memex_embeddings = _memex_module("embeddings")
     except Exception:
         return False
     return isinstance(exc, memex_embeddings.EmbeddingUnavailable)
@@ -271,9 +332,8 @@ def _resolve_project_slug(project_id: int | None) -> str | None:
     the write path which is already a multi-call sequence."""
     if project_id is None:
         return None
-    _ensure_memex_importable()
-    from scripts import stores as memex_stores  # type: ignore
     try:
+        memex_stores = _memex_module("stores")
         rows = memex_stores.query(
             "atelier",
             "SELECT slug FROM projects WHERE id = ?",
@@ -295,9 +355,11 @@ def _auto_relations(metadata: dict, explicit: list[dict]) -> list[dict]:
     relations = list(explicit or [])
     project_id = (metadata or {}).get("project_id")
     if project_id is not None:
-        _ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
         try:
+            memex_stores = _memex_module("stores")
+            # TODO(multi-workspace): filter by workspace_id when
+            # multi-workspace lands. Today _WORKSPACE_SLUG is the only
+            # workspace so the project-domain JSON filter is sufficient.
             rows = memex_stores.query(
                 "index",
                 "SELECT index_id FROM documents WHERE domain = ? "
@@ -319,7 +381,8 @@ def _auto_relations(metadata: dict, explicit: list[dict]) -> list[dict]:
 def _atelier_write(*, target_table: str, domain: str, title: str,
                    body: str, payload: dict, metadata: dict,
                    relations: list[dict] | None,
-                   caller_agent_id: str) -> dict:
+                   caller_agent_id: str,
+                   project_slug_override: str | None = None) -> dict:
     """Tier 2 atelier write — synchronous, no LLM dispatch.
 
     Builds librarian_output deterministically, validates via Memex, and
@@ -330,11 +393,20 @@ def _atelier_write(*, target_table: str, domain: str, title: str,
     Per spec §6.7 + §6.8:
     - `key` is `<workspace>/<project>/<domain>/<date>-<title>-<seq>` (UNIQUE)
     - `searchable` is `title + body + metadata_narrative` (no truncation cap)
+
+    `project_slug_override` lets `write_project` plant its OWN slug as
+    the project slot of the key (it has no `project_id` row yet, since
+    it IS the project row). Other callers fall back to
+    `_resolve_project_slug(metadata.project_id)`.
     """
     domain_vocabulary.assert_valid(domain)
 
     created_at = _now()
-    project_slug = _resolve_project_slug((metadata or {}).get("project_id"))
+    if project_slug_override is not None:
+        project_slug = project_slug_override
+    else:
+        project_slug = _resolve_project_slug(
+            (metadata or {}).get("project_id"))
     key = _build_key(
         workspace_slug=_WORKSPACE_SLUG,
         project_slug=project_slug,
@@ -413,13 +485,12 @@ def _is_duplicate_key_error(exc: BaseException) -> bool:
     # class without collision-proofing.
     if type(exc).__name__ == "DuplicateKeyError":
         return True
-    # Fall back to a lazy import — only reached when the type-name probe
-    # fails (e.g. some future librarian rename). If the import itself
+    # Fall back to a lazy load — only reached when the type-name probe
+    # fails (e.g. some future librarian rename). If the load itself
     # fails, we conservatively report False so the original exception
     # propagates unaltered.
     try:
-        _ensure_memex_importable()
-        from scripts.agents import librarian as memex_librarian  # type: ignore
+        memex_librarian = _memex_module("agents.librarian")
     except Exception:
         return False
     return isinstance(exc, memex_librarian.DuplicateKeyError)
@@ -453,23 +524,32 @@ def write_document(*, domain: str, title: str, body: str,
     Validates `domain` against `scripts.domain_vocabulary.DOMAINS` BEFORE
     any Memex call, so the unknown-domain path never opens
     ~/.memex/config.json (callers see a clean `ValueError`).
+
+    `source_url` (when supplied) is folded into `metadata["source_url"]`
+    so it persists in `~/.memex/index.db.documents.metadata` alongside
+    other narrative fields and contributes to the FTS5 searchable blob
+    via `_metadata_narrative`.
     """
     # Hard-validate first — keeps the validation path hermetic.
     domain_vocabulary.assert_valid(domain)
     target_table = _DOMAIN_TO_TABLE.get(domain) or "project_documents"
+    metadata = dict(metadata or {})
+    if source_url:
+        metadata["source_url"] = source_url
+    now = _now()
     payload = {
         "title": title,
-        "filename": (metadata or {}).get("filename", _slug(title) + ".md"),
-        "project_id": (metadata or {}).get("project_id"),
+        "filename": metadata.get("filename", _slug(title) + ".md"),
+        "project_id": metadata.get("project_id"),
         "type": domain,
         "created_by": caller_agent_id,
-        "created_at": _now(),
-        "updated_at": _now(),
+        "created_at": now,
+        "updated_at": now,
     }
     return _atelier_write(
         target_table=target_table, domain=domain,
         title=title, body=body, payload=payload,
-        metadata=metadata or {}, relations=relations,
+        metadata=metadata, relations=relations,
         caller_agent_id=caller_agent_id,
     )
 
@@ -489,11 +569,12 @@ def write_task(*, title: str, description: str, project_id: int,
     if notes:
         body_lines += ["", "## Notes", notes]
     body = "\n".join(body_lines)
+    now = _now()
     payload = {
         "title": title, "description": description, "project_id": project_id,
         "created_by": created_by, "assigned_to": assigned_to,
         "priority": priority, "notes": notes, "status": "pending",
-        "created_at": _now(), "updated_at": _now(),
+        "created_at": now, "updated_at": now,
     }
     # `notes` is searchable narrative — include it in metadata so
     # _metadata_narrative folds it into the FTS5 blob.
@@ -523,12 +604,13 @@ def write_meeting(*, title: str, date: str, summary: str,
     body = (f"# {title}\n\nDate: {date}\n\n"
             f"## Summary\n\n{summary}\n\n"
             f"## Decisions\n\n{decisions}\n")
+    now = _now()
     payload = {
         "title": title, "date": date,
         "filename": f"{date}-{_slug(title)}.md",
         "summary": summary, "decisions": decisions,
         "created_by": created_by,
-        "created_at": _now(), "updated_at": _now(),
+        "created_at": now, "updated_at": now,
     }
     metadata: dict = {"date": date,
                       "summary": summary or "",
@@ -551,7 +633,13 @@ def write_project(*, workspace_id: int, slug: str, name: str,
     """Create a new project — distinct facade method per user decision +
     spec §4.3. Mirrors `write_document` but pins `domain="project"` and
     targets `projects`. `slug` is the canonical project identifier used
-    later by `_resolve_project_slug` for key construction."""
+    later by `_resolve_project_slug` for key construction.
+
+    Passes its own `slug` as the project slot of the new document's
+    canonical key (rather than the `(no-project)` literal) since a
+    project row IS its own project parent.
+    """
+    now = _now()
     payload = {
         "workspace_id": workspace_id,
         "slug": slug,
@@ -559,8 +647,8 @@ def write_project(*, workspace_id: int, slug: str, name: str,
         "description": description,
         "phase": "design:open",
         "created_by": created_by,
-        "created_at": _now(),
-        "updated_at": _now(),
+        "created_at": now,
+        "updated_at": now,
     }
     metadata = {
         "workspace_id": workspace_id,
@@ -572,6 +660,7 @@ def write_project(*, workspace_id: int, slug: str, name: str,
         title=name, body=description or "", payload=payload,
         metadata=metadata, relations=relations,
         caller_agent_id=created_by,
+        project_slug_override=slug,
     )
 
 
@@ -594,15 +683,18 @@ def write_project(*, workspace_id: int, slug: str, name: str,
 
 
 def _memex_core_insert(*, store: str, table: str, row: dict) -> dict:
-    _ensure_memex_importable()
-    from scripts import stores as memex_stores  # type: ignore
+    """Insert `row` into `<store>.<table>` via Memex Core; returns the
+    inserted row dict (including server-assigned id / timestamps)."""
+    memex_stores = _memex_module("stores")
     return memex_stores.insert(store, table, row)
 
 
 def _memex_core_update(*, store: str, table: str, row_id: int,
                       changes: dict) -> dict:
-    _ensure_memex_importable()
-    from scripts import stores as memex_stores  # type: ignore
+    """Apply `changes` to the row with `id = row_id` in `<store>.<table>`
+    via Memex Core; returns the updated row dict (or `{}` if Core
+    returned None, which means the row vanished mid-update)."""
+    memex_stores = _memex_module("stores")
     updated = memex_stores.update(store, table, row_id, changes)
     return updated or {}
 
@@ -611,14 +703,16 @@ def _memex_core_query(*, store: str, table: str,
                      where: dict | None = None) -> list[dict]:
     """Read-side helper. Builds a simple equality WHERE clause; column
     names are pinned to safe identifiers by callers (no user-controlled
-    column names reach here)."""
-    _ensure_memex_importable()
-    from scripts import stores as memex_stores  # type: ignore
+    column names reach here). Defensive: passes `table` through
+    `memex_stores.safe_identifier` so a stray bad identifier surfaces as
+    a clean ValueError rather than an interpolated-SQL surprise."""
+    memex_stores = _memex_module("stores")
+    safe_table = memex_stores.safe_identifier(table)
     if where:
         clauses = " AND ".join(f"{k} = ?" for k in where)
-        sql = f"SELECT * FROM {table} WHERE {clauses}"
+        sql = f"SELECT * FROM {safe_table} WHERE {clauses}"
         return memex_stores.query(store, sql, tuple(where.values()))
-    return memex_stores.query(store, f"SELECT * FROM {table}", ())
+    return memex_stores.query(store, f"SELECT * FROM {safe_table}", ())
 
 
 # ── Operational state writes ───────────────────────────────────────────────
@@ -666,12 +760,17 @@ def upsert_session(*, project_id: int, agent_id: str,
 def transition_phase(*, project_id: int, to_phase: str,
                      agent_id: str,
                      bypass_reason: str | None = None) -> dict:
-    """Advance projects.phase. Bypass logging is the CALLER's job — they
-    pre-record via `record_phase_bypass` BEFORE invoking
-    transition_phase, so a transient failure between the two writes
-    leaves a coherent audit trail (bypass-logged-but-not-transitioned
-    is a soft state we can detect; transitioned-but-not-logged would
-    silently drop the bypass record)."""
+    """Advance projects.phase.
+
+    `bypass_reason` is accepted for facade-signature parity with
+    backend.py and IS IGNORED here. Callers MUST invoke
+    `record_phase_bypass` BEFORE calling `transition_phase` to log the
+    audit trail. Passing `bypass_reason` here without first calling
+    `record_phase_bypass` silently loses audit data — this ordering is
+    deliberate so a transient failure between the two writes leaves a
+    coherent trail (bypass-logged-but-not-transitioned is a soft state
+    we can detect; transitioned-but-not-logged would drop the bypass
+    record silently)."""
     rows = _memex_core_query(store="atelier", table="projects",
                              where={"id": project_id})
     if not rows:
@@ -729,27 +828,60 @@ def record_phase_bypass(*, project_id: int, from_phase: str,
 
 def _memex_search(*, query: str, project_id: int | None = None,
                   domain: str | None = None,
+                  workspace_id: int | None = None,
+                  subdomain: str | None = None,
                   limit: int = 10) -> list[dict]:
     """Run an FTS5-only Memex Index search by calling the Reference
     Librarian's `execute_query_plan` directly. We skip the subagent step
     (`ask_prepare` builds an LLM prompt we'd never dispatch), so the
     prep helper is dead code on this path. Brain-style ask/synthesize
     (with the subagent loop) still go via `memex:run`.
+
+    Memex's `reference_librarian.execute_query_plan` honors only
+    `domain` and `store` filters; everything else (`project_id`,
+    `workspace_id`, `subdomain`) is post-filtered here by reading
+    `metadata.<field>` off each returned row. We over-fetch by 4x when a
+    post-filter is in effect so the caller still gets `limit` results
+    after pruning, then truncate.
     """
-    _ensure_memex_importable()
-    from scripts.agents import reference_librarian as memex_ref  # type: ignore
+    memex_ref = _memex_module("agents.reference_librarian")
+    needs_post_filter = (project_id is not None
+                         or workspace_id is not None
+                         or subdomain is not None)
     plan: dict = {
         "fts_query": query,
         "vector_query": None,
         "filters": {},
-        "limit": limit,
+        "limit": limit * 4 if needs_post_filter else limit,
     }
     if domain:
         plan["filters"]["domain"] = domain
-    if project_id is not None:
-        # FTS5 metadata filter on JSON-extracted project_id.
-        plan["filters"]["project_id"] = project_id
-    return memex_ref.execute_query_plan(plan, with_embedding=False)
+    raw = memex_ref.execute_query_plan(plan, with_embedding=False)
+    if not needs_post_filter:
+        return raw
+
+    def _meta(row: dict) -> dict:
+        md = row.get("metadata")
+        if isinstance(md, str):
+            try:
+                return json.loads(md)
+            except json.JSONDecodeError:
+                return {}
+        return md or {}
+
+    results: list[dict] = []
+    for row in raw:
+        md = _meta(row)
+        if project_id is not None and md.get("project_id") != project_id:
+            continue
+        if workspace_id is not None and md.get("workspace_id") != workspace_id:
+            continue
+        if subdomain is not None and md.get("subdomain") != subdomain:
+            continue
+        results.append(row)
+        if len(results) >= limit:
+            break
+    return results
 
 
 def find_documents(*, query: str, workspace_id: int | None = None,
@@ -757,13 +889,15 @@ def find_documents(*, query: str, workspace_id: int | None = None,
                    domain: str | None = None,
                    subdomain: str | None = None,
                    limit: int = 10) -> list[dict]:
-    """FTS5 search over the Memex index. `workspace_id` and `subdomain`
-    are accepted for facade-contract symmetry with backend.py but are
-    not yet pushed into the FTS plan — both will route through `filters`
-    once spec §6.4 nails down the canonical column for subdomain.
+    """FTS5 search over the Memex index. `workspace_id`, `project_id`,
+    and `subdomain` are honored via post-filtering against the
+    JSON-encoded `metadata` field on each row, since Memex's
+    `execute_query_plan` only natively understands `domain` / `store`
+    filters today. `domain` rides the native plan filter.
     """
     return _memex_search(query=query, project_id=project_id,
-                         domain=domain, limit=limit)
+                         domain=domain, workspace_id=workspace_id,
+                         subdomain=subdomain, limit=limit)
 
 
 def get_task(*, task_id: int) -> dict | None:
@@ -794,8 +928,7 @@ def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:
     already landed in Memex (avoiding `librarian.DuplicateKeyError`).
     Source refs are stable strings like `"atelier:tasks:42"`.
     """
-    _ensure_memex_importable()
-    from scripts import stores as memex_stores  # type: ignore
+    memex_stores = _memex_module("stores")
     rows = memex_stores.query(
         "index",
         "SELECT index_id FROM documents "
@@ -812,8 +945,7 @@ def _agents_db_path() -> str:
     registered store record (which carries `path`). `agents` is a
     reserved store name seeded by Memex bootstrap.
     """
-    _ensure_memex_importable()
-    from scripts import registry as memex_registry  # type: ignore
+    memex_registry = _memex_module("registry")
     rec = memex_registry.get_store("agents")
     if rec is None:
         raise RuntimeError(
@@ -830,8 +962,7 @@ def find_or_create_role(*, name: str, description: str) -> dict:
     Plan 3's `scripts/seed_roles.py` rewire to re-seed canonical roles
     without `IntegrityError` on already-present names.
     """
-    _ensure_memex_importable()
-    from scripts import roles as memex_roles  # type: ignore
+    memex_roles = _memex_module("roles")
     db_path = _agents_db_path()
     for r in memex_roles.list_roles(db_path):
         if r["name"] == name:
@@ -849,14 +980,13 @@ def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
     `(db_path, agent_id, name, role_id, profile)` per
     `memex/scripts/agents/__init__.py:26`.
     """
-    _ensure_memex_importable()
-    from scripts import agents as memex_agents  # type: ignore
+    agents_pkg = _memex_module("agents")
     db_path = _agents_db_path()
-    existing = memex_agents.get_agent(db_path, agent_id)
+    existing = agents_pkg.get_agent(db_path, agent_id)
     if existing is not None:
         return existing
-    return memex_agents.create_agent(db_path, agent_id, name, role_id,
-                                      profile)
+    return agents_pkg.create_agent(db_path, agent_id, name, role_id,
+                                    profile)
 
 
 def _memex_core_execute(*, store: str, sql: str,
@@ -876,13 +1006,12 @@ def _memex_core_execute(*, store: str, sql: str,
     here). Restrict use to DELETE / UPDATE statements that the other
     `_memex_core_*` helpers can't express.
     """
-    _ensure_memex_importable()
-    from scripts import registry as memex_registry  # type: ignore
-    from scripts.db import get_connection  # type: ignore
+    memex_registry = _memex_module("registry")
+    memex_db = _memex_module("db")
     rec = memex_registry.get_store(store)
     if rec is None:
         raise ValueError(f"Unknown store: {store}")
-    conn = get_connection(rec["path"])
+    conn = memex_db.get_connection(rec["path"])
     try:
         cur = conn.execute(sql, params)
         conn.commit()

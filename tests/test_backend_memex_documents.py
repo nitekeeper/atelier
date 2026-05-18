@@ -17,32 +17,93 @@ from scripts import backend_memex
 
 
 @pytest.fixture
-def fake_memex(tmp_path, monkeypatch):
-    """Stand up a temp ~/.memex/ pointed at a temp atelier.db.
-
-    The Memex-side modules (librarian, embeddings) are patched per test
-    via monkeypatch.setattr on backend_memex's thin wrappers, so we
-    don't need a real Memex install here.
-
-    Note: registry.json is a flat map per memex/scripts/registry.py; the
-    top-level keys ARE the store names (no `{"stores": {...}}` wrapper).
-    """
+def fake_memex_home(tmp_path, monkeypatch):
+    """Point `MEMEX_HOME` at a clean tmp directory. Pulled only by tests
+    that drive a code path which actually consults the env var (today
+    none under test_backend_memex_documents.py, since the C1 importlib
+    refactor removed the production `_memex_plugin_root` reliance on
+    MEMEX_HOME and all callers now stub `_memex_module` directly)."""
     memex_home = tmp_path / ".memex"
     memex_home.mkdir()
-    (memex_home / "registry.json").write_text(_json.dumps({
-        "atelier": {
-            "name": "atelier",
-            "path": (memex_home / "atelier.db").as_posix(),
-            "schema_version": "v1",
-            "registered_at": _datetime.now(_tz.utc).isoformat(),
-        },
-    }))
     # Memex v2.5.0's memex_home() validates that ~/.memex is under $HOME.
     # The explicit env var (with ALLOW_UNUSUAL) is the most reliable way
     # to point at a tmp path during tests.
     monkeypatch.setenv("MEMEX_HOME", str(memex_home))
     monkeypatch.setenv("MEMEX_HOME_ALLOW_UNUSUAL", "1")
     return memex_home
+
+
+@pytest.fixture
+def fake_memex_registry(fake_memex_home):
+    """Write a registry.json with an `atelier` store entry into the
+    tmp `fake_memex_home`. Pulled by tests that exercise Memex Core
+    registry reads — none today (all `_memex_module` calls are stubbed
+    per test). Kept as a focused fixture per QA N15 so future tests
+    pull only the bytes they need."""
+    (fake_memex_home / "registry.json").write_text(_json.dumps({
+        "atelier": {
+            "name": "atelier",
+            "path": (fake_memex_home / "atelier.db").as_posix(),
+            "schema_version": "v1",
+            "registered_at": _datetime.now(_tz.utc).isoformat(),
+        },
+    }))
+    return fake_memex_home
+
+
+# Back-compat alias: most existing tests in this file used to take
+# `fake_memex` for its env-var side effect. None of them actually need
+# `registry.json`, so the alias points at the env-only fixture. Tests
+# that genuinely need the registry should switch to `fake_memex_registry`.
+@pytest.fixture
+def fake_memex(fake_memex_home):
+    return fake_memex_home
+
+
+def test_load_memex_module_resolves_agents_librarian_without_collision(
+        tmp_path, monkeypatch):
+    """C1/I4: stand up a fake Memex plugin tree with the same shape as
+    the real install (`scripts/agents/librarian.py` AS A PACKAGE) and
+    verify production resolves it via `_memex_module("agents.librarian")`
+    without the `scripts.agents` shadow from Atelier's own
+    `scripts/agents.py` taking over.
+
+    BEFORE the importlib refactor, the production code did
+    `from scripts.agents import librarian` — which resolves to Atelier's
+    flat `scripts/agents.py` module (no `librarian` attribute) and
+    raises `ImportError`. This test exists specifically to prove that
+    failure mode is gone.
+    """
+    plugin = tmp_path / "memex_plugin"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        _json.dumps({"name": "memex", "version": "test"}))
+    scripts_dir = plugin / "scripts" / "agents"
+    scripts_dir.mkdir(parents=True)
+    (plugin / "scripts" / "__init__.py").write_text("")
+    (scripts_dir / "__init__.py").write_text("")
+    (scripts_dir / "librarian.py").write_text(
+        "MARKER = 'fake-memex-librarian'\n"
+        "class DuplicateKeyError(Exception):\n"
+        "    pass\n"
+    )
+
+    monkeypatch.setattr(backend_memex, "_memex_plugin_root", lambda: plugin)
+    # Bust the lru_cache so this test's fake-plugin path doesn't pollute
+    # adjacent tests (and isn't itself polluted by them).
+    backend_memex._load_memex_module.cache_clear()
+    monkeypatch.setattr(backend_memex._load_memex_module, "cache_clear",
+                        backend_memex._load_memex_module.cache_clear,
+                        raising=False)
+
+    mod = backend_memex._memex_module("agents.librarian")
+    assert mod.MARKER == "fake-memex-librarian"
+    # And the DuplicateKeyError class is reachable — production's
+    # isinstance fallback in `_is_duplicate_key_error` will find it.
+    assert isinstance(mod.DuplicateKeyError("k"), Exception)
+    # Bust the cache afterward so the synthetic plugin doesn't bleed
+    # into other tests that load the real Memex.
+    backend_memex._load_memex_module.cache_clear()
 
 
 def test_write_document_validates_domain(fake_memex):
@@ -105,6 +166,41 @@ def test_write_document_builds_librarian_output_and_writes(fake_memex,
     assert key.endswith("-auth-design-1")
     assert "Auth Design" in captured["librarian_output"]["searchable"]
     assert captured["librarian_output"]["metadata"]["project_id"] == 1
+
+
+def test_write_document_folds_source_url_into_metadata(fake_memex,
+                                                         monkeypatch):
+    """I2: `source_url` reaches `write_document` from the facade and
+    MUST land in `metadata["source_url"]` so it persists to
+    `~/.memex/index.db.documents.metadata` and contributes to the FTS5
+    searchable blob via `_metadata_narrative`."""
+    captured = {}
+    monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
+    monkeypatch.setattr(backend_memex, "_memex_write_entry",
+        lambda **k: (captured.update(k), {"status": "ingested",
+                                          "index_id": k["librarian_output"]["index_id"],
+                                          "key": k["librarian_output"]["key"],
+                                          "domain": k["librarian_output"]["domain"],
+                                          "row_id": 1, "relations": []})[1])
+    monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
+                        lambda pid: None)
+    monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
+    monkeypatch.setattr(backend_memex, "_auto_relations",
+                        lambda md, r: list(r or []))
+
+    backend_memex.write_document(
+        domain="adr", title="Use OAuth2",
+        body="OAuth2 chosen over SAML.",
+        metadata={"project_id": 1},
+        caller_agent_id="atelier-pm-1",
+        source_url="https://example.com/adr-007",
+    )
+    md = captured["librarian_output"]["metadata"]
+    assert md["source_url"] == "https://example.com/adr-007"
+    # And it joins the searchable narrative so FTS5 ranks documents
+    # by URL hits.
+    assert "https://example.com/adr-007" in captured["librarian_output"]["searchable"]
 
 
 def test_write_task_targets_tasks_table_with_task_domain(fake_memex,
@@ -198,12 +294,11 @@ def test_embedding_unavailable_is_swallowed_and_logged(fake_memex, monkeypatch):
     """When embeddings.encode raises EmbeddingUnavailable, persist with
     embedding=None AND record the skip via embeddings.log_skip (memex
     v2.4.1 contract). Untyped exceptions must propagate — see
-    test_embedding_generic_exception_propagates below."""
-    # Stand up a fake `scripts.embeddings` module so backend_memex's
-    # `from scripts import embeddings as memex_embeddings` resolves
-    # without a real Memex install. `_try_embed` references
-    # `memex_embeddings.EmbeddingUnavailable` for the `except` filter,
-    # so we must inject the same class the production code catches.
+    test_embedding_generic_exception_propagates below. Also asserts that
+    the audit log call forwards `index_id` and `input_chars` (Nit N9)."""
+    # The production code resolves `embeddings` via `_memex_module`.
+    # Inject a fake into the module-load hook so `_is_embedding_unavailable`
+    # picks up the class without consulting the real Memex install.
     class _FakeEmbeddingUnavailable(Exception):
         def __init__(self, reason: str, provider: str, detail: str = ""):
             self.reason = reason
@@ -211,19 +306,25 @@ def test_embedding_unavailable_is_swallowed_and_logged(fake_memex, monkeypatch):
             self.detail = detail
             super().__init__(f"embedding unavailable: {reason}")
 
-    fake_embeddings = types.ModuleType("scripts.embeddings")
+    fake_embeddings = types.ModuleType("embeddings")
     fake_embeddings.EmbeddingUnavailable = _FakeEmbeddingUnavailable
     fake_embeddings.encode = lambda text: b""
     fake_embeddings.log_skip = lambda *a, **k: None
-    monkeypatch.setitem(sys.modules, "scripts.embeddings", fake_embeddings)
-    # Stub the importer so it doesn't try to locate ~/.memex/config.json.
-    monkeypatch.setattr(backend_memex, "_ensure_memex_importable",
-                        lambda: None)
+
+    real_memex_module = backend_memex._memex_module
+
+    def fake_memex_module(name: str):
+        if name == "embeddings":
+            return fake_embeddings
+        return real_memex_module(name)
+    monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
 
     captured_embedding = {}
+    captured_searchable = {}
     log_skip_calls = []
 
     def boom(text):
+        captured_searchable["text"] = text
         raise _FakeEmbeddingUnavailable(
             reason="not_configured", provider="openai",
             detail="OPENAI_API_KEY unset",
@@ -237,6 +338,7 @@ def test_embedding_unavailable_is_swallowed_and_logged(fake_memex, monkeypatch):
 
     def fake_write_entry(**kwargs):
         captured_embedding["embedding"] = kwargs["embedding"]
+        captured_embedding["index_id"] = kwargs["librarian_output"]["index_id"]
         return {"status": "ingested",
                 "index_id": kwargs["librarian_output"]["index_id"],
                 "key": kwargs["librarian_output"]["key"],
@@ -261,29 +363,41 @@ def test_embedding_unavailable_is_swallowed_and_logged(fake_memex, monkeypatch):
     assert len(log_skip_calls) == 1
     assert log_skip_calls[0]["reason"] == "not_configured"
     assert log_skip_calls[0]["caller_agent_id"] == "atelier-product-manager-1"
+    # Nit N9: log_skip must forward index_id and input_chars (the size
+    # of the searchable blob `_try_embed` was given).
+    assert log_skip_calls[0]["index_id"] == captured_embedding["index_id"]
+    assert log_skip_calls[0]["input_chars"] == len(captured_searchable["text"])
 
 
 def test_embedding_generic_exception_propagates(fake_memex, monkeypatch):
     """Memex v2.4.1 narrowed the contract: only EmbeddingUnavailable is
     a degraded-mode signal. A generic exception means a real bug; it
-    must not be silently treated as 'no embedding today.'"""
-    # Inject a fake embeddings module so the `except` clause can
-    # reference EmbeddingUnavailable without a real Memex install.
+    must not be silently treated as 'no embedding today.' Also asserts
+    `_memex_log_embedding_skip` is NOT invoked on this path (Nit N10)."""
     class _FakeEmbeddingUnavailable(Exception):
         pass
-    fake_embeddings = types.ModuleType("scripts.embeddings")
+    fake_embeddings = types.ModuleType("embeddings")
     fake_embeddings.EmbeddingUnavailable = _FakeEmbeddingUnavailable
     fake_embeddings.encode = lambda text: b""
     fake_embeddings.log_skip = lambda *a, **k: None
-    monkeypatch.setitem(sys.modules, "scripts.embeddings", fake_embeddings)
-    monkeypatch.setattr(backend_memex, "_ensure_memex_importable",
-                        lambda: None)
+
+    real_memex_module = backend_memex._memex_module
+
+    def fake_memex_module(name: str):
+        if name == "embeddings":
+            return fake_embeddings
+        return real_memex_module(name)
+    monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
 
     def boom(text):
         raise RuntimeError("unexpected DB-side failure")
 
+    from unittest.mock import MagicMock
+    mock_log = MagicMock()
+
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
     monkeypatch.setattr(backend_memex, "_memex_embed", boom)
+    monkeypatch.setattr(backend_memex, "_memex_log_embedding_skip", mock_log)
     monkeypatch.setattr(backend_memex, "_resolve_project_slug",
                         lambda pid: None)
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
@@ -295,17 +409,22 @@ def test_embedding_generic_exception_propagates(fake_memex, monkeypatch):
             title="x", description="y", project_id=1,
             created_by="atelier-product-manager-1",
         )
+    # Nit N10: a non-EmbeddingUnavailable exception must NOT invoke
+    # the audit log (that's reserved for typed misses only).
+    mock_log.assert_not_called()
 
 
 def test_duplicate_key_triggers_single_retry(fake_memex, monkeypatch):
     """Memex v2.3.0+ enforces UNIQUE on documents.key. On a race between
     seq-allocation and write, `librarian.write_entry` raises
     DuplicateKeyError. `_atelier_write` retries ONCE with a fresh seq."""
-    # Stand up a fake librarian module so DuplicateKeyError is importable.
-    # Mirror memex's actual class shape: __init__(self, key, existing_index_id).
-    fake_librarian = types.ModuleType("scripts.agents.librarian")
+    # Stand up a fake librarian module so DuplicateKeyError is reachable
+    # via _is_duplicate_key_error's isinstance fallback. The class is
+    # named `DuplicateKeyError` so the structural type-name probe also
+    # matches (which is what production's first-line check uses).
+    fake_librarian = types.ModuleType("agents.librarian")
 
-    class _DupErr(Exception):
+    class DuplicateKeyError(Exception):
         def __init__(self, *args, key=None, existing_index_id=None):
             # Accept both positional (memex's real signature) and kwargs
             # forms so this stub matches whichever the production code
@@ -318,21 +437,25 @@ def test_duplicate_key_triggers_single_retry(fake_memex, monkeypatch):
                 self.existing_index_id = existing_index_id
             super().__init__(f"duplicate {self.key}")
 
-    fake_librarian.DuplicateKeyError = _DupErr
-    # Also need a real-shaped scripts.agents package so the
-    # `from scripts.agents import librarian` import resolves.
-    fake_agents_pkg = types.ModuleType("scripts.agents")
-    fake_agents_pkg.librarian = fake_librarian
-    monkeypatch.setitem(sys.modules, "scripts.agents", fake_agents_pkg)
-    monkeypatch.setitem(sys.modules, "scripts.agents.librarian", fake_librarian)
-    monkeypatch.setattr(backend_memex, "_ensure_memex_importable",
-                        lambda: None)
+    fake_librarian.DuplicateKeyError = DuplicateKeyError
+    # Inject into backend_memex's loader cache via the `_memex_module`
+    # hook so production's `_is_duplicate_key_error` fallback can locate
+    # the class via `_memex_module("agents.librarian")` without touching
+    # the real Memex install.
+    real_memex_module = backend_memex._memex_module
+
+    def fake_memex_module(name: str):
+        if name == "agents.librarian":
+            return fake_librarian
+        return real_memex_module(name)
+    monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
 
     call_count = {"n": 0}
     def fake_write_entry(**kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
-            raise _DupErr(kwargs["librarian_output"]["key"], "existing-idx")
+            raise DuplicateKeyError(kwargs["librarian_output"]["key"],
+                                    "existing-idx")
         return {"status": "ingested",
                 "index_id": kwargs["librarian_output"]["index_id"],
                 "key": kwargs["librarian_output"]["key"],
@@ -360,6 +483,52 @@ def test_duplicate_key_triggers_single_retry(fake_memex, monkeypatch):
     assert call_count["n"] == 2  # retried exactly once
     assert result["row_id"] == 7
     assert result["key"].endswith("-fix-bug-2")  # second seq used
+
+
+def test_duplicate_key_retry_only_once(fake_memex, monkeypatch):
+    """N11: prove the retry is bounded to ONE re-attempt. If the
+    re-attempt also collides on UNIQUE(documents.key), the second
+    DuplicateKeyError must propagate — we don't loop forever."""
+    fake_librarian = types.ModuleType("agents.librarian")
+
+    class DuplicateKeyError(Exception):
+        def __init__(self, key, existing_index_id=None):
+            self.key = key
+            self.existing_index_id = existing_index_id
+            super().__init__(f"duplicate {key}")
+
+    fake_librarian.DuplicateKeyError = DuplicateKeyError
+    real_memex_module = backend_memex._memex_module
+
+    def fake_memex_module(name: str):
+        if name == "agents.librarian":
+            return fake_librarian
+        return real_memex_module(name)
+    monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
+
+    call_count = {"n": 0}
+    def fake_write_entry(**kwargs):
+        call_count["n"] += 1
+        # Both attempts collide.
+        raise DuplicateKeyError(kwargs["librarian_output"]["key"], "existing")
+
+    monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
+    monkeypatch.setattr(backend_memex, "_memex_write_entry", fake_write_entry)
+    monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
+                        lambda pid: "myproj")
+    monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
+    monkeypatch.setattr(backend_memex, "_auto_relations",
+                        lambda md, r: list(r or []))
+
+    with pytest.raises(DuplicateKeyError):
+        backend_memex.write_task(
+            title="Fix bug", description="x", project_id=1,
+            created_by="atelier-pm-1",
+        )
+    # Exactly two attempts — the initial write + ONE retry. If we ever
+    # see three here, the retry loop has lost its bound.
+    assert call_count["n"] == 2
 
 
 def test_canonical_key_format(fake_memex, monkeypatch):
@@ -422,3 +591,65 @@ def test_auto_part_of_relation_when_project_id_in_metadata(fake_memex,
     rels = captured["librarian_output"]["relations"]
     assert any(r["rel_type"] == "part_of" and r["to_index_id"] == "proj-idx-1"
                for r in rels)
+
+
+def test_auto_relations_runs_real_logic_and_emits_part_of_edge(fake_memex,
+                                                                monkeypatch):
+    """I6: exercise the real `_auto_relations` production logic (NOT a
+    stub). Seed `index.documents` with a `project` row whose
+    metadata.project_id matches the new write, then call write_task and
+    confirm the resulting librarian_output carries the auto-discovered
+    `part_of` edge."""
+    # Fake `scripts.stores` so _auto_relations' SELECT returns our seed.
+    seeded_rows = [{"index_id": "proj-doc-uuid-1"}]
+    queries_seen: list = []
+
+    def fake_query(store, sql, params):
+        queries_seen.append((store, sql, params))
+        if store == "index" and "domain" in sql:
+            # _auto_relations is the only caller that touches index.documents
+            # with a JSON metadata predicate in this test.
+            return list(seeded_rows)
+        return []
+
+    fake_stores = types.SimpleNamespace(query=fake_query)
+    real_memex_module = backend_memex._memex_module
+
+    def fake_memex_module(name: str):
+        if name == "stores":
+            return fake_stores
+        return real_memex_module(name)
+    monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
+
+    captured = {}
+    monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
+    monkeypatch.setattr(backend_memex, "_memex_write_entry",
+        lambda **k: (captured.update(k), {"status": "ingested",
+                                          "index_id": "x",
+                                          "key": k["librarian_output"]["key"],
+                                          "domain": "task",
+                                          "row_id": 1,
+                                          "relations": k["librarian_output"]["relations"]})[1])
+    monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
+                        lambda pid: "p")
+    monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
+    # Intentionally DO NOT stub _auto_relations — that's the function
+    # under test on this path.
+
+    backend_memex.write_task(
+        title="t", description="d", project_id=42,
+        created_by="atelier-engineer-1",
+    )
+    rels = captured["librarian_output"]["relations"]
+    # The auto-edge points at the seeded project document.
+    assert any(r["rel_type"] == "part_of"
+               and r["to_index_id"] == "proj-doc-uuid-1"
+               for r in rels), rels
+    # And the SQL we ran really did query index.documents for the
+    # project domain with project_id=42 — i.e. we exercised the real
+    # `_auto_relations`, not a leftover stub.
+    matching = [q for q in queries_seen
+                if q[0] == "index" and "domain" in q[1]
+                and "project" in q[2] and 42 in q[2]]
+    assert matching, f"no SELECT against index.documents seen: {queries_seen}"

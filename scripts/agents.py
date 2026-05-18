@@ -1,85 +1,202 @@
+"""Agents — mode-conditional thin wrapper.
+
+The canonical create path goes through `backend.find_or_create_agent`,
+which is idempotent and routes per `mode_detector.detect_mode()` to
+either `backend_local` (workspace-local `agents` table at
+`<workspace_root>/.ai/atelier.db`) or `backend_memex` (Memex's
+`~/.memex/agents.db`). Reads + non-create mutations (`get`, `update`,
+`delete`, `list`, `search`) reach the appropriate backend directly
+because the facade does not expose narrow-surface helpers for them —
+`_memex_module(...)` on the Memex side, `backend_local._conn()` on
+the Local side.
+
+Public function signatures are preserved from pre-retrofit. The
+`db_path` argument is retained for back-compat — Local mode discovers
+the DB via `backend_local._conn()` (workspace_root + .ai/atelier.db),
+Memex mode resolves `~/.memex/agents.db` via the Memex registry.
+`scripts/db.py` is intentionally NOT imported here — Plan 3 deletes
+that module and Local-mode callers shouldn't re-introduce the coupling
+(see `backend_local.py` lines 16-20 for the policy).
+
+Memex-mode dispatch uses `backend_memex._memex_module(...)` rather than
+`from scripts import agents as ...`, because `sys.modules` caching
+would otherwise resolve the latter back to THIS module (namespace
+collision resolved in Wave 1 T8-10 via importlib.util).
+"""
+from __future__ import annotations
+
 from datetime import datetime, timezone
-from scripts.db import get_connection
+
+from scripts import backend, mode_detector
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def create_agent(db_path: str, id: str, name: str, role_id: int, profile: str) -> dict:
-    now = _now()
-    conn = get_connection(db_path)
-    conn.execute(
-        "INSERT INTO agents (id, name, role_id, profile, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (id, name, role_id, profile, now, now)
+# ── Memex-mode primitives ────────────────────────────────────────────────
+
+
+def _memex_agents_pkg():
+    from scripts import backend_memex
+    return backend_memex._memex_module("agents")
+
+
+def _memex_stores():
+    from scripts import backend_memex
+    return backend_memex._memex_module("stores")
+
+
+def _memex_db_path() -> str:
+    from scripts import backend_memex
+    return backend_memex._agents_db_path()
+
+
+# ── Public CRUD surface ──────────────────────────────────────────────────
+
+
+def create_agent(db_path: str, id: str, name: str, role_id: int,
+                 profile: str) -> dict:
+    """Create an `agents` row (or return the existing row if `id` is
+    taken). Idempotent — routes through `backend.find_or_create_agent`,
+    which returns the existing row unchanged when `id` is already
+    present (other fields are NOT updated on hit; updates go through
+    `update_agent`).
+
+    `db_path` is retained for signature compatibility only — Local mode
+    resolves the DB via `backend_local._conn()` (workspace_root +
+    .ai/atelier.db), Memex mode resolves `~/.memex/agents.db`.
+    """
+    return backend.find_or_create_agent(
+        agent_id=id, name=name, role_id=role_id, profile=profile,
     )
-    conn.commit()
-    conn.close()
-    return get_agent(db_path, id)
 
 
 def get_agent(db_path: str, agent_id: str) -> dict | None:
-    conn = get_connection(db_path)
-    cur = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
-    row = cur.fetchone()
-    conn.close()
-    if row is None:
-        return None
-    return dict(zip([col[0] for col in cur.description], row))
+    if mode_detector.detect_mode() == "memex":
+        pkg = _memex_agents_pkg()
+        return pkg.get_agent(_memex_db_path(), agent_id)
+    from scripts import backend_local
+    c = backend_local._conn()
+    try:
+        row = c.execute(
+            "SELECT * FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else None
 
 
-def update_agent(db_path: str, agent_id: str, **kwargs) -> dict:
+def update_agent(db_path: str, agent_id: str, **kwargs) -> dict | None:
+    """Update mutable fields (`name`, `role_id`, `profile`). Unknown
+    keys are silently dropped — same shape as pre-retrofit behaviour."""
     allowed = {"name", "role_id", "profile"}
-    updates = {k: v for k, v in kwargs.items() if k in allowed}
-    updates["updated_at"] = _now()
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
-    conn = get_connection(db_path)
-    conn.execute(
-        f"UPDATE agents SET {set_clause} WHERE id = ?",
-        (*updates.values(), agent_id)
-    )
-    conn.commit()
-    conn.close()
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if mode_detector.detect_mode() == "memex":
+        pkg = _memex_agents_pkg()
+        return pkg.update_agent(_memex_db_path(), agent_id, **fields)
+    fields["updated_at"] = _now()
+    from scripts import backend_local
+    c = backend_local._conn()
+    try:
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        c.execute(
+            f"UPDATE agents SET {set_clause} WHERE id = ?",
+            (*fields.values(), agent_id),
+        )
+        c.commit()
+    finally:
+        c.close()
     return get_agent(db_path, agent_id)
 
 
 def delete_agent(db_path: str, agent_id: str) -> bool:
-    conn = get_connection(db_path)
-    cur = conn.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
-    conn.commit()
-    conn.close()
-    return cur.rowcount > 0
+    if mode_detector.detect_mode() == "memex":
+        pkg = _memex_agents_pkg()
+        if hasattr(pkg, "delete_agent"):
+            return pkg.delete_agent(_memex_db_path(), agent_id)
+        # Fallback for older Memex versions: drop straight to stores.
+        return bool(_memex_stores().delete(
+            name="agents", table="agents", row_id=agent_id))
+    from scripts import backend_local
+    c = backend_local._conn()
+    try:
+        cur = c.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+        c.commit()
+        return cur.rowcount > 0
+    finally:
+        c.close()
 
 
 def list_agents(db_path: str, role_id: int | None = None) -> list[dict]:
-    conn = get_connection(db_path)
-    if role_id is not None:
-        cur = conn.execute("SELECT * FROM agents WHERE role_id = ? ORDER BY name", (role_id,))
-    else:
-        cur = conn.execute("SELECT * FROM agents ORDER BY name")
-    rows = cur.fetchall()
-    cols = [col[0] for col in cur.description]
-    conn.close()
-    return [dict(zip(cols, row)) for row in rows]
+    """List agents, optionally filtered by `role_id`. When `role_id` is
+    None, returns all. Signature preserved from pre-retrofit."""
+    if mode_detector.detect_mode() == "memex":
+        pkg = _memex_agents_pkg()
+        if role_id is not None and hasattr(pkg, "list_by_role"):
+            return pkg.list_by_role(_memex_db_path(), role_id)
+        all_agents = pkg.list_agents(_memex_db_path())
+        if role_id is None:
+            return all_agents
+        return [a for a in all_agents if a.get("role_id") == role_id]
+    from scripts import backend_local
+    c = backend_local._conn()
+    try:
+        if role_id is not None:
+            rows = c.execute(
+                "SELECT * FROM agents WHERE role_id = ? ORDER BY name",
+                (role_id,),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM agents ORDER BY name").fetchall()
+    finally:
+        c.close()
+    return [dict(r) for r in rows]
 
 
-def search_agents(db_path: str, query: str, role_id: int | None = None) -> list[dict]:
+def search_agents(db_path: str, query: str,
+                  role_id: int | None = None) -> list[dict]:
+    """Substring search on `name` + `profile`, optionally filtered by
+    `role_id`. Memex mode reaches through `stores.query` because LIKE
+    is not expressible via the equality-only `stores.query` where-dict."""
     pattern = f"%{query}%"
-    conn = get_connection(db_path)
-    if role_id is not None:
-        cur = conn.execute(
-            "SELECT * FROM agents WHERE role_id = ? AND (name LIKE ? OR profile LIKE ?) ORDER BY name",
-            (role_id, pattern, pattern)
+    if mode_detector.detect_mode() == "memex":
+        stores = _memex_stores()
+        if role_id is not None:
+            return stores.query(
+                "agents",
+                "SELECT * FROM agents WHERE role_id = ? "
+                "AND (name LIKE ? OR profile LIKE ?) ORDER BY name",
+                (role_id, pattern, pattern),
+            )
+        return stores.query(
+            "agents",
+            "SELECT * FROM agents WHERE name LIKE ? OR profile LIKE ? "
+            "ORDER BY name",
+            (pattern, pattern),
         )
-    else:
-        cur = conn.execute(
-            "SELECT * FROM agents WHERE name LIKE ? OR profile LIKE ? ORDER BY name",
-            (pattern, pattern)
-        )
-    rows = cur.fetchall()
-    cols = [col[0] for col in cur.description]
-    conn.close()
-    return [dict(zip(cols, row)) for row in rows]
+    from scripts import backend_local
+    c = backend_local._conn()
+    try:
+        if role_id is not None:
+            rows = c.execute(
+                "SELECT * FROM agents WHERE role_id = ? "
+                "AND (name LIKE ? OR profile LIKE ?) ORDER BY name",
+                (role_id, pattern, pattern),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM agents WHERE name LIKE ? OR profile LIKE ? "
+                "ORDER BY name",
+                (pattern, pattern),
+            ).fetchall()
+    finally:
+        c.close()
+    return [dict(r) for r in rows]
+
+
+# ── CLI shim ─────────────────────────────────────────────────────────────
 
 
 if __name__ == "__main__":
@@ -87,7 +204,7 @@ if __name__ == "__main__":
     import json
     import argparse
 
-    db_path = ".ai/memex.db"
+    db_path = ".ai/atelier.db"
     cmd = sys.argv[1]
 
     if cmd == "create":

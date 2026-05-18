@@ -78,8 +78,6 @@ EXPECTED_METHODS = [
     # populated DB.
     "find_or_create_role",
     "find_or_create_agent",
-    # Legacy convenience (kept for back-compat with scripts/projects.py)
-    "find_project_by_key",
 ]
 
 
@@ -119,7 +117,6 @@ def test_facade_module_exists():
                                   description="PM")),
     ("find_or_create_agent", dict(agent_id="atelier-pm-1", name="PM",
                                    role_id=1, profile="pm")),
-    ("find_project_by_key", dict(project_key="abc")),
 ])
 def test_method_raises_not_implemented(fn_name, kwargs):
     fn = getattr(backend, fn_name)
@@ -302,12 +299,6 @@ def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
     """Return the agent row with this `agent_id`, creating it if absent.
     Idempotent."""
     _not_implemented("find_or_create_agent")
-
-
-# ── Legacy convenience ──────────────────────────────────────────────────
-
-def find_project_by_key(*, project_key: str) -> dict | None:
-    _not_implemented("find_project_by_key")
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -315,7 +306,7 @@ def find_project_by_key(*, project_key: str) -> dict | None:
 ```
 pytest tests/test_backend_skeleton.py -v
 ```
-Expected: 23 passed (1 facade-module test + 21 parametrized NotImplementedError tests + 1 keyword-only signature test). The parametrized count includes `lookup_index_id_by_source_ref`, `find_or_create_role`, and `find_or_create_agent` per the cross-plan dependency audit.
+Expected: 22 passed (1 facade-module test + 20 parametrized NotImplementedError tests + 1 keyword-only signature test). The parametrized count includes `lookup_index_id_by_source_ref`, `find_or_create_role`, and `find_or_create_agent` per the cross-plan dependency audit.
 
 - [ ] **Step 5: Commit**
 
@@ -464,6 +455,51 @@ def test_plugin_reachable_false_when_manifest_wrong_name(tmp_path):
     (memex_home / "config.json").write_text(json.dumps({"plugin_root": str(plugin_root)}))
     with patch("scripts.mode_detector._memex_home", return_value=memex_home):
         assert mode_detector._memex_plugin_reachable() is False
+
+
+def test_plugin_reachable_false_when_memex_below_api_floor(tmp_path):
+    """Defensive — pin points at memex but version < 2.2.0 (no
+    caller-built librarian_output). Returns False so atelier degrades
+    to local mode rather than crashing on the first Tier 2 write."""
+    memex_home = tmp_path / ".memex"
+    memex_home.mkdir()
+    plugin_root = tmp_path / "memex-2.1.0"
+    _make_fake_plugin_root(plugin_root)
+    # Overwrite the manifest with a sub-floor version
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "memex", "version": "2.1.0"})
+    )
+    (memex_home / "config.json").write_text(json.dumps({"plugin_root": str(plugin_root)}))
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        assert mode_detector._memex_plugin_reachable() is False
+
+
+def test_plugin_reachable_true_when_memex_at_api_floor(tmp_path):
+    """Exact-floor version (2.2.0) passes."""
+    memex_home = tmp_path / ".memex"
+    memex_home.mkdir()
+    plugin_root = tmp_path / "memex-2.2.0"
+    _make_fake_plugin_root(plugin_root)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "memex", "version": "2.2.0"})
+    )
+    (memex_home / "config.json").write_text(json.dumps({"plugin_root": str(plugin_root)}))
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        assert mode_detector._memex_plugin_reachable() is True
+
+
+def test_plugin_reachable_false_when_manifest_version_unparseable(tmp_path):
+    """Defensive — manifest has no version field or malformed value."""
+    memex_home = tmp_path / ".memex"
+    memex_home.mkdir()
+    plugin_root = tmp_path / "memex-malformed"
+    _make_fake_plugin_root(plugin_root)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "memex"})  # no version key
+    )
+    (memex_home / "config.json").write_text(json.dumps({"plugin_root": str(plugin_root)}))
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        assert mode_detector._memex_plugin_reachable() is False
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -496,16 +532,38 @@ def _memex_home() -> Path:
     return Path.home() / ".memex"
 
 
+_MEMEX_API_FLOOR = (2, 2, 0)  # spec §6 prerequisite — caller-built librarian_output
+
+
+def _parse_version_tuple(s: str) -> tuple[int, int, int] | None:
+    """Parse a "X.Y.Z" string into a (major, minor, patch) tuple of ints.
+    Returns None if the string isn't parseable (e.g., empty, malformed)."""
+    if not isinstance(s, str):
+        return None
+    parts = s.strip().split(".")
+    if len(parts) < 3:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return None
+
+
 def _memex_plugin_reachable() -> bool:
     """True if Memex itself has resolved + pinned its plugin root in
-    ~/.memex/config.json (Memex v2.5.0+ contract — see spec §4.2 rationale).
+    ~/.memex/config.json (Memex v2.5.0+ contract — see spec §4.2 rationale)
+    AND the pinned memex version meets the v2.2.0 API floor (spec §6
+    prerequisite — caller-built `librarian_output`).
 
     The pin is written by Memex's Step 0.2 preflight after it has already
     validated that the plugin directory exists, scripts/install.py is a
     regular file, and .claude-plugin/plugin.json declares name="memex".
     Atelier re-verifies the manifest because the cached pin could go
     stale between Memex invocations (e.g., a version directory was
-    deleted during cache cleanup).
+    deleted during cache cleanup), AND re-checks the version because a
+    user could (in theory) downgrade memex below atelier's API floor.
+    Returning False on under-floor versions degrades to local mode
+    rather than crashing on the first Tier 2 write.
     """
     config = _memex_home() / "config.json"
     if not config.exists():
@@ -527,7 +585,12 @@ def _memex_plugin_reachable() -> bool:
         manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
-    return manifest_data.get("name") == "memex"
+    if manifest_data.get("name") != "memex":
+        return False
+    version = _parse_version_tuple(manifest_data.get("version", ""))
+    if version is None or version < _MEMEX_API_FLOOR:
+        return False
+    return True
 
 
 def detect_mode() -> Mode:
@@ -555,7 +618,7 @@ def _clear_cache() -> None:
 ```
 pytest tests/test_mode_detector.py -v
 ```
-Expected: 11 passed.
+Expected: 14 passed (11 from the prior amendments + 3 new version-floor tests: under-floor, exact-floor, unparseable-version).
 
 - [ ] **Step 5: Commit**
 
@@ -1723,7 +1786,7 @@ git commit -m "feat(workspace): wave-0 workspace_root + find_git_root helpers (P
 
 | # | Check | Pass criterion |
 |---|---|---|
-| 1 | Task 1 — facade | `scripts/backend.py` declares all 17 methods from spec §4.3 plus the `find_project_by_key` legacy convenience plus three cross-plan helpers (`lookup_index_id_by_source_ref`, `find_or_create_role`, `find_or_create_agent`) — 21 total; every call raises `NotImplementedError`; signatures are keyword-callable. |
+| 1 | Task 1 — facade | `scripts/backend.py` declares all 17 methods from spec §4.3 plus three cross-plan helpers (`lookup_index_id_by_source_ref`, `find_or_create_role`, `find_or_create_agent`) — 20 total; every call raises `NotImplementedError`; signatures are keyword-callable. |
 | 2 | Task 2 — mode detector | `detect_mode()` returns `"local"` when `~/.memex/registry.json` absent or pinned plugin unreachable; `"memex"` only when both present + manifest validated; result cached. |
 | 3 | Task 3 — roles seed | `templates/roles.json` exists; `load_role_seed()` returns ≥46 dicts; PM canonical name is "Product Manager"; parity with `scripts/seed_roles.py:ROLES` enforced by test. |
 | 4 | Task 4 — agents seed | `templates/agents/<agent_id>.json` exists for every entry in `scripts/seed_roles.py:ROLES`; `load_agent_seed()` returns ≥46 dicts; every `role_name` resolves in `roles.json`. |

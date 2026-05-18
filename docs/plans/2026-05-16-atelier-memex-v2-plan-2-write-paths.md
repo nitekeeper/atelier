@@ -1121,7 +1121,7 @@ git commit -m "feat(backend-memex): wave-1 operational state writes"
 - Modify: `scripts/backend_memex.py` (append below Task 2's region)
 - Test: `tests/test_backend_memex_reads.py`
 
-Implements `find_documents`, `get_task`, `list_tasks`, `find_project_by_key`. Uses Memex Index search for the document query; direct Core CRUD for the rest.
+Implements `find_documents`, `get_task`, `list_tasks`. Uses Memex Index search for the document query; direct Core CRUD for the rest.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1166,13 +1166,6 @@ def test_list_tasks_can_filter_by_status():
                       return_value=[]) as q:
         backend_memex.list_tasks(project_id=1, status="blocked")
     assert q.call_args.kwargs["where"]["status"] == "blocked"
-
-
-def test_find_project_by_key():
-    with patch.object(backend_memex, "_memex_core_query",
-                      return_value=[{"id": 1, "project_key": "abc"}]):
-        r = backend_memex.find_project_by_key(project_key="abc")
-    assert r["id"] == 1
 
 
 # ── Cross-plan helpers ─────────────────────────────────────────────────
@@ -1415,12 +1408,6 @@ def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
     if status:
         where["status"] = status
     return _memex_core_query(store="atelier", table="tasks", where=where)
-
-
-def find_project_by_key(*, project_key: str) -> dict | None:
-    rows = _memex_core_query(store="atelier", table="projects",
-                             where={"project_key": project_key})
-    return rows[0] if rows else None
 
 
 # ── Cross-plan helpers (added per cross-plan dependency audit) ─────────────
@@ -2411,11 +2398,6 @@ def test_list_tasks_with_status(project_root):
     assert len(r) == 1
 
 
-def test_find_project_by_key(project_root):
-    """In local mode project_key is the git remote URL hash; for the
-    fixture there's no remote so it falls back to the project name."""
-    r = backend_local.find_project_by_key(project_key="myproj")
-    assert r is not None
 ```
 
 - [ ] **Step 2: Run tests — expect failure**
@@ -2462,17 +2444,6 @@ def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
                          (project_id,)).fetchall()
     c.close()
     return [dict(r) for r in rows]
-
-
-def find_project_by_key(*, project_key: str) -> dict | None:
-    """Look up a project by its key. In local mode we don't have a
-    dedicated project_key column on the v1 schema, so we match by name
-    as a fallback. A future migration adds a real project_key column."""
-    c = _conn()
-    row = c.execute("SELECT * FROM projects WHERE name = ?",
-                    (project_key,)).fetchone()
-    c.close()
-    return dict(row) if row else None
 
 
 # ── Cross-plan helpers (added per cross-plan dependency audit) ─────────────
@@ -2784,7 +2755,6 @@ def test_every_facade_method_dispatches():
             find_documents=lambda **k: [],
             get_task=lambda **k: None,
             list_tasks=lambda **k: [],
-            find_project_by_key=lambda **k: None,
             lookup_index_id_by_source_ref=lambda **k: None,
             find_or_create_role=lambda **k: {"id": 1, "name": k["name"]},
             find_or_create_agent=lambda **k: {"id": k["agent_id"]},
@@ -2867,10 +2837,6 @@ def get_task(**kwargs) -> dict | None:
 
 def list_tasks(**kwargs) -> list[dict]:
     return _impl().list_tasks(**kwargs)
-
-
-def find_project_by_key(**kwargs) -> dict | None:
-    return _impl().find_project_by_key(**kwargs)
 
 
 # Cross-plan helpers (Plan 1 facade dep). Each is symmetric across
@@ -3201,7 +3167,7 @@ git commit -m "feat(bootstrap): wave-1.5 Memex bootstrap module + e2e tests"
 - All 10 tasks merged.
 - `pytest tests/` green (existing + new).
 - `scripts/backend.py` dispatches; no `NotImplementedError` reachable.
-- `scripts/backend_memex.py` and `scripts/backend_local.py` both export the same 15 names: `write_document`, `write_project`, `write_task`, `write_meeting`, `upsert_session`, `transition_phase`, `update_task_status`, `record_phase_bypass`, `find_documents`, `get_task`, `list_tasks`, `find_project_by_key`, `lookup_index_id_by_source_ref`, `find_or_create_role`, `find_or_create_agent`.
+- `scripts/backend_memex.py` and `scripts/backend_local.py` both export the same 14 names: `write_document`, `write_project`, `write_task`, `write_meeting`, `upsert_session`, `transition_phase`, `update_task_status`, `record_phase_bypass`, `find_documents`, `get_task`, `list_tasks`, `lookup_index_id_by_source_ref`, `find_or_create_role`, `find_or_create_agent`.
 - `backend_memex.py` additionally exports `_memex_core_execute` (the composite-key DELETE primitive Plan 3's `scripts/meetings.py` calls directly; intentionally NOT routed through `scripts/backend.py` because it takes raw SQL).
 - `write_task` and `write_meeting` accept optional `source_ref: str` kwarg in BOTH backends. In Memex mode it folds into `metadata["source_ref"]` so the row is discoverable by `lookup_index_id_by_source_ref` (idempotent-replay contract for Plan 4 `migrate_to_memex.py`). In Local mode the kwarg exists for signature parity but the value is effectively unused (no federated Index to dedupe against).
 - `scripts/bootstrap.py` is idempotent (verified by e2e test).

@@ -715,7 +715,7 @@ def resolve_scope() -> Scope:
 }
 ```
 
-Switching projects within a workspace is an explicit op: `atelier project switch <slug>` (a new internal procedure). No CWD-magic — once a workspace has multiple projects, the user picks deliberately, with the choice persisted until they pick again. Per-shell scoping isn't worth the complexity; the state file is single-current-project-per-workspace.
+Switching projects within a workspace is an explicit op: `/atelier:load --project <slug>` resolves the slug against `workspaces.projects`, updates the per-workspace pointer in `~/.atelier/state.json`, and loads the project's session in a single step. No CWD-magic — once a workspace has multiple projects, the user picks deliberately, with the choice persisted until they pick again. Per-shell scoping isn't worth the complexity; the state file is single-current-project-per-workspace.
 
 ### 10.4 Workspace-less operations
 
@@ -1059,7 +1059,7 @@ Wave-based per the user's intent for the implementation plan; this section docum
 | Surface invariants | Assert exactly 4 user-facing skills are registered in `.claude-plugin/plugin.json` |
 | Internal-only invariant | Assert all `internal/local/*` and `internal/memex/*` procedures have no `name:` field that would expose them as slash commands |
 | **Workspace detection** | Monorepo fixture with two projects; assert `resolve_scope()` finds the right workspace + prompts for project when ambiguous; auto-selects when single project; persists session state |
-| **Project switch** | `atelier project switch <slug>` updates state.json; subsequent commands operate on the new project |
+| **Project switch** | `/atelier:load --project <slug>` updates state.json; subsequent commands operate on the new project |
 | **Domain validation** | `assert_valid(domain)` accepts every entry in `DOMAINS`; rejects unknown values with the documented `ValueError` message |
 | **Domain mapping invariant** | Every entry in `DOMAINS` has a target table in `_DOMAIN_TO_TABLE`; every target is a real Atelier table |
 | **Subdomain soft validation** | Unknown subdomains accepted; canonical subdomains preserved; audit util can enumerate frequencies |
@@ -1108,8 +1108,8 @@ These do not block design approval but are decisions the plan-writer will need t
 3. Exact dispatch wrapper API in `scripts/backend.py` — pure dict-in/dict-out; preserved facade signatures from current modules where possible.
 4. Migration prompt UX — single y/N at the top of the next command (Plan 4 Task 2). Optionally also offer a dedicated `atelier:migrate` skill as a manual trigger; deferred to v1.1.
 5. **Memex-side capability gaps (§6.10)** — Plan 2 Task 3 (reads) is BLOCKED until the three questions in §6.10 are answered by reading Memex's `internal/index/search/SKILL.md`. The plan-writer must add this as a Wave-1 precondition.
-6. **Workspace identity hashing** — `identity` column uses `repo_url` if a remote exists, else `realpath(git_root)`. What if a user clones the same repo to two paths? Treat as one workspace (remote URL match) — but if the repo has no remote yet (fresh `git init`), the two checkouts become two workspaces. Edge case; document the rule, accept the corner.
-7. **Project-switch UX** — `atelier project switch <slug>` is an internal procedure; the user-facing surface could be a flag on `/atelier:load` (`/atelier:load --project oauth-rewrite`) instead of a dedicated skill. Plan 4 picks.
+6. **RESOLVED (2026-05-17): Workspace identity edge case.** Rule: identity = `repo_url` if a remote exists, else `realpath(git_root)` (already encoded at §0.1 + §10.1). Two checkouts of the same remote → one workspace (URL match). Two checkouts of a remoteless repo → two workspaces (paths differ). No behavior change; edge accepted.
+7. **RESOLVED (2026-05-17): Project-switch UX is a flag on `/atelier:load`.** `/atelier:load --project <slug>` resolves the slug, updates the per-workspace pointer in `~/.atelier/state.json`, and loads the session in one step. No new top-level skill — keeps the "4 user-visible skills" invariant intact. Plan 4 Task 5 documents the flag.
 8. **Legacy reader workspace synthesis** — `scripts/migrate_to_memex.py` (§11.4) reads v1.0.13 `projects` rows that have no `workspace_id`. The reader synthesizes one workspace per distinct project's `repo` URL (or per project name if no `repo` was set), writes the workspace first, then writes the project with the new `workspace_id`. v1.0.13 → v1.1.0 mapping is recorded in an in-memory translation table during the migration. Plan 4 Task 1 (migration) implements this.
 
 ## 16. Wave structure (preview for `writing-plans`)

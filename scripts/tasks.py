@@ -4,13 +4,17 @@
 Writes go through `backend.write_task` (Librarian-mediated in Memex mode,
 direct INSERT in Local mode). Reads use `backend.get_task` / `list_tasks`.
 Status / claim / complete flow goes through `backend.update_task_status`
-so the timestamp side-effects (claimed_at / completed_at) live in one
-place.
+so the Local-mode timestamp side-effects (claimed_at / completed_at) live
+in one place.
 
-assign_task is the one mutation NOT covered by the backend surface (Plan 2
-intentionally scoped `update_task_status` to status-only writes); we route
-it through the active backend's `_conn()` helper so the connection still
-honours the mode-dispatched DB path.
+# Note: backend_memex.update_task_status does not set claimed_at/completed_at
+# yet — Plan 4 v1.2 followup.
+
+assign_task / delete_task / general update_task are the mutations NOT
+covered by the backend surface (Plan 2 intentionally scoped
+`update_task_status` to status-only writes). They are routed mode-by-mode
+via `_memex_module("stores")` / `_memex_core_update` in Memex mode and a
+direct `backend_local._conn()` connection in Local mode.
 
 ## Priority TEXT → INT coercion
 
@@ -28,10 +32,13 @@ Unknown strings collapse to 0 ("no priority") rather than raising — the
 priority surface is advisory; a typo shouldn't crash a task create.
 """
 from __future__ import annotations
+import logging
 from datetime import datetime, timezone
 
 from scripts import backend, mode_detector
 
+
+_log = logging.getLogger(__name__)
 
 _PRIORITY_MAP = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
@@ -40,33 +47,31 @@ def _coerce_priority(p) -> int:
     """Coerce a priority input (TEXT or INT) to the v1.1.0 INTEGER form.
 
     - String: case-folded lookup in `_PRIORITY_MAP`. Unknown → 0.
+      Stringified ints ("0".."4") are accepted via int() fallback so
+      legacy CLI muscle memory keeps working.
     - None: 0 (column default).
+    - bool: int(True) == 1, int(False) == 0 — booleans are ints in Python,
+      so `_coerce_priority(True)` returns 1 by design. Don't pass bools.
     - Anything else: int() coercion (lets callers pass float / numpy ints
       without ceremony).
     """
     if p is None:
         return 0
     if isinstance(p, str):
-        return _PRIORITY_MAP.get(p.lower(), 0)
+        key = p.lower()
+        if key in _PRIORITY_MAP:
+            return _PRIORITY_MAP[key]
+        # Accept stringified ints from the CLI ("0".."4"); fall through
+        # to 0 on anything else (priority is advisory — typo ≠ crash).
+        try:
+            return int(p)
+        except ValueError:
+            return 0
     return int(p)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _local_conn():
-    """Open a connection against the active backend's DB.
-
-    Used by the two writes that don't have a backend surface yet
-    (assign_task, delete_task). Imports lazily so the Memex code path
-    is never reached when running in Local mode.
-    """
-    if mode_detector.detect_mode() == "memex":
-        from scripts import backend_memex
-        return backend_memex  # caller must use the memex-specific helpers
-    from scripts import backend_local
-    return backend_local._conn()
 
 
 # ── Writes ─────────────────────────────────────────────────────────────────
@@ -103,14 +108,21 @@ def create_task(db_path: str, project_id: int, title: str,
     task = get_task(db_path, result["row_id"])
     if task is None:
         # Memex-mode writes may return a different row id semantics; fall
-        # back to synthesising from the write result + inputs.
+        # back to synthesising from the write result + inputs. Log a
+        # warning — synthesis means the round-trip read missed; callers
+        # see a row that wasn't actually re-fetched.
+        _log.warning(
+            "create_task: re-fetch missed for row_id=%s; synthesising row "
+            "from write inputs (Memex-mode id semantics)", result["row_id"],
+        )
+        now = _now()
         return {
             "id": result["row_id"], "project_id": project_id, "title": title,
             "description": description, "created_by": created_by,
             "assigned_to": assigned_to,
             "priority": _coerce_priority(priority),
             "notes": notes, "status": "pending",
-            "created_at": _now(), "updated_at": _now(),
+            "created_at": now, "updated_at": now,
             "index_id": result.get("index_id"),
         }
     return task
@@ -139,10 +151,10 @@ def update_task(db_path: str, task_id: int, **kwargs) -> dict:
         )
 
     # General path: write directly via the active backend's connection.
-    # Memex mode isn't covered here — the deferred update_task surface
-    # remains a backend.write/_memex_core_update follow-up (Plan 3 Task 3
-    # body explicitly defers assign + delete + general update to the
-    # mode-aware shortcut).
+    # TODO(v1.2): backend.update_task (general partial update beyond
+    # status) is deferred — Plan 2's `update_task_status` was
+    # status-only by design. Until a typed surface lands, route through
+    # _memex_core_update (Memex) / backend_local._conn() (Local).
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
         changes = dict(updates)
@@ -168,11 +180,18 @@ def update_task(db_path: str, task_id: int, **kwargs) -> dict:
 
 
 def delete_task(db_path: str, task_id: int) -> bool:
+    # TODO(v1.2): backend.delete_task is not on the surface yet — Plan 2
+    # scoped writes to insert/update only. Until that lands, route via
+    # `_memex_module("stores").delete` (Memex) and a direct
+    # backend_local._conn() DELETE (Local). The previous `from scripts
+    # import stores` pattern collided with Atelier's own `scripts/`
+    # namespace; `_memex_module` resolves the Memex plugin module by
+    # file path, bypassing sys.modules.
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
-        memex_stores.delete(name="atelier", table="tasks", row_id=task_id)
+        backend_memex._memex_module("stores").delete(
+            "atelier", "tasks", task_id,
+        )
         return True
     from scripts import backend_local
     c = backend_local._conn()
@@ -187,10 +206,11 @@ def delete_task(db_path: str, task_id: int) -> bool:
 def assign_task(db_path: str, task_id: int, agent_id: str) -> dict:
     """Set `assigned_to` AND flip status → 'assigned'.
 
-    Two-field update isn't on the backend surface (Plan 2 scoped
-    `update_task_status` to status-only); we write the columns directly
-    via the active backend's connection and let the v1.1.0 row factory
-    surface a clean dict.
+    TODO(v1.2): two-field update isn't on the backend surface (Plan 2
+    scoped `update_task_status` to status-only). Until a typed
+    `backend.assign_task` lands, we write the columns directly via
+    `_memex_core_update` (Memex) / `backend_local._conn()` (Local) and
+    let the v1.1.0 row factory surface a clean dict.
     """
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
@@ -254,13 +274,19 @@ def list_tasks(db_path: str, status: str | None = None,
     """List tasks, optionally filtered.
 
     `backend.list_tasks` requires `project_id` (spec §4.3) so the
-    backend can stay efficient (no full-table scan). When the caller
-    omits `project_id`, we fall back to a direct connection on the
-    active backend.
+    backend can stay efficient (no full-table scan).
+
+    Mode asymmetry when `project_id` is None: Memex mode raises
+    NotImplementedError (cross-project search is a v1.2 surface); Local
+    mode falls back to a direct `backend_local._conn()` full-table
+    scan. Callers should always pass `project_id` today.
     """
     if project_id is not None:
         rows = backend.list_tasks(project_id=project_id, status=status)
         if assigned_to is not None:
+            # TODO(v1.2): assigned_to is a post-filter symptom — push
+            # the predicate into `backend.list_tasks` once its surface
+            # widens, so we don't pull rows we'll throw away.
             rows = [r for r in rows if r.get("assigned_to") == assigned_to]
         return rows
 
@@ -345,7 +371,10 @@ if __name__ == "__main__":
         parser.add_argument("title")
         parser.add_argument("created_by")
         parser.add_argument("--description")
-        parser.add_argument("--priority", default=0)
+        # `type=str` is explicit so `_coerce_priority` can accept either
+        # the legacy TEXT form ("critical"|"high"|...) or stringified
+        # ints ("0".."4") without ceremony.
+        parser.add_argument("--priority", type=str, default="0")
         args = parser.parse_args(sys.argv[2:])
         print(json.dumps(create_task(db_path, project_id=args.project_id, title=args.title,
                                       created_by=args.created_by, description=args.description,
@@ -365,7 +394,7 @@ if __name__ == "__main__":
         parser.add_argument("--notes")
         parser.add_argument("--title")
         parser.add_argument("--description")
-        parser.add_argument("--priority")
+        parser.add_argument("--priority", type=str)
         args = parser.parse_args(sys.argv[2:])
         kwargs = {k: v for k, v in vars(args).items() if k != "task_id" and v is not None}
         print(json.dumps(update_task(db_path, args.task_id, **kwargs), indent=2))

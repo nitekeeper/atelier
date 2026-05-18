@@ -59,9 +59,11 @@ the original body, open `raw_path` from disk.
   tokens with the corpus will miss. Reach for substring/phrase hints
   instead.
 - **No cross-project search.** FTS5 lives in the project-local
-  `<workspace>/.atelier/atelier.db`. Other projects' docs are invisible.
+  `<workspace>/.ai/atelier.db`. Other projects' docs are invisible.
 - **No re-ranking beyond raw FTS5 BM25.** Order is "best-FTS5-score
   first" within a single query; cross-query relevance is not stable.
 - **No deletes feed the FTS index.** If you ever delete a row from
   `documents`, also `DELETE FROM documents_fts WHERE rowid = ?` (the
-  insert trigger is one-directional in the v1.1.0 schema).
+  insert trigger is one-directional in the v1.1.0 schema). See
+  `migrations/local-only/<file>.sql` — only the AFTER INSERT trigger is
+  shipped; AFTER DELETE / AFTER UPDATE are not.

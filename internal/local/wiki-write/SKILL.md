@@ -1,5 +1,5 @@
 ---
-description: Internal — Local-mode document write. FTS5-indexed via `documents_fts`; raw body archived to `<workspace>/.atelier/raw/`.
+description: Internal — Local-mode document write. FTS5-indexed via `documents_fts`; raw body archived to `<workspace>/.ai/raw/`. Style note — the `internal/local/` subtree deliberately documents recipes as Python-API calls (e.g. `backend_local.write_document`) rather than CLI scripts, in contrast to the `internal/<name>/` subtree.
 ---
 
 # local/wiki-write (internal)
@@ -21,7 +21,7 @@ document. It performs three side-effects atomically per call:
 
 1. **Archive the raw body.** Computes a sha256 over `body`, slugifies
    `title`, and writes the bytes to
-   `<workspace>/.atelier/raw/<2char-hash>/<canonical_key>.md`. Idempotent
+   `<workspace>/.ai/raw/<2char-hash>/<canonical_key>.md`. Idempotent
    on content hash — re-archiving identical bytes is a no-op. See
    `internal/local/wiki-archive/SKILL.md`.
 2. **Insert one row into `documents`.** Columns: `key`, `domain`,
@@ -56,7 +56,9 @@ mode-agnostic):
 
 `index_id` is **always None** in Local mode — there is no federated
 index. Callers that condition on `index_id` must treat None as the
-local-success sentinel.
+local-success sentinel. `relations` is **always `[]`** in Local mode
+(matches the Local `index_id = None` convention — no federated graph
+exists to relate documents across).
 
 ## Hard rules
 
@@ -66,4 +68,5 @@ local-success sentinel.
 - Never truncate `searchable`. FTS5 needs the full corpus per spec §6.8.
 - The caller must already hold a valid `caller_agent_id` (FK to
   `agents.id`). Mint it via `backend_local.find_or_create_agent` first if
-  unsure.
+  unsure. (`find_or_create_agent` is defined in `backend_local.py` — see
+  Plan 2 Task 7-bis for the forward reference.)

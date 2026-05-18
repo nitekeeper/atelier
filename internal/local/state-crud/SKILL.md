@@ -6,7 +6,7 @@ description: Internal — Local-mode CRUD for operational state (sessions, tasks
 
 Local-mode replacement for the Memex `state-crud` recipe. Operational
 state — work-in-progress sessions, task status, phase-bypass audit
-trail — is plain SQL on the project-local `<workspace>/.atelier/atelier.db`.
+trail — is plain SQL on the project-local `<workspace>/.ai/atelier.db`.
 No Librarian, no document indirection, no FTS5 (state rows are not
 searchable text; if you need a row to be searchable, also call
 `backend_local.write_document`).

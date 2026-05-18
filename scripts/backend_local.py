@@ -272,3 +272,194 @@ def write_project(*, workspace_id: int, slug: str, name: str,
     result["row_id"] = row_id
     result["index_id"] = None
     return result
+
+
+# ── Operational state — Tier 1 ─────────────────────────────────────────────
+
+def _workspace_id_for_project(c: sqlite3.Connection, project_id: int) -> int:
+    """Derive `workspace_id` from `project_id` via the projects FK chain.
+
+    Used by `upsert_session`: the v1.1.0 `sessions.workspace_id` is NOT
+    NULL but the facade signature accepts only `(project_id, agent_id)`.
+    We resolve the workspace through `projects.workspace_id` rather than
+    making the caller plumb it through — cheaper than a signature change
+    and matches the Memex backend, which faces the same problem.
+    """
+    row = c.execute(
+        "SELECT workspace_id FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(
+            f"project_id={project_id} not found — cannot derive workspace_id"
+        )
+    return row["workspace_id"]
+
+
+def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
+                   current_tasks: str | None = None,
+                   accomplished: str | None = None,
+                   next_action: str | None = None,
+                   status: str = "in-progress",
+                   pm_notes: str | None = None) -> dict:
+    """Idempotent session upsert for `(project_id, agent_id, status='in-progress')`.
+
+    The schema doesn't enforce uniqueness on `(project_id, agent_id)` — a
+    pair can legitimately have many closed sessions plus at most one
+    in-progress session. Upsert matches against the in-progress session
+    so reopened work continues a single thread rather than spawning a
+    new row.
+
+    Only non-None fields overwrite the existing row; this is the
+    "patch-style" upsert spec §6.1 documents.
+    """
+    c = _conn()
+    try:
+        ws_id = _workspace_id_for_project(c, project_id)
+        existing = c.execute(
+            "SELECT * FROM sessions WHERE project_id = ? AND agent_id = ? "
+            "AND status = 'in-progress' LIMIT 1",
+            (project_id, agent_id),
+        ).fetchone()
+        if existing is not None:
+            sets: list[str] = []
+            vals: list[Any] = []
+            for col, val in [
+                ("phase", phase),
+                ("current_tasks", current_tasks),
+                ("accomplished", accomplished),
+                ("next_action", next_action),
+                ("pm_notes", pm_notes),
+            ]:
+                if val is not None:
+                    sets.append(f"{col} = ?")
+                    vals.append(val)
+            # status is a kwarg with a default, so we have to be careful
+            # not to flip an already-closed session back to in-progress
+            # accidentally. Only update if the caller asked for a status
+            # different from what's already there.
+            if status != existing["status"]:
+                sets.append("status = ?")
+                vals.append(status)
+            sets.append("updated_at = ?")
+            vals.append(_now())
+            vals.append(existing["id"])
+            c.execute(
+                f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?",
+                vals,
+            )
+            c.commit()
+            row = c.execute(
+                "SELECT * FROM sessions WHERE id = ?", (existing["id"],)
+            ).fetchone()
+        else:
+            now = _now()
+            cur = c.execute(
+                "INSERT INTO sessions (workspace_id, project_id, agent_id, "
+                "phase, current_tasks, accomplished, next_action, status, "
+                "pm_notes, opened_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ws_id, project_id, agent_id, phase, current_tasks,
+                 accomplished, next_action, status, pm_notes,
+                 now, now, now),
+            )
+            new_id = cur.lastrowid
+            c.commit()
+            row = c.execute(
+                "SELECT * FROM sessions WHERE id = ?", (new_id,)
+            ).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else {}
+
+
+def transition_phase(*, project_id: int, to_phase: str,
+                     agent_id: str, bypass_reason: str | None = None) -> dict:
+    """Advance `projects.phase`.
+
+    Spec §3 (soft walls): the facade-level `transition_phase` does NOT
+    validate the transition graph — that's `scripts/workflow.py:advance_phase`'s
+    job. This backend method is the lowest-level write and trusts the
+    caller. `bypass_reason` is accepted for signature parity but logging
+    the bypass row is the caller's responsibility (`record_phase_bypass`).
+
+    Returns the updated projects row. `agent_id` is in the signature for
+    audit-trail parity with the Memex backend but Local-mode `projects`
+    doesn't have a `phase_changed_by` column — kwarg accepted, no DB write.
+    """
+    c = _conn()
+    try:
+        c.execute(
+            "UPDATE projects SET phase = ?, updated_at = ? WHERE id = ?",
+            (to_phase, _now(), project_id),
+        )
+        c.commit()
+        row = c.execute(
+            "SELECT * FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else {}
+
+
+def update_task_status(*, task_id: int, status: str,
+                       notes: str | None = None) -> dict:
+    """Set `tasks.status` (and optionally `tasks.notes`).
+
+    `claimed_at` / `completed_at` are touched when the new status implies
+    that transition — a tight contract with `scripts/tasks.py`'s
+    assign/claim/complete flow so the timestamps stay coherent regardless
+    of which call site updates the row. Otherwise we leave them alone
+    so a status flip back from 'complete' → 'in-progress' doesn't
+    clobber the original completion timestamp.
+    """
+    now = _now()
+    c = _conn()
+    try:
+        sets = ["status = ?", "updated_at = ?"]
+        vals: list[Any] = [status, now]
+        if notes is not None:
+            sets.append("notes = ?")
+            vals.append(notes)
+        if status == "in-progress":
+            sets.append("claimed_at = COALESCE(claimed_at, ?)")
+            vals.append(now)
+        elif status == "complete":
+            sets.append("completed_at = COALESCE(completed_at, ?)")
+            vals.append(now)
+        vals.append(task_id)
+        c.execute(
+            f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals
+        )
+        c.commit()
+        row = c.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else {}
+
+
+def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
+                        reason: str, agent_id: str) -> dict:
+    """Log a soft-wall bypass to `phase_bypasses`.
+
+    The skill_gates table is advisory (spec §3) — bypasses ARE allowed,
+    but they must be recorded so `internal/dev-handoff` can surface them
+    in retros. Insert-only, no idempotency: each bypass invocation is a
+    distinct audit event.
+    """
+    c = _conn()
+    try:
+        cur = c.execute(
+            "INSERT INTO phase_bypasses (project_id, from_phase, to_phase, "
+            "reason, agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (project_id, from_phase, to_phase, reason, agent_id, _now()),
+        )
+        new_id = cur.lastrowid
+        c.commit()
+        row = c.execute(
+            "SELECT * FROM phase_bypasses WHERE id = ?", (new_id,)
+        ).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else {}

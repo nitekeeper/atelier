@@ -53,11 +53,22 @@ def test_v1_migrations_deleted():
             f"v1.0.13 migration {legacy} must not be moved into local-only/"
 
 
-def test_shared_has_single_v110_schema_file():
+def test_shared_holds_v110_schema_and_followups():
+    """shared/ holds the v1.1.0 base schema + any append-only follow-ups
+    (Plan 2 round-1 added 002_source_ref_and_fts.sql). The base file's
+    name + ordering is pinned; follow-ups must use 002-049 (per the
+    naming convention in scripts/migrate.py) so local-only/ stays in
+    the 050+ band."""
     files = sorted((MIGRATIONS / "shared").glob("*.sql"))
-    assert len(files) == 1, \
-        f"shared/ should hold exactly one file (001_v110_schema.sql), got {[f.name for f in files]}"
-    assert files[0].name == "001_v110_schema.sql"
+    names = [f.name for f in files]
+    assert "001_v110_schema.sql" in names, "base schema file missing"
+    assert names[0] == "001_v110_schema.sql", \
+        f"shared/ first file must be 001_v110_schema.sql, got {names[0]}"
+    # All shared files use the 001-049 numeric prefix band.
+    for name in names:
+        prefix = name.split("_", 1)[0]
+        assert prefix.isdigit() and 1 <= int(prefix) <= 49, \
+            f"shared/ file {name} outside the 001-049 band"
 
 
 def test_apply_shared_only_creates_no_roles_or_agents(tmp_path):
@@ -131,12 +142,14 @@ def test_apply_migrations_is_idempotent(tmp_path):
     apply_migrations(str(db), MIGRATIONS / "shared")  # second call must no-op
     con = sqlite3.connect(str(db))
     applied = con.execute("SELECT COUNT(*) FROM migrations").fetchone()[0]
-    assert applied == 1  # exactly one shared migration
+    expected = len(list((MIGRATIONS / "shared").glob("*.sql")))
+    assert applied == expected, \
+        f"expected {expected} shared migration rows, got {applied}"
 
 
 def test_idempotency_of_shared_plus_local(tmp_path):
     """Re-applying both shared/ and local-only/ must remain idempotent —
-    exactly 2 rows in `migrations`, one per file. Per QA Nit-5."""
+    one row per file across both directories. Per QA Nit-5."""
     db = tmp_path / "atelier.db"
     apply_migrations(str(db), MIGRATIONS / "shared")
     apply_migrations(str(db), MIGRATIONS / "local-only")
@@ -144,7 +157,10 @@ def test_idempotency_of_shared_plus_local(tmp_path):
     apply_migrations(str(db), MIGRATIONS / "local-only")  # re-apply
     with sqlite3.connect(str(db)) as con:
         count = con.execute("SELECT COUNT(*) FROM migrations").fetchone()[0]
-    assert count == 2, f"expected exactly 2 migration rows, got {count}"
+    expected = (len(list((MIGRATIONS / "shared").glob("*.sql")))
+                + len(list((MIGRATIONS / "local-only").glob("*.sql"))))
+    assert count == expected, \
+        f"expected {expected} migration rows, got {count}"
 
 
 def test_index_id_columns_present_in_shared_schema(tmp_path):

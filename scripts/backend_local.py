@@ -4,11 +4,12 @@
 Project-local SQLite at `<workspace-root>/.ai/atelier.db`. Document-shaped
 writes land in the v1.1.0 tables (`projects`, `project_documents`,
 `tasks`, `meeting_minutes`). Raw bodies are archived to
-`<workspace-root>/.atelier/raw/`. No Librarian, no embeddings, no
+`<workspace-root>/.ai/raw/`. No Librarian, no embeddings, no
 federated Memex Index — Local mode is the slim fallback (spec §7).
 
 Schema reference: `migrations/shared/001_v110_schema.sql` +
-`migrations/local-only/050_local_roles_agents.sql`. Both must be applied
+`migrations/shared/002_source_ref_and_fts.sql` +
+`migrations/local-only/050_local_roles_agents.sql`. All three must be applied
 to the local DB before any backend_local method is called.
 
 Connection convention: stdlib `sqlite3` direct, `PRAGMA foreign_keys=ON`
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -74,6 +76,10 @@ def _conn() -> sqlite3.Connection:
     pragma to the connection, not the database (spec §11.2 note).
     """
     c = sqlite3.connect(_local_db())
+    # PRAGMA journal_mode=WAL is a one-time-set per database, BUT we run it
+    # on every connect as belt-and-suspenders: a fresh DB file (e.g. test
+    # workspaces) would otherwise stay in rollback-journal mode until a
+    # caller happens to issue the pragma. Idempotent, so cheap (Nit-3).
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
     c.execute("PRAGMA foreign_keys=ON")
@@ -81,8 +87,25 @@ def _conn() -> sqlite3.Connection:
     return c
 
 
+# Domain validation is the facade's responsibility; backend_local accepts
+# any string for `domain`, `subdomain`, `status`, etc. (Nit-7). Adding
+# validation here would split the source of truth across two layers.
+def _checked_lastrowid(cur: sqlite3.Cursor) -> int:
+    """Return `cur.lastrowid` or raise if SQLite reports None.
+
+    `sqlite3.Cursor.lastrowid` is typed `int | None` and is documented to be
+    None after a no-op INSERT (e.g. INSERT…ON CONFLICT DO NOTHING). We don't
+    use those patterns, but the defensive check costs nothing and makes
+    static type-checkers happy (Nit-6 from reviewer).
+    """
+    row_id = cur.lastrowid
+    if row_id is None:
+        raise RuntimeError("INSERT returned no lastrowid; statement no-oped unexpectedly")
+    return row_id
+
+
 def _archive_raw(body: str, title: str, *, root: Path | None = None) -> tuple[str, str]:
-    """Archive `body` under `<workspace_root>/.atelier/raw/`.
+    """Archive `body` under `<workspace_root>/.ai/raw/`.
 
     Returns `(absolute_path, relative_path)` — the relative path (relative
     to the workspace root) is what we store in `project_documents.filename`
@@ -92,16 +115,22 @@ def _archive_raw(body: str, title: str, *, root: Path | None = None) -> tuple[st
     de-duplication when two writes share a title; the slug keeps the
     filename human-skimable. We shard on the first two hex chars so the
     directory doesn't grow unbounded.
+
+    Writes go via `<final>.tmp` + `os.replace` so a crash mid-write leaves
+    the canonical path either absent or fully populated — never partial
+    (Nit-2 from reviewer).
     """
     if root is None:
         root = _workspace_root()
     h = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    raw_dir = root / ".atelier" / "raw" / h[:2]
+    raw_dir = root / ".ai" / "raw" / h[:2]
     raw_dir.mkdir(parents=True, exist_ok=True)
     fname = f"{_slug(title)}-{h[:8]}.md"
     abs_path = raw_dir / fname
     if not abs_path.exists():
-        abs_path.write_text(body, encoding="utf-8")
+        tmp_path = abs_path.with_suffix(abs_path.suffix + ".tmp")
+        tmp_path.write_text(body, encoding="utf-8")
+        os.replace(tmp_path, abs_path)
     rel_path = str(abs_path.relative_to(root))
     return str(abs_path), rel_path
 
@@ -111,23 +140,28 @@ def _archive_raw(body: str, title: str, *, root: Path | None = None) -> tuple[st
 def write_document(*, workspace_id: int, project_id: int,
                    domain: str, subdomain: str | None,
                    title: str, body: str,
-                   metadata: dict[str, Any], caller_agent_id: str,
+                   caller_agent_id: str,
+                   metadata: dict[str, Any] | None = None,
                    source_url: str | None = None,
+                   source_ref: str | None = None,
                    relations: Sequence[dict] = ()) -> dict:
     """Persist a project_documents row.
 
     The v1.1.0 schema stores documents as pointer-rows referencing a
     markdown file on disk (`project_documents.filename`). We archive
-    `body` to `.atelier/raw/<key>.md` and record the relative path —
+    `body` to `.ai/raw/<key>.md` and record the relative path —
     the raw archive doubles as both the recoverable source-of-truth and
     the filesystem co-located copy spec §6.8 talks about.
 
     `source_url`, `relations`, and the `metadata` dict are accepted for
     signature parity with `backend.write_document` (the facade) and with
     the Memex backend, but Local mode currently no-ops on them: no
-    relations table exists in the slim schema. Future work could store
-    relations to a project-local `documents_relations` table if a
-    consumer asks; until then they're accepted-and-ignored.
+    relations table exists in the slim schema. `metadata` defaults to None
+    (Nit-1) for caller ergonomics.
+
+    `source_ref` is persisted to `project_documents.source_ref` (added in
+    `002_source_ref_and_fts.sql`) so Plan 4's idempotent migrator can find
+    the local row id for a v1.0.13 source key.
     """
     root = _workspace_root()
     _, rel_path = _archive_raw(body or "", title, root=root)
@@ -135,13 +169,13 @@ def write_document(*, workspace_id: int, project_id: int,
     try:
         cur = c.execute(
             "INSERT INTO project_documents (workspace_id, project_id, "
-            "domain, subdomain, title, filename, created_by, "
+            "domain, subdomain, title, filename, created_by, source_ref, "
             "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (workspace_id, project_id, domain, subdomain, title, rel_path,
-             caller_agent_id, _now(), _now()),
+             caller_agent_id, source_ref, _now(), _now()),
         )
-        row_id = cur.lastrowid
+        row_id = _checked_lastrowid(cur)
         c.commit()
         row = c.execute(
             "SELECT * FROM project_documents WHERE id = ?", (row_id,)
@@ -161,6 +195,7 @@ def write_task(*, workspace_id: int, project_id: int,
                subdomain: str | None, created_by: str,
                assigned_to: str | None = None,
                priority: int = 0, notes: str | None = None,
+               source_ref: str | None = None,
                relations: Sequence[dict] = ()) -> dict:
     """Persist a row into the v1.1.0 `tasks` table.
 
@@ -173,18 +208,22 @@ def write_task(*, workspace_id: int, project_id: int,
     is inherited transitively through `tasks.project_id → projects.workspace_id`.
     The kwarg is accepted for facade-signature parity but no DB column
     receives it.
+
+    `source_ref` is persisted to `tasks.source_ref` (added in
+    `002_source_ref_and_fts.sql`) so Plan 4's idempotent migrator can find
+    the local row id for a v1.0.13 source key.
     """
     c = _conn()
     try:
         cur = c.execute(
             "INSERT INTO tasks (project_id, title, description, subdomain, "
-            "status, priority, notes, created_by, assigned_to, "
+            "status, priority, notes, created_by, assigned_to, source_ref, "
             "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
             (project_id, title, description, subdomain, priority, notes,
-             created_by, assigned_to, _now(), _now()),
+             created_by, assigned_to, source_ref, _now(), _now()),
         )
-        row_id = cur.lastrowid
+        row_id = _checked_lastrowid(cur)
         c.commit()
         row = c.execute("SELECT * FROM tasks WHERE id = ?", (row_id,)).fetchone()
     finally:
@@ -199,6 +238,7 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
                   title: str, date: str, summary: str,
                   decisions: str, subdomain: str | None,
                   created_by: str,
+                  source_ref: str | None = None,
                   relations: Sequence[dict] = ()) -> dict:
     """Persist a row into `meeting_minutes` and write the markdown file.
 
@@ -210,6 +250,10 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
 
     Per v1.1.0 schema, `meeting_minutes.project_id` is nullable so
     workspace-level meetings (no project) are supported.
+
+    `source_ref` is persisted to `meeting_minutes.source_ref` (added in
+    `002_source_ref_and_fts.sql`) so Plan 4's idempotent migrator can find
+    the local row id for a v1.0.13 source key.
     """
     root = _workspace_root()
     filename = f"{date}-{_slug(title)}.md"
@@ -225,12 +269,12 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
         cur = c.execute(
             "INSERT INTO meeting_minutes (workspace_id, project_id, title, "
             "date, subdomain, filename, summary, decisions, created_by, "
-            "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_ref, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (workspace_id, project_id, title, date, subdomain, rel_filename,
-             summary, decisions, created_by, _now(), _now()),
+             summary, decisions, created_by, source_ref, _now(), _now()),
         )
-        row_id = cur.lastrowid
+        row_id = _checked_lastrowid(cur)
         c.commit()
         row = c.execute(
             "SELECT * FROM meeting_minutes WHERE id = ?", (row_id,)
@@ -261,7 +305,7 @@ def write_project(*, workspace_id: int, slug: str, name: str,
             "VALUES (?, ?, ?, ?, 'design:open', ?, ?, ?)",
             (workspace_id, slug, name, description, created_by, _now(), _now()),
         )
-        row_id = cur.lastrowid
+        row_id = _checked_lastrowid(cur)
         c.commit()
         row = c.execute(
             "SELECT * FROM projects WHERE id = ?", (row_id,)
@@ -362,7 +406,7 @@ def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
                  accomplished, next_action, status, pm_notes,
                  now, now, now),
             )
-            new_id = cur.lastrowid
+            new_id = _checked_lastrowid(cur)
             c.commit()
             row = c.execute(
                 "SELECT * FROM sessions WHERE id = ?", (new_id,)
@@ -385,6 +429,9 @@ def transition_phase(*, project_id: int, to_phase: str,
     Returns the updated projects row. `agent_id` is in the signature for
     audit-trail parity with the Memex backend but Local-mode `projects`
     doesn't have a `phase_changed_by` column — kwarg accepted, no DB write.
+
+    Raises ValueError if `project_id` doesn't exist — matches `upsert_session`'s
+    error contract (Nit-4 from reviewer: error contracts must be uniform).
     """
     c = _conn()
     try:
@@ -398,7 +445,9 @@ def transition_phase(*, project_id: int, to_phase: str,
         ).fetchone()
     finally:
         c.close()
-    return dict(row) if row else {}
+    if row is None:
+        raise ValueError(f"project_id={project_id} not found")
+    return dict(row)
 
 
 def update_task_status(*, task_id: int, status: str,
@@ -411,6 +460,8 @@ def update_task_status(*, task_id: int, status: str,
     of which call site updates the row. Otherwise we leave them alone
     so a status flip back from 'complete' → 'in-progress' doesn't
     clobber the original completion timestamp.
+
+    Raises ValueError if `task_id` doesn't exist (Nit-4 from reviewer).
     """
     now = _now()
     c = _conn()
@@ -436,7 +487,9 @@ def update_task_status(*, task_id: int, status: str,
         ).fetchone()
     finally:
         c.close()
-    return dict(row) if row else {}
+    if row is None:
+        raise ValueError(f"task_id={task_id} not found")
+    return dict(row)
 
 
 def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
@@ -455,7 +508,7 @@ def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
             "reason, agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (project_id, from_phase, to_phase, reason, agent_id, _now()),
         )
-        new_id = cur.lastrowid
+        new_id = _checked_lastrowid(cur)
         c.commit()
         row = c.execute(
             "SELECT * FROM phase_bypasses WHERE id = ?", (new_id,)
@@ -473,24 +526,31 @@ def find_documents(*, query: str, workspace_id: int | None = None,
                    limit: int = 10) -> list[dict]:
     """Search `project_documents` with optional scope filters.
 
-    NOTE: the v1.1.0 schema does NOT include an FTS5 virtual table —
-    the spec's "Local-mode FTS5" (§7) is deferred. Until the schema
-    adds one, this falls back to `LIKE` on `title`. That is good enough
-    for the v1.1.0 acceptance tests (which exercise filters, not
-    full-text relevance) and matches what the existing
-    `scripts/documents.py:search_documents` already does. Surface the
-    gap upstream — adding FTS5 is a schema-level change that's out of
-    scope for Plan 2.
+    Text search uses the FTS5 virtual table `project_documents_fts`
+    (added in `002_source_ref_and_fts.sql`) over (title, subdomain,
+    filename). Structured filters (workspace_id / project_id / domain /
+    subdomain) are orthogonal — they run as plain WHERE predicates on
+    project_documents after the FTS5 join.
 
     Empty `query` returns the full filtered set; `query="*"` is treated
-    the same way (consumer convention).
+    the same way (consumer convention). When `query` is provided the
+    `MATCH` syntax applies — callers can pass plain words ("auth") or
+    FTS5 prefix queries ("auth*").
+
+    Order is pinned `created_at DESC, id DESC` so paginated callers see
+    a stable result set (Imp-2 from QA: limit-without-order is
+    non-deterministic).
     """
+    has_query = bool(query and query.strip() and query.strip() != "*")
     where: list[str] = []
     params: list[Any] = []
-    if query and query.strip() and query.strip() != "*":
-        where.append("(title LIKE ? OR filename LIKE ?)")
-        like = f"%{query}%"
-        params.extend([like, like])
+    if has_query:
+        # Sub-select keeps FTS5 MATCH isolated from the structured WHERE.
+        # FTS5 rowid is the project_documents.id by virtue of content_rowid.
+        where.append(
+            "id IN (SELECT rowid FROM project_documents_fts WHERE project_documents_fts MATCH ?)"
+        )
+        params.append(query)
     if workspace_id is not None:
         where.append("workspace_id = ?")
         params.append(workspace_id)
@@ -505,7 +565,7 @@ def find_documents(*, query: str, workspace_id: int | None = None,
         params.append(subdomain)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     sql = (f"SELECT * FROM project_documents {clause} "
-           f"ORDER BY created_at DESC LIMIT ?")
+           f"ORDER BY created_at DESC, id DESC LIMIT ?")
     params.append(limit)
     c = _conn()
     try:
@@ -550,22 +610,39 @@ def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
 
 # ── Cross-plan helpers ─────────────────────────────────────────────────────
 
-def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:
-    """Local-mode equivalent of the Memex-backend method.
+def lookup_index_id_by_source_ref(*, source_ref: str) -> int | None:
+    """Return the local row id for a given v1.0.13 `source_ref`, or None.
 
-    Local mode has NO federated Memex Index — there is no `index_id`
-    namespace to look up. The method exists for facade-signature parity
-    with the Memex backend (`backend.lookup_index_id_by_source_ref`),
-    used by Plan 4's idempotent migrator. In Local mode the migrator is
-    the *source* of the migration, not its target, so this method is
-    never the resume key.
+    Plan 4's idempotent migrator uses this to resume mid-replay: it
+    annotates each v1.0.13 row with a stable `source_ref` (e.g.
+    `"atelier:v1:project_documents:42"`), and on restart asks the local
+    backend whether that source_ref has already been migrated. A hit
+    means "skip, already inserted"; a miss means "insert and tag with
+    this source_ref".
 
-    Returns None for every input. Don't be tempted to surface
-    `project_documents.id` here: row ids are local integers and have
-    no meaning outside this DB; returning them as a "fake index_id"
-    would corrupt cross-mode behaviour if a caller ever assumed
-    semantic equivalence.
+    Searches across all three migration-targeted tables in order of
+    likelihood: project_documents → tasks → meeting_minutes. A source_ref
+    is unique across all tables by Plan 4's naming convention; collisions
+    are a caller-side programming error.
+
+    The return value is a local row id (`int`), not a Memex index_id —
+    Local mode has no federated index. Callers that need to distinguish
+    Local from Memex should use `backend.mode` directly; this method
+    answers a different question ("have I already migrated this row?").
     """
+    if not source_ref:
+        return None
+    c = _conn()
+    try:
+        for table in ("project_documents", "tasks", "meeting_minutes"):
+            row = c.execute(
+                f"SELECT id FROM {table} WHERE source_ref = ? LIMIT 1",
+                (source_ref,),
+            ).fetchone()
+            if row is not None:
+                return int(row["id"])
+    finally:
+        c.close()
     return None
 
 
@@ -592,7 +669,7 @@ def find_or_create_role(*, name: str, description: str) -> dict:
             "VALUES (?, ?, ?, ?)",
             (name, description, now, now),
         )
-        new_id = cur.lastrowid
+        new_id = _checked_lastrowid(cur)
         c.commit()
         row = c.execute(
             "SELECT * FROM roles WHERE id = ?", (new_id,)

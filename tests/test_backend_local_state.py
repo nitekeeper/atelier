@@ -105,16 +105,18 @@ def test_upsert_session_updates_when_existing(workspace):
 
 # ── transition_phase ───────────────────────────────────────────────────────
 
-def test_transition_phase_writes_to_sessions_phase_column(workspace):
-    """`transition_phase` updates `projects.phase`. Lock the SQL contract:
-    after the call, the projects row reads the new phase."""
+def test_transition_phase_updates_projects_phase(workspace):
+    """`transition_phase` updates `projects.phase` (NOT sessions.phase —
+    the previous test name implied otherwise; corrected per C2 review).
+    Lock the SQL contract: after the call, the projects row reads the
+    new phase."""
     r = backend_local.transition_phase(
         project_id=workspace["project_id"],
         to_phase="plan:open",
         agent_id="atelier-pm-1",
     )
     assert r["phase"] == "plan:open"
-    # Confirm DB-level write.
+    # Confirm DB-level write on the projects table.
     conn = sqlite3.connect(workspace["db"])
     conn.row_factory = sqlite3.Row
     row = conn.execute(
@@ -125,23 +127,51 @@ def test_transition_phase_writes_to_sessions_phase_column(workspace):
     assert row["phase"] == "plan:open"
 
 
+def test_transition_phase_raises_when_project_missing(workspace):
+    """Nit-4: error contracts must be uniform — `upsert_session` raises
+    on missing project_id, so `transition_phase` does too. Was silently
+    returning {} pre-fix."""
+    with pytest.raises(ValueError):
+        backend_local.transition_phase(
+            project_id=99999, to_phase="plan:open", agent_id="atelier-pm-1",
+        )
+
+
 # ── update_task_status ─────────────────────────────────────────────────────
 
 def test_update_task_status_writes_status_and_timestamps(workspace):
-    r = backend_local.update_task_status(
+    """Exercise both COALESCE branches: claimed_at on first 'in-progress'
+    and completed_at on first 'complete'. Idempotent re-complete must not
+    overwrite the timestamp (Imp-1 from QA)."""
+    # First flip: pending → in-progress sets claimed_at.
+    r1 = backend_local.update_task_status(
         task_id=workspace["task_id"], status="in-progress",
     )
-    assert r["status"] == "in-progress"
-    # updated_at must be touched.
-    conn = sqlite3.connect(workspace["db"])
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT status, updated_at FROM tasks WHERE id = ?",
-        (workspace["task_id"],),
-    ).fetchone()
-    conn.close()
-    assert row["status"] == "in-progress"
-    assert row["updated_at"] is not None
+    assert r1["status"] == "in-progress"
+    assert r1["claimed_at"] is not None
+    assert r1["updated_at"] is not None
+    first_claimed_at = r1["claimed_at"]
+
+    # Second flip: in-progress → complete sets completed_at; claimed_at unchanged.
+    r2 = backend_local.update_task_status(
+        task_id=workspace["task_id"], status="complete",
+    )
+    assert r2["status"] == "complete"
+    assert r2["completed_at"] is not None
+    assert r2["claimed_at"] == first_claimed_at  # COALESCE preserved
+    first_completed_at = r2["completed_at"]
+
+    # Idempotent re-complete: completed_at must NOT change.
+    r3 = backend_local.update_task_status(
+        task_id=workspace["task_id"], status="complete",
+    )
+    assert r3["completed_at"] == first_completed_at
+
+
+def test_update_task_status_raises_when_task_missing(workspace):
+    """Nit-4: error contract uniformity (mirror transition_phase)."""
+    with pytest.raises(ValueError):
+        backend_local.update_task_status(task_id=99999, status="complete")
 
 
 # ── record_phase_bypass ────────────────────────────────────────────────────

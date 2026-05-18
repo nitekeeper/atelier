@@ -74,21 +74,29 @@ def _seed_with_docs_and_tasks(db_path: str) -> dict:
     )
     proj_b1 = cur.lastrowid
     # Mix of documents across workspaces / projects / domains / subdomains.
+    # Staggered created_at so the test_find_documents_limit_applied test can
+    # assert ORDER BY created_at DESC, id DESC behaviour: the most recent
+    # rows must come first.
     docs = [
-        # (workspace_id, project_id, domain, subdomain, title, filename)
-        (ws_a, proj_a1, "design", "auth", "Auth Design", "design/auth.md"),
-        (ws_a, proj_a1, "design", "auth", "Auth Redesign", "design/auth2.md"),
-        (ws_a, proj_a1, "adr", "auth", "ADR-001", "adr/001.md"),
-        (ws_a, proj_a2, "design", "billing", "Billing Design", "design/billing.md"),
-        (ws_b, proj_b1, "design", "ops", "Ops Design", "design/ops.md"),
+        # (workspace_id, project_id, domain, subdomain, title, filename, created_at)
+        (ws_a, proj_a1, "design", "auth", "Auth Design", "design/auth.md",
+         "2026-05-18T00:00:01Z"),
+        (ws_a, proj_a1, "design", "auth", "Auth Redesign", "design/auth2.md",
+         "2026-05-18T00:00:02Z"),
+        (ws_a, proj_a1, "adr", "auth", "ADR-001", "adr/001.md",
+         "2026-05-18T00:00:03Z"),
+        (ws_a, proj_a2, "design", "billing", "Billing Design", "design/billing.md",
+         "2026-05-18T00:00:04Z"),
+        (ws_b, proj_b1, "design", "ops", "Ops Design", "design/ops.md",
+         "2026-05-18T00:00:05Z"),
     ]
-    for ws, pr, dom, sub, tit, fn in docs:
+    for ws, pr, dom, sub, tit, fn, created in docs:
         conn.execute(
             "INSERT INTO project_documents (workspace_id, project_id, "
             "domain, subdomain, title, filename, created_by, "
             "created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (ws, pr, dom, sub, tit, fn, "atelier-pm-1", now, now),
+            (ws, pr, dom, sub, tit, fn, "atelier-pm-1", created, created),
         )
     # Tasks for proj_a1.
     cur = conn.execute(
@@ -163,11 +171,17 @@ def test_find_documents_filters_by_subdomain(workspace):
 
 
 def test_find_documents_limit_applied(workspace):
-    """Limit caps the result set even when the filter matches more rows."""
-    # The seed has 4 design-domain rows across both workspaces; limit=2
-    # must trim the response.
+    """Limit caps the result set AND order is pinned `created_at DESC, id
+    DESC` so paginated callers see a stable set (Imp-2 from QA).
+
+    The seed has 4 design-domain rows across both workspaces with
+    staggered created_at; limit=2 must return the two most-recent ones:
+    'Ops Design' (00:00:05) and 'Billing Design' (00:00:04).
+    """
     r = backend_local.find_documents(query="", domain="design", limit=2)
     assert len(r) == 2
+    titles = [d["title"] for d in r]
+    assert titles == ["Ops Design", "Billing Design"]
 
 
 # ── get_task ───────────────────────────────────────────────────────────────
@@ -199,15 +213,42 @@ def test_list_tasks_filters_by_status(workspace):
 
 # ── lookup_index_id_by_source_ref ──────────────────────────────────────────
 
-def test_lookup_index_id_by_source_ref_returns_none_in_local_mode(workspace):
-    """Local mode has no federated Memex Index — there is no `index_id` to
-    look up by `source_ref`. The method exists for facade-signature parity
-    with the Memex backend; in Local mode it always returns None.
-    """
+def test_lookup_index_id_by_source_ref_returns_none_on_miss(workspace):
+    """Source_ref that has never been persisted returns None — Plan 4
+    migrator interprets this as 'not yet migrated; insert + tag'."""
     assert backend_local.lookup_index_id_by_source_ref(
-        source_ref="atelier:tasks:1") is None
-    assert backend_local.lookup_index_id_by_source_ref(
-        source_ref="atelier:project_documents:42") is None
+        source_ref="atelier:v1:tasks:9999") is None
+    assert backend_local.lookup_index_id_by_source_ref(source_ref="") is None
+
+
+def test_lookup_index_id_by_source_ref_finds_document(workspace):
+    """A source_ref tagged on a project_documents row is found by lookup —
+    Plan 4 migrator uses this to resume mid-replay (Imp-2 from reviewer)."""
+    r = backend_local.write_document(
+        workspace_id=workspace["workspace_a"],
+        project_id=workspace["project_a1"],
+        domain="design", subdomain=None,
+        title="Migrated doc", body="legacy body",
+        caller_agent_id="atelier-pm-1",
+        source_ref="atelier:v1:project_documents:42",
+    )
+    found = backend_local.lookup_index_id_by_source_ref(
+        source_ref="atelier:v1:project_documents:42")
+    assert found == r["row_id"]
+
+
+def test_lookup_index_id_by_source_ref_finds_task(workspace):
+    """Source_ref persists across tasks too — migrator finds v1.0.13 tasks."""
+    r = backend_local.write_task(
+        workspace_id=workspace["workspace_a"],
+        project_id=workspace["project_a1"],
+        title="Migrated task", description="d", subdomain="bug",
+        created_by="atelier-pm-1",
+        source_ref="atelier:v1:tasks:7",
+    )
+    found = backend_local.lookup_index_id_by_source_ref(
+        source_ref="atelier:v1:tasks:7")
+    assert found == r["row_id"]
 
 
 # ── find_or_create_role ────────────────────────────────────────────────────
@@ -219,6 +260,11 @@ def test_find_or_create_role_idempotent(workspace):
         name="Designer", description="ignored on hit")
     assert first["id"] == second["id"]
     assert second["description"] == "UI/UX"  # unchanged on hit
+    # Nit-8: assert the no-second-write invariant — `created_at` (and the
+    # whole row) must be byte-for-byte identical, proving the second call
+    # took the early-return branch and never touched the table.
+    assert second["created_at"] == first["created_at"]
+    assert second["updated_at"] == first["updated_at"]
     # Confirm no duplicate row.
     conn = sqlite3.connect(workspace["db"])
     count = conn.execute(
@@ -241,9 +287,33 @@ def test_find_or_create_agent_idempotent(workspace):
         role_id=role["id"], profile="ignored")
     assert a["id"] == b["id"]
     assert b["name"] == "Eng 1"  # unchanged on hit
+    # Nit-9: assert the no-second-write invariant — created_at/updated_at
+    # unchanged proves the second call returned early.
+    assert b["created_at"] == a["created_at"]
+    assert b["updated_at"] == a["updated_at"]
     conn = sqlite3.connect(workspace["db"])
     count = conn.execute(
         "SELECT COUNT(*) FROM agents WHERE id = 'atelier-eng-1'"
     ).fetchone()[0]
     conn.close()
     assert count == 1
+
+
+# ── PRAGMA foreign_keys enforcement ────────────────────────────────────────
+
+def test_foreign_keys_enforced(workspace):
+    """Imp-3 from QA: assert PRAGMA foreign_keys=ON is in effect on every
+    backend_local connection. The visible behaviour is that inserting a
+    row referencing a non-existent parent raises IntegrityError.
+
+    `project_documents.workspace_id` and `.project_id` both have FK
+    references — pick `project_id` since we have a known-good workspace_id
+    in the seed and want to isolate the FK violation."""
+    with pytest.raises(sqlite3.IntegrityError):
+        backend_local.write_document(
+            workspace_id=workspace["workspace_a"],
+            project_id=999999,  # no such project
+            domain="design", subdomain=None,
+            title="orphan", body="x",
+            caller_agent_id="atelier-pm-1",
+        )

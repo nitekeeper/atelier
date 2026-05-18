@@ -108,10 +108,10 @@ def test_write_document_archives_raw_body(workspace):
         title="X", body="hello world",
         metadata={}, caller_agent_id="atelier-pm-1",
     )
-    # Raw body must be archived under <workspace_root>/.atelier/raw/.
+    # Raw body must be archived under <workspace_root>/.ai/raw/.
     # The archive shards on the first two hex chars of the content hash to
     # keep the directory small; recurse with rglob to find the file.
-    raw_dir = workspace["root"] / ".atelier" / "raw"
+    raw_dir = workspace["root"] / ".ai" / "raw"
     assert raw_dir.is_dir()
     raw_files = list(raw_dir.rglob("*.md"))
     assert len(raw_files) == 1

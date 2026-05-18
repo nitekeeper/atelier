@@ -1024,6 +1024,8 @@ CREATE TABLE agents (
 | `meeting_minutes.subdomain` (none) | **added; nullable** | Per §6.4 |
 | `meeting_minutes.index_id` (none) | **added** | Memex Index backlink |
 | `sessions.workspace_id` (none) | **added NOT NULL** | Cross-project session listing |
+| `tasks.parallel_group TEXT` | **dropped** | v1.0.13's `004_tasks_parallel.sql` parallelism flag never shipped to a consumer; reintroduce only when there's a concrete user. Legacy reader must explicitly drop the column (§11.4). |
+| `meeting_participants` PK / cascade | **`ON DELETE CASCADE` added on `meeting_id → meeting_minutes(id)`** | Orphan rows after meeting deletion were a v1.0.13 footgun; CASCADE makes the cleanup atomic. |
 | `roles`, `agents` | **dropped from Memex mode**; preserved in Local mode | Per §6.5 |
 
 ### 11.4 Legacy reader (v1.0.13 → v1.1.0 translation)
@@ -1055,6 +1057,8 @@ def read_v1_documents(v1_db_path: Path) -> Iterable[dict]:
 ```
 
 Same pattern for `projects`, `tasks`, `meeting_minutes`, `sessions`. The reader has no knowledge of the v1.1.0 schema; it just yields translated dicts that the migrator writes through the v1.1.0 `backend.*` API.
+
+**Dropped-column handling.** v1.0.13 columns that v1.1.0 dropped (`projects.repo`, `project_documents.type`, `tasks.parallel_group`) must be explicitly elided in the reader's SELECT. In particular, the `tasks` reader MUST NOT emit `parallel_group` in its yielded dict — the v1.1.0 backend has no slot for it. Surfacing parallelism in v1.1.0 is deferred until a concrete consumer requests it (see §11.3).
 
 Test coverage for the reader: fixture v1.0.13 DBs with known content, assert every row round-trips correctly.
 

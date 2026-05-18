@@ -12,7 +12,8 @@ from scripts import workflow
 def fresh_db(tmp_path):
     """Migrate a fresh DB and return the path string."""
     db_path = str(tmp_path / "test.db")
-    apply_migrations(db_path, MIGRATIONS_DIR)
+    apply_migrations(db_path, MIGRATIONS_DIR / "shared")
+    apply_migrations(db_path, MIGRATIONS_DIR / "local-only")
     role = create_role(db_path, name="pm", description="PM")
     create_agent(db_path, id="test-agent", name="Test Agent", role_id=role["id"], profile="Tester")
     return db_path

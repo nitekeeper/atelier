@@ -24,7 +24,8 @@ WORKFLOW_CLI = [sys.executable, str(REPO_ROOT / "scripts" / "workflow.py")]
 def project(tmp_path):
     """Create a fresh DB + role + agent + project. Returns (db_path, project_id)."""
     db_path = tmp_path / "test.db"
-    apply_migrations(str(db_path), MIGRATIONS_DIR)
+    apply_migrations(str(db_path), MIGRATIONS_DIR / "shared")
+    apply_migrations(str(db_path), MIGRATIONS_DIR / "local-only")
     role = create_role(str(db_path), name="pm", description="PM")
     create_agent(str(db_path), id="agent-1", name="Test", role_id=role["id"], profile="")
     p = create_project(str(db_path), name="integration", description="d",

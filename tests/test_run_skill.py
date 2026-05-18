@@ -6,7 +6,12 @@ import pytest
 import yaml
 
 SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "run" / "SKILL.md"
-MIGRATION_003 = Path(__file__).resolve().parent.parent / "migrations" / "003_phases.sql"
+# Phases live inline in v1.1.0's single-file schema migration (spec §11.2 / Plan 1
+# Task 5). v1.0.13's migrations/003_phases.sql was deleted in the clean-cut redesign.
+MIGRATION_003 = (
+    Path(__file__).resolve().parent.parent
+    / "migrations" / "shared" / "001_v110_schema.sql"
+)
 
 
 @pytest.fixture(scope="module")

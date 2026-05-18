@@ -23,7 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 def project(tmp_path):
     """Migrate a fresh DB, create role+agent+project; returns (db_path_str, project_id)."""
     db_path = str(tmp_path / "test.db")
-    apply_migrations(db_path, MIGRATIONS_DIR)
+    apply_migrations(db_path, MIGRATIONS_DIR / "shared")
+    apply_migrations(db_path, MIGRATIONS_DIR / "local-only")
     role = create_role(db_path, name="pm", description="PM")
     create_agent(db_path, id="test-agent", name="Test Agent", role_id=role["id"], profile="Tester")
     proj = create_project(db_path, name="test", description=None, created_by="test-agent")

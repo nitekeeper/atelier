@@ -1,10 +1,12 @@
 # tests/test_seed_roles.py
+import json
 import pytest
 from pathlib import Path
 from scripts.migrate import apply_migrations
 from scripts.seed_roles import seed, ROLES
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
 
 @pytest.fixture
@@ -69,3 +71,53 @@ def test_all_profiles_have_required_sections(db_path):
         assert "Works with:" in profile, f"Missing Works with in {entry['role_name']}"
         assert "Does not:" in profile, f"Missing Does not in {entry['role_name']}"
         assert "Communication style:" in profile, f"Missing Communication style in {entry['role_name']}"
+
+
+# ---------------------------------------------------------------------------
+# Plan 1 Task 3: Atelier role seed JSON + loader (templates/roles.json).
+# These tests pin the JSON-as-source-of-truth contract that Memex bootstrap
+# and Local-mode INSERT paths both consume.
+# ---------------------------------------------------------------------------
+
+
+def test_role_seed_file_exists():
+    assert (TEMPLATES_DIR / "roles.json").exists()
+
+
+def test_role_seed_returns_list_of_dicts():
+    from scripts.seed_data import load_role_seed
+    roles = load_role_seed()
+    assert isinstance(roles, list)
+    # The shipped catalog has ~61 personas (see scripts/seed_roles.py ROLES).
+    # We assert a floor of 46 to keep the test resilient to additions/removals.
+    assert len(roles) >= 46, f"expected at least 46 roles, got {len(roles)}"
+    for r in roles:
+        assert {"name", "description"} <= r.keys()
+
+
+def test_role_seed_has_canonical_atelier_roles():
+    from scripts.seed_data import load_role_seed
+    roles = load_role_seed()
+    names = {r["name"] for r in roles}
+    # Canonical PM name is "Product Manager" — see scripts/seed_roles.py:22
+    # and the existing test_seed_pm_role_exists in this file.
+    assert "Product Manager" in names
+    assert "Software Architect" in names
+
+
+def test_role_seed_names_are_unique():
+    from scripts.seed_data import load_role_seed
+    roles = load_role_seed()
+    names = [r["name"] for r in roles]
+    assert len(names) == len(set(names))
+
+
+def test_role_seed_matches_seed_roles_module():
+    """The JSON file is the source of truth; this test pins parity with the
+    existing seed_roles.ROLES list so Plan 4's migrator can swap one for
+    the other without behavior change."""
+    from scripts.seed_data import load_role_seed
+    from scripts.seed_roles import ROLES as LEGACY_ROLES
+    json_names = {r["name"] for r in load_role_seed()}
+    legacy_names = {r["role_name"] for r in LEGACY_ROLES}
+    assert json_names == legacy_names

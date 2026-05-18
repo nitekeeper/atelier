@@ -223,11 +223,16 @@ def test_phase_seed_sha256_pinned():
 
 
 def test_foreign_keys_enforced_in_get_connection(tmp_path):
-    """scripts/db.py.get_connection enables FK enforcement per spec §11.2.
-    The shared schema does NOT set PRAGMA foreign_keys (connection-scoped);
-    enforcement is therefore a runtime contract of get_connection().
-    Per QA Imp-2."""
-    from scripts.db import get_connection
+    """`scripts/migrate.py.get_connection` enables FK enforcement per
+    spec §11.2. The shared schema does NOT set PRAGMA foreign_keys
+    (connection-scoped); enforcement is therefore a runtime contract of
+    the connection helper. Per QA Imp-2.
+
+    Note: the helper used to live in `scripts/db.py`; Plan 3 Task 9
+    retired that module and inlined the helper into `scripts/migrate.py`.
+    Business-logic callers should route through `scripts/backend.py`,
+    not import this helper directly."""
+    from scripts.migrate import get_connection
     db = tmp_path / "atelier.db"
     apply_migrations(str(db), MIGRATIONS / "shared")
     apply_migrations(str(db), MIGRATIONS / "local-only")

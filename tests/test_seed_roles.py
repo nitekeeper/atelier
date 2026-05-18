@@ -12,11 +12,31 @@ TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
 
 
 @pytest.fixture
-def db_path(tmp_path):
-    path = str(tmp_path / "test.db")
-    apply_migrations(path, MIGRATIONS_DIR / "shared")
-    apply_migrations(path, MIGRATIONS_DIR / "local-only")
-    return path
+def db_path(tmp_path, monkeypatch):
+    """Hermetic Local-mode workspace fixture.
+
+    `scripts.seed_roles.seed` routes through `scripts.backend`, which
+    dispatches per `mode_detector.detect_mode()`. On a dev host where
+    `~/.memex/` is populated the facade would resolve to Memex mode and
+    write to `~/.memex/agents.db` — the test DB at `tmp_path/test.db`
+    would never receive any rows, novelty counts would collapse to
+    `(0, 0)`, and the per-row exists-assertions below would all see None.
+
+    Round-2 fix: build a fake git workspace under `tmp_path`, chdir into
+    it (so `backend_local._workspace_root()` resolves there), and force
+    `detect_mode()` to "local" regardless of dev-host state. The autouse
+    `_clear_mode_cache` fixture in `tests/conftest.py` keeps the patched
+    callable from leaking between tests.
+    """
+    workspace = tmp_path / "ws"
+    (workspace / ".git").mkdir(parents=True)  # marker for find_git_root
+    (workspace / ".ai").mkdir()
+    path = workspace / ".ai" / "atelier.db"
+    apply_migrations(str(path), MIGRATIONS_DIR / "shared")
+    apply_migrations(str(path), MIGRATIONS_DIR / "local-only")
+    monkeypatch.chdir(workspace)  # backend_local._workspace_root resolves here
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
+    return str(path)
 
 
 def test_seed_inserts_all_roles(db_path):
@@ -34,22 +54,44 @@ def test_seed_is_idempotent(db_path):
     roles_added, agents_added = seed(db_path)
     assert roles_added == 0
     assert agents_added == 0
+    # Non-vacuous assertion: a `(0, 0)` return from a backend that never
+    # wrote to this DB would also satisfy the lines above. Pin the actual
+    # row count to len(ROLES) so the test fails if seed silently
+    # short-circuits without inserting anything.
+    from scripts.migrate import get_connection
+    conn = get_connection(db_path)
+    try:
+        role_count = conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0]
+        agent_count = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+    finally:
+        conn.close()
+    assert role_count == len(ROLES), f"expected {len(ROLES)} roles, got {role_count}"
+    assert agent_count == len(ROLES), f"expected {len(ROLES)} agents, got {agent_count}"
 
 
 def test_seed_no_duplicate_role_names(db_path):
     seed(db_path)
-    from scripts.db import get_connection
+    from scripts.migrate import get_connection
     conn = get_connection(db_path)
     rows = conn.execute(
         "SELECT name, COUNT(*) as cnt FROM roles GROUP BY name HAVING cnt > 1"
     ).fetchall()
+    # Non-vacuous assertions: "no duplicates among zero rows" is a
+    # tautology. Pin total_rows > 0 AND distinct_names == len(ROLES)
+    # so the test fails if seed routed away from this DB.
+    total_rows = conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0]
+    distinct_names = conn.execute("SELECT DISTINCT name FROM roles").fetchall()
     conn.close()
     assert rows == [], f"Duplicate role names found: {rows}"
+    assert total_rows > 0, "seed did not insert into the test DB"
+    assert len(distinct_names) == len(ROLES), (
+        f"expected {len(ROLES)} distinct role names, got {len(distinct_names)}"
+    )
 
 
 def test_seed_pm_role_exists(db_path):
     seed(db_path)
-    from scripts.db import get_connection
+    from scripts.migrate import get_connection
     conn = get_connection(db_path)
     row = conn.execute("SELECT * FROM roles WHERE name = 'Product Manager'").fetchone()
     conn.close()
@@ -58,7 +100,7 @@ def test_seed_pm_role_exists(db_path):
 
 def test_seed_systems_engineer_exists(db_path):
     seed(db_path)
-    from scripts.db import get_connection
+    from scripts.migrate import get_connection
     conn = get_connection(db_path)
     row = conn.execute("SELECT * FROM agents WHERE id = 'systems-engineer-1'").fetchone()
     conn.close()

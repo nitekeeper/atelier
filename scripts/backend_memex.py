@@ -19,6 +19,7 @@ This module is built in three logical sections matching Plan 2 tasks 1-3:
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import importlib.util
 import json
@@ -106,6 +107,66 @@ def _ensure_memex_importable() -> None:
         sys.path.insert(0, p)
 
 
+@contextlib.contextmanager
+def _scripts_db_shim(plugin_root: Path):
+    """Temporarily expose Memex's `scripts/db.py` as `sys.modules['scripts.db']`
+    so Memex modules that do `from scripts.db import get_connection` at exec
+    time resolve to the Memex helper rather than crashing with
+    `ModuleNotFoundError` (Atelier retired its own `scripts/db.py` in T26).
+
+    Memex's `scripts/db.py` is self-contained (no transitive `scripts.*`
+    imports — only stdlib), so we can load it directly via the same
+    file-path loader used for every other Memex module, install it as
+    `sys.modules['scripts.db']` for the duration of the `with` block,
+    and unconditionally restore the prior `sys.modules` state on exit.
+
+    Restoration is unconditional: if `scripts.db` was absent before the
+    block (the common case post-T26), we remove our injection; if it
+    was present (an unlikely paranoia case — another shim is already
+    active), we put the prior object back. Either way the module table
+    looks the same before and after, so concurrent or nested loads in
+    the same process are isolated.
+
+    If the plugin root has no `scripts/db.py` (synthetic test fixtures
+    that mock out a minimal Memex install), the shim degrades to a
+    no-op — the module being loaded inside the `with` block is
+    presumably also self-contained, so leaving `scripts.db` absent is
+    correct.
+
+    Used by `_load_memex_module` around `spec.loader.exec_module` for
+    every Memex module except `db` itself (the shim's own dependency —
+    loading `db` does not need the shim because its imports are all
+    stdlib).
+    """
+    # Load memex's db.py via the same file-path loader to keep the
+    # "no Atelier scripts.* dependency" property of the shim — calling
+    # `_load_memex_module(plugin_root, "db")` is intentional: it goes
+    # through the lru_cache so we only pay the spec/exec cost once.
+    # If the plugin tree has no db.py (test fixtures), skip the shim;
+    # any module that genuinely needs `scripts.db` will fail at its
+    # own import site with the original ModuleNotFoundError, which is
+    # the correct surfacing for that case.
+    try:
+        memex_db = _load_memex_module(plugin_root, "db")
+    except ImportError:
+        yield None
+        return
+    saved_present = "scripts.db" in sys.modules
+    saved = sys.modules.get("scripts.db")
+    sys.modules["scripts.db"] = memex_db
+    try:
+        yield memex_db
+    finally:
+        if saved_present:
+            sys.modules["scripts.db"] = saved
+        else:
+            # The pre-shim state had no `scripts.db` entry; remove our
+            # injection so the global module table is bit-for-bit
+            # identical to its pre-shim state. `pop` with default avoids
+            # KeyError if a concurrent loader already cleaned up.
+            sys.modules.pop("scripts.db", None)
+
+
 @functools.lru_cache(maxsize=None)
 def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
     """Load `<plugin_root>/scripts/<dotted-path>.py` (or the matching
@@ -117,6 +178,16 @@ def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
     it never collides with anything already in `sys.modules`. The
     `lru_cache` decorator keeps each `(plugin_root, dotted)` pair from
     paying the spec/exec cost more than once per process.
+
+    For every Memex module EXCEPT `db` itself, the loader wraps
+    `exec_module` in `_scripts_db_shim` so source-level
+    `from scripts.db import get_connection` statements (present in
+    `roles.py`, `agents/__init__.py`, `stores.py`, `meetings.py`, …)
+    resolve against Memex's bundled `scripts/db.py`. The shim is
+    scoped to the exec call and the prior `sys.modules` state is
+    restored on exit — no permanent global pollution. `db` is special-
+    cased so the shim can bootstrap itself (Memex's `db.py` imports
+    only stdlib, so it needs no shim).
 
     Tests that want to inject a stub module should call
     `_load_memex_module.cache_clear()` and then either pre-populate the
@@ -141,7 +212,13 @@ def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
             # find their siblings. We do NOT shadow the real
             # `scripts.<name>` entries.
             sys.modules[mod_name] = module
-            spec.loader.exec_module(module)
+            if dotted == "db":
+                # Bootstrap: loading the shim's own dependency. Memex's
+                # db.py is stdlib-only, so no `scripts.db` shim needed.
+                spec.loader.exec_module(module)
+            else:
+                with _scripts_db_shim(plugin_root):
+                    spec.loader.exec_module(module)
             return module
     raise ImportError(
         f"memex module {dotted!r} not found under {plugin_root / 'scripts'}")

@@ -1,9 +1,23 @@
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
-from scripts.db import get_connection
 
 MIGRATIONS_DIR: Path = Path(__file__).parent.parent / "migrations"
+
+
+def get_connection(db_path: str) -> sqlite3.Connection:
+    """Open a SQLite connection with WAL + FK enforcement.
+
+    Inlined into the migration runner because `scripts/db.py` was retired
+    (Plan 3 Task 9). The migration runner is the only legitimate consumer
+    of a raw SQLite handle that survives the Memex/Local backend split;
+    business-logic callers go through `scripts/backend.py`.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
 
 def apply_migrations(db_path: str, migrations_dir: Path) -> None:

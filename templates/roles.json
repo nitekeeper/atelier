@@ -1,0 +1,248 @@
+{
+  "roles": [
+    {
+      "name": "Product Manager",
+      "description": "Coordination hub. Bridges user \u2194 agents. Manages sessions, tasks, and priorities."
+    },
+    {
+      "name": "Software Architect",
+      "description": "Owns system-level architecture decisions, API contracts, and cross-cutting standards."
+    },
+    {
+      "name": "Systems Architect",
+      "description": "Owns platform-level and infrastructure-level architecture \u2014 the layer beneath application services."
+    },
+    {
+      "name": "Software Engineer (Backend)",
+      "description": "Implements backend services, APIs, data models, and integration code."
+    },
+    {
+      "name": "Frontend Engineer",
+      "description": "Implements user interfaces: components, state, API integration, and accessibility."
+    },
+    {
+      "name": "Full-Stack Engineer",
+      "description": "Bridges frontend and backend; covers integration seams and lean-team scenarios."
+    },
+    {
+      "name": "Mobile Engineer (iOS)",
+      "description": "Implements iOS native applications and owns the iOS build and release pipeline."
+    },
+    {
+      "name": "Mobile Engineer (Android)",
+      "description": "Implements Android native applications and owns the Android build and release pipeline."
+    },
+    {
+      "name": "Mobile Engineer (Cross-platform)",
+      "description": "Implements cross-platform mobile applications using Flutter or React Native."
+    },
+    {
+      "name": "Data Engineer",
+      "description": "Designs and builds data pipelines, ETL/ELT, and the data storage layer."
+    },
+    {
+      "name": "Machine Learning Engineer",
+      "description": "Builds and deploys ML models and model serving infrastructure in production."
+    },
+    {
+      "name": "Data Scientist",
+      "description": "Owns experimentation, statistical modeling, and business insight from data."
+    },
+    {
+      "name": "DevOps / Platform Engineer",
+      "description": "Designs and maintains CI/CD, infrastructure as code, containers, and observability."
+    },
+    {
+      "name": "Site Reliability Engineer (SRE)",
+      "description": "Owns SLOs, error budgets, postmortems, and reliability improvements."
+    },
+    {
+      "name": "Cloud Infrastructure Engineer",
+      "description": "Designs cloud architecture, governs cloud cost, and owns cloud security controls."
+    },
+    {
+      "name": "Database Engineer",
+      "description": "Owns schema design, query optimization, indexing, and migration safety."
+    },
+    {
+      "name": "Security Engineer",
+      "description": "Owns threat modeling, security standards, cryptography advice, and security review phase."
+    },
+    {
+      "name": "Application Security Engineer",
+      "description": "Performs SAST, DAST, penetration testing, and manages the security regression suite."
+    },
+    {
+      "name": "SDET",
+      "description": "Software Development Engineer in Test. Owns test strategy, infrastructure, and TDD red phase."
+    },
+    {
+      "name": "QA Engineer",
+      "description": "Owns QA review phase, manual test execution, exploratory testing, and release sign-off."
+    },
+    {
+      "name": "Performance Engineer",
+      "description": "Owns performance baselines, load testing, profiling, and performance budgets."
+    },
+    {
+      "name": "Embedded Systems Engineer",
+      "description": "Implements RTOS firmware and embedded software with timing and memory constraints."
+    },
+    {
+      "name": "Firmware Engineer",
+      "description": "Writes bare-metal firmware, bootloaders, and peripheral drivers at the register level."
+    },
+    {
+      "name": "API Engineer",
+      "description": "Owns API design standards, governance, OpenAPI specifications, and API versioning strategy."
+    },
+    {
+      "name": "Integration Engineer",
+      "description": "Designs and implements system integrations, message brokers, and third-party API adapters."
+    },
+    {
+      "name": "Search Engineer",
+      "description": "Designs and tunes search infrastructure including full-text, vector, and neural ranking."
+    },
+    {
+      "name": "Real-Time Systems Engineer",
+      "description": "Builds low-latency communication infrastructure: WebSockets, QUIC, lock-free data structures."
+    },
+    {
+      "name": "Blockchain Engineer",
+      "description": "Designs and audits smart contracts, on-chain/off-chain architecture, and token systems."
+    },
+    {
+      "name": "Game Engineer",
+      "description": "Builds game systems: physics, audio, AI, networking, scripting, and game loop architecture."
+    },
+    {
+      "name": "Graphics Engineer",
+      "description": "Implements rendering pipeline, shaders, and GPU optimization for real-time and offline rendering."
+    },
+    {
+      "name": "Compiler Engineer",
+      "description": "Builds compilers, interpreters, type systems, optimization passes, and language runtimes."
+    },
+    {
+      "name": "Developer Tools Engineer",
+      "description": "Builds CLIs, IDE extensions, static analysis tools, and developer workflow automation."
+    },
+    {
+      "name": "WebAssembly Engineer",
+      "description": "Designs and implements WebAssembly modules, WASI integrations, and Wasm runtimes."
+    },
+    {
+      "name": "CLI Engineer",
+      "description": "Designs and implements command-line interfaces, shell completions, and terminal UX."
+    },
+    {
+      "name": "UX / UI Designer",
+      "description": "Owns user interface design, design systems, usability testing, and design-to-dev handoff."
+    },
+    {
+      "name": "Accessibility Specialist",
+      "description": "Owns WCAG compliance, accessibility audits, and assistive technology testing across all surfaces."
+    },
+    {
+      "name": "Design Systems Engineer",
+      "description": "Builds and maintains the component library, design tokens, and visual regression testing."
+    },
+    {
+      "name": "Business Intelligence Engineer",
+      "description": "Builds BI infrastructure, dimensional models, dashboards, and KPI governance."
+    },
+    {
+      "name": "Analytics Engineer",
+      "description": "Transforms raw data into clean, tested, documented analytical models via dbt and the semantic layer."
+    },
+    {
+      "name": "Technical Program Manager",
+      "description": "Manages cross-team technical programs, dependency tracking, and risk mitigation."
+    },
+    {
+      "name": "Release Manager",
+      "description": "Owns the end-to-end release process, rollback plans, and release sign-off."
+    },
+    {
+      "name": "Documentation Engineer",
+      "description": "Owns all developer-facing documentation, API references, guides, and documentation site."
+    },
+    {
+      "name": "SEO Engineer",
+      "description": "Owns technical SEO, Core Web Vitals, structured data, and crawlability."
+    },
+    {
+      "name": "Developer Advocate",
+      "description": "Advocates for developer experience, evaluates SDKs from the community perspective, and builds feedback loops."
+    },
+    {
+      "name": "Localization Engineer",
+      "description": "Owns internationalization architecture, translation pipelines, and locale correctness."
+    },
+    {
+      "name": "Systems Engineer",
+      "description": "Owns systems-level code: Rust, C, C++, WebAssembly modules, and memory-safe system design."
+    },
+    {
+      "name": "AI Research Scientist",
+      "description": "Evaluates theoretical soundness of AI procedures, proposes research-grounded improvements, and reviews model architecture decisions."
+    },
+    {
+      "name": "Reinforcement Learning Researcher",
+      "description": "Evaluates agent decision-making for RL soundness, proposes reward-signal improvements, and reviews multi-agent coordination logic."
+    },
+    {
+      "name": "AI Safety Researcher",
+      "description": "Reviews self-modification procedures for safety risks, identifies misalignment vectors, and ensures human oversight is preserved."
+    },
+    {
+      "name": "ML Engineer (AI Systems)",
+      "description": "Evaluates ML pipeline implementations for engineering correctness, reviews data handling, and proposes production-grade improvements to ML workflows."
+    },
+    {
+      "name": "NLP Engineer (AI)",
+      "description": "Reviews language model interaction patterns, evaluates prompt designs, and proposes NLP-grounded improvements to agent communication."
+    },
+    {
+      "name": "Computer Vision Engineer",
+      "description": "Evaluates multimodal and vision-related components, proposes improvements for processing visual inputs, and assesses visual output quality."
+    },
+    {
+      "name": "AI Infrastructure Engineer",
+      "description": "Evaluates infrastructure decisions for scalability, identifies bottlenecks in AI pipelines, and assesses compute efficiency."
+    },
+    {
+      "name": "Agent Systems Architect",
+      "description": "Evaluates agent orchestration architecture, identifies coordination inefficiencies, and ensures agents stay within their defined roles."
+    },
+    {
+      "name": "Knowledge Engineer",
+      "description": "Evaluates knowledge representation, proposes ontology improvements, and assesses reasoning quality in agent decision-making."
+    },
+    {
+      "name": "Prompt Engineer",
+      "description": "Reviews skill prompts and SKILL.md procedures for clarity and effectiveness, designs evaluation rubrics for prompt quality."
+    },
+    {
+      "name": "AI Ethicist",
+      "description": "Reviews agent behavior for ethical implications, identifies bias vectors, and ensures autonomous decisions respect human values."
+    },
+    {
+      "name": "AI Policy Researcher",
+      "description": "Reviews self-improvement proposals for regulatory compliance, identifies legal liability risks, and ensures audit trails satisfy transparency requirements."
+    },
+    {
+      "name": "Data Scientist (AI Evaluation)",
+      "description": "Evaluates whether AI improvements are supported by data, proposes metrics for self-improvement effectiveness, and designs skill quality evaluation frameworks."
+    },
+    {
+      "name": "AI Product Manager",
+      "description": "Evaluates whether proposed AI improvements serve user needs, assesses product-level risks of self-modification, and ensures changes align with product vision."
+    },
+    {
+      "name": "Cognitive Scientist",
+      "description": "Evaluates whether agent reasoning aligns with sound cognitive principles, identifies cognitive biases in procedures, and reviews human-facing outputs for cognitive load."
+    }
+  ]
+}

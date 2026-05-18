@@ -34,10 +34,10 @@ WAL mode is enforced on both paths. Concurrent agent writes are safe.
 
 ### Pointing Claude Code at the plugin
 
-Atelier ships as a Claude Code plugin. Register it once:
+Atelier ships as a Claude Code plugin. From inside a Claude Code session, register it once:
 
-```bash
-claude /agora:plugin-register --url https://github.com/nitekeeper/atelier.git
+```
+agora:plugin-register --url https://github.com/nitekeeper/atelier.git
 ```
 
 `/atelier:run`, `/atelier:load`, `/atelier:save`, `/atelier:ingest`, and `/atelier:migrate` become available immediately.

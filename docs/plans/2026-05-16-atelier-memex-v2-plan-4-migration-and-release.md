@@ -77,7 +77,7 @@ def populated_local_project(tmp_path, monkeypatch):
     from scripts.projects import create_project
     from scripts.tasks import create_task
     from scripts.meetings import create_meeting
-    r = create_role(str(db), name="Project Manager", description="PM")
+    r = create_role(str(db), name="Product Manager", description="PM")
     create_agent(str(db), id="atelier-pm-1", name="PM",
                  role_id=r["id"], profile="pm")
     create_project(str(db), name="myproj",
@@ -204,56 +204,106 @@ def _connect_local(local_db: Path) -> sqlite3.Connection:
     return c
 
 
+def _index_id_for_atelier_row(source_ref: str) -> str | None:
+    """Look up an atelier source_ref (e.g. `atelier:tasks:42`) in the
+    Memex Index. Returns the existing `index_id` if already migrated,
+    else None.
+
+    The atelier replay layer uses this BEFORE calling
+    `backend_memex.write_*` so a re-run after a partial outage skips
+    rows that already landed in memex. Without this precheck, memex
+    v2.3.0+ `librarian.write_entry` would raise `DuplicateKeyError` on
+    every row from the prior partial run.
+    """
+    from scripts import backend_memex
+    return backend_memex.lookup_index_id_by_source_ref(source_ref)
+
+
 def migrate_project(local_db: Path) -> dict:
     """Replay local rows into Memex; on success rename the local DB
     and drop a .migrated marker.
 
-    Returns {"status": "migrated"|"skipped", "migrated": {table: count}}
+    Idempotent: each row is checked against the Memex Index via its
+    atelier source_ref (`atelier:<table>:<local_id>`) before writing.
+    Rows already present are counted under `already_present` and
+    skipped. This is what makes a post-outage re-run safe.
+
+    Returns {"status": "migrated"|"skipped",
+             "migrated": {table: count},
+             "already_present": {table: count}}
     """
     ai_dir = local_db.parent
     marker = ai_dir / "atelier.migrated"
     if marker.exists():
         return {"status": "skipped", "migrated": {}, "reason": "marker present"}
 
+    # Step 0: Refuse to migrate if Memex isn't bootstrapped.
+    # memex v2.5.0+ raises MemexNotInitializedError from require_bootstrap()
+    # if ~/.memex/registry.json is missing.
     from scripts import backend_memex
     from scripts import bootstrap
+    try:
+        from scripts import db as memex_db  # memex's db module (re-exported)
+        memex_db.require_bootstrap()
+    except Exception as e:
+        # Surface MemexNotInitializedError (or any bootstrap failure) to the
+        # caller with operator guidance. The entry-skill prompt logic catches
+        # this and tells the user to run `memex:run` once before migrating.
+        raise RuntimeError(
+            f"Memex is not initialized: {e}. "
+            f"Run `memex:run` once to bootstrap, then retry migration."
+        ) from e
 
-    # Ensure Memex bootstrap has run
+    # Run Atelier's idempotent bootstrap (seeds roles + agents into memex).
     bootstrap.run_bootstrap()
 
     c = _connect_local(local_db)
     migrated = {"projects": 0, "tasks": 0, "meetings": 0,
                 "sessions": 0, "phase_bypasses": 0, "documents": 0}
+    already_present = {"projects": 0, "tasks": 0, "meetings": 0,
+                       "sessions": 0, "phase_bypasses": 0, "documents": 0}
 
     # Order matters: projects first so child rows reference real IDs.
     # Project rows
     for r in c.execute("SELECT * FROM projects"):
+        source_ref = f"atelier:projects:{r['id']}"
+        if _index_id_for_atelier_row(source_ref) is not None:
+            already_present["projects"] += 1
+            continue
         backend_memex.write_document(
             domain="project", title=r["name"],
             body=f"# {r['name']}\n\n{r['description'] or ''}",
             metadata={"name": r["name"], "description": r["description"],
                       "repo": r["repo"], "phase": r["phase"],
-                      "local_id": r["id"]},
+                      "local_id": r["id"], "source_ref": source_ref},
             caller_agent_id=r["created_by"],
         )
         migrated["projects"] += 1
 
     # Tasks
     for r in c.execute("SELECT * FROM tasks"):
+        source_ref = f"atelier:tasks:{r['id']}"
+        if _index_id_for_atelier_row(source_ref) is not None:
+            already_present["tasks"] += 1
+            continue
         backend_memex.write_task(
             title=r["title"], description=r["description"] or "",
             project_id=r["project_id"], created_by=r["created_by"],
             assigned_to=r["assigned_to"], priority=r["priority"] or 0,
-            notes=r["notes"],
+            notes=r["notes"], source_ref=source_ref,
         )
         migrated["tasks"] += 1
 
     # Meetings
     for r in c.execute("SELECT * FROM meeting_minutes"):
+        source_ref = f"atelier:meeting_minutes:{r['id']}"
+        if _index_id_for_atelier_row(source_ref) is not None:
+            already_present["meetings"] += 1
+            continue
         backend_memex.write_meeting(
             title=r["title"], date=r["date"],
             summary=r["summary"] or "", decisions=r["decisions"] or "",
-            created_by=r["created_by"],
+            created_by=r["created_by"], source_ref=source_ref,
         )
         migrated["meetings"] += 1
 
@@ -298,9 +348,11 @@ def migrate_project(local_db: Path) -> dict:
     shutil.move(str(local_db), str(ai_dir / archive_name))
     marker.write_text(json.dumps({
         "migrated_at": _now_iso(), "migrated": migrated,
+        "already_present": already_present,
         "archived_to": archive_name,
     }, indent=2), encoding="utf-8")
-    return {"status": "migrated", "migrated": migrated}
+    return {"status": "migrated", "migrated": migrated,
+            "already_present": already_present}
 
 
 def decline_migration(ai_dir: Path) -> None:
@@ -354,6 +406,11 @@ real work: check `scripts.migrate_to_memex.should_prompt(<project>/.ai)`.
 
 ## Recipe
 
+0. Verify Memex is bootstrapped. `migrate_project` internally calls
+   `memex_db.require_bootstrap()` and raises a RuntimeError with operator
+   guidance if `~/.memex/registry.json` is missing. If you see that
+   error, instruct the user: "Run `memex:run` once before migrating",
+   then abort the recipe.
 1. Call `migrate_to_memex.row_summary(local_db)` to get a per-table count.
 2. Present to the user:
    ```
@@ -394,7 +451,7 @@ git commit -m "feat(migrate): wave-3 Local-to-Memex migration with crash safety"
 ### Task 2: Prompt UX + entry-skill integration (Wave 3)
 
 **Files:**
-- Modify: `skills/load/SKILL.md`, `skills/save/SKILL.md`, `skills/ingest/SKILL.md`, `skills/execute/SKILL.md`
+- Modify: `skills/load/SKILL.md`, `skills/save/SKILL.md`, `skills/ingest/SKILL.md`, `skills/run/SKILL.md`
 - Create: `scripts/atelier_entrypoint.py` (shared startup-check function)
 - Test: `tests/test_atelier_entrypoint.py`
 
@@ -451,7 +508,7 @@ def test_startup_in_memex_mode_no_local_db_proceeds(project_root, monkeypatch):
 # scripts/atelier_entrypoint.py
 """Shared startup check for Atelier user-facing skills.
 
-Each of skills/{load,save,ingest,execute}/SKILL.md calls this at the
+Each of skills/{load,save,ingest,run}/SKILL.md calls this at the
 top of its recipe. It returns an action token telling the skill what
 to do before its actual work:
 
@@ -497,7 +554,7 @@ def startup_check() -> dict:
 
 - [ ] **Step 4: Update each of the 4 user-facing SKILL.md files**
 
-For each of `skills/{load,save,ingest,execute}/SKILL.md`, add this block at the very top of its recipe section (BEFORE any existing instructions):
+For each of `skills/{load,save,ingest,run}/SKILL.md`, add this block at the very top of its recipe section (BEFORE any existing instructions):
 
 ```markdown
 ## Pre-flight (always first)
@@ -527,7 +584,7 @@ pytest tests/ -x
 - [ ] **Step 6: Commit**
 
 ```bash
-git add scripts/atelier_entrypoint.py skills/load/SKILL.md skills/save/SKILL.md skills/ingest/SKILL.md skills/execute/SKILL.md tests/test_atelier_entrypoint.py
+git add scripts/atelier_entrypoint.py skills/load/SKILL.md skills/save/SKILL.md skills/ingest/SKILL.md skills/run/SKILL.md tests/test_atelier_entrypoint.py
 git commit -m "feat(entrypoint): wave-3 startup pre-flight + migration prompt in user-facing skills"
 ```
 
@@ -608,11 +665,29 @@ def test_failure_during_task_replay_leaves_no_marker(
     assert not (project_with_data / ".ai" / "atelier.migrated").exists()
 
 
-def test_rerun_after_outage_completes(project_with_data, monkeypatch):
+def test_rerun_after_outage_is_idempotent(project_with_data, monkeypatch):
     """After the imaginary outage clears, re-running the migration
-    succeeds. Idempotency is the responsibility of the Memex side
-    (source_hash check in ingest_prepare) so we expect duplicate
-    writes to be silently skipped."""
+    succeeds. Idempotency is the responsibility of atelier's replay
+    layer: before writing a row, `migrate_project` looks up the
+    atelier source_ref (e.g., `atelier:tasks:42`) in the Memex Index
+    via `_index_id_for_atelier_row()`. If found, the row is skipped
+    and counted under `summary['already_present']`.
+
+    Memex's `librarian.write_entry` raises `DuplicateKeyError` on key
+    collision (v2.3.0+), so atelier must NOT rely on memex silently
+    deduping — the precheck happens client-side.
+    """
+    # Simulate Index lookups that report "first 2 tasks already present
+    # from the prior partial run". Remaining writes succeed normally.
+    already_seen = {"atelier:tasks:1", "atelier:tasks:2"}
+
+    def fake_index_lookup(source_ref: str) -> str | None:
+        return "01t-prev" if source_ref in already_seen else None
+
+    monkeypatch.setattr(
+        "scripts.migrate_to_memex._index_id_for_atelier_row",
+        fake_index_lookup,
+    )
     monkeypatch.setattr("scripts.backend_memex.write_document",
                         lambda **k: {"row_id": 1, "index_id": "x",
                                      "key": "k", "domain": "d",
@@ -631,6 +706,8 @@ def test_rerun_after_outage_completes(project_with_data, monkeypatch):
     from scripts.migrate_to_memex import migrate_project
     summary = migrate_project(project_with_data / ".ai" / "atelier.db")
     assert summary["status"] == "migrated"
+    # Two tasks should have been skipped as already-present
+    assert summary.get("already_present", {}).get("tasks", 0) == 2
     assert (project_with_data / ".ai" / "atelier.migrated").exists()
 ```
 
@@ -670,7 +747,7 @@ def test_exactly_four_user_skills():
     skill_dirs = [p for p in SKILLS.iterdir()
                   if p.is_dir() and (p / "SKILL.md").exists()]
     names = sorted(p.name for p in skill_dirs)
-    assert names == ["execute", "ingest", "load", "save"], names
+    assert names == ["ingest", "load", "run", "save"], names
 
 
 def test_plugin_manifest_lists_no_extra_skills():
@@ -684,7 +761,7 @@ def test_plugin_manifest_lists_no_extra_skills():
         for s in declared:
             name = s if isinstance(s, str) else s.get("name", "")
             assert any(name.endswith(n)
-                       for n in ("load", "save", "ingest", "execute")), \
+                       for n in ("load", "save", "ingest", "run")), \
                 f"manifest declares unknown skill: {name}"
 
 
@@ -814,11 +891,8 @@ Memex v2 detected. Migrate this project's Atelier data?  [y/N]
 
 | Location | Discoverable as `/atelier:<name>`? | Count |
 |---|---|---|
-| `skills/{load,save,ingest,execute}/SKILL.md` | **Yes** | 4 |
-| `internal/{bootstrap-memex,migrate-local-to-memex,detect-mode}/SKILL.md` | No | 3 |
-| `internal/memex/{dispatch-write,dispatch-core}/SKILL.md` | No | 2 |
-| `internal/local/{wiki-write,wiki-search,wiki-archive,state-crud}/SKILL.md` | No | 4 |
-| `internal/dev-*/SKILL.md` | No | 13 (unchanged) |
+| `skills/{load,save,ingest,run}/SKILL.md` | **Yes** | 4 |
+| `internal/*` (procedures invoked via Read tool) | No | approximately 20 (see `internal/` directory) |
 
 Internal procedures are reached only by reading the file from within a
 user-facing skill — same pattern Memex v2 itself uses.
@@ -886,9 +960,30 @@ git commit -m "docs(README): wave-4 v2 dual-mode setup and migration"
 **Memex v2 integration.** Atelier now writes through Memex v2 when
 installed, with a slim project-local fallback otherwise.
 
-**Memex compatibility:** requires Memex **v2.2.0 or later**. Bootstrap
-refuses to run against older Memex installs (the caller-built
-`librarian_output` contract Atelier depends on landed in Memex v2.2.0).
+**Memex compatibility:** Requires Memex **v2.2.0+** (API floor —
+caller-built `librarian_output` landed in v2.2.0). Strongly recommended:
+**v2.5.0+** (auto-bootstrap eliminates manual `python -m scripts.install`),
+**v2.5.1+** (atelier can drop client-side `__*` namespace filtering).
+Bootstrap refuses to run against Memex installs older than v2.2.0.
+
+**Typed exceptions surfaced by memex.** Atelier callers may now see the
+following typed exceptions propagated from memex:
+
+- `librarian.DuplicateKeyError` — raised on key collision during
+  `write_entry` (memex v2.3.0). Atelier's migration replay handles this
+  via a client-side Index lookup before every write.
+- `embeddings.EmbeddingUnavailable` — raised when embeddings can't be
+  produced (oversized input, missing API key, provider error) (memex
+  v2.4.1). Atelier surfaces the reason and falls back to FTS-only.
+- `data_steward.OrphanNotFoundError` — raised when attempting to operate
+  on an `index_id` that isn't present in the documents table (memex
+  v2.4.0).
+- `db.MemexNotInitializedError` — raised when `~/.memex/registry.json`
+  is missing (memex v2.5.0). Atelier's `migrate_to_memex` catches and
+  re-raises with operator guidance ("Run `memex:run` once before
+  migrating").
+- `db.MemexHomeInvalidError` — raised when `MEMEX_HOME` is set to an
+  invalid path (memex v2.5.0).
 
 ### Added
 - Dual-mode persistence facade (`scripts/backend.py`) — auto-selects
@@ -901,7 +996,8 @@ refuses to run against older Memex installs (the caller-built
   `documents` table; raw bodies archived to `.ai/raw/`.
 - `scripts/bootstrap.py` — idempotent Memex-mode bootstrap (seeds
   Atelier roles + shipped agents into `~/.memex/agents.db`; creates
-  the `atelier` store; enforces Memex v2.2.0+).
+  the `atelier` store; enforces Memex v2.2.0+ API floor; piggybacks
+  on memex v2.5.0+ auto-bootstrap when available).
 - `scripts/migrate_to_memex.py` — one-shot per-project replay from
   Local to Memex; crash-safe (no marker without full success).
 - `scripts/atelier_entrypoint.py:startup_check()` — pre-flight for the
@@ -939,12 +1035,13 @@ refuses to run against older Memex installs (the caller-built
 
 Also update the description if it mentions Memex v1.
 
-- [ ] **Step 3: Verify any version-asserting tests**
+- [ ] **Step 3: Verify any version-asserting tests or docs**
 
 ```
-grep -rn "1\.0\.13" tests/
+grep -rn "1\.0\.13" . --exclude-dir=.git
 ```
-If any test pins `1.0.13`, bump to `1.1.0`.
+Check `CHANGELOG.md`, `.claude-plugin/plugin.json`, `pyproject.toml`,
+`README.md`, and `tests/`. If anything pins `1.0.13`, bump to `1.1.0`.
 
 - [ ] **Step 4: Commit**
 
@@ -970,7 +1067,7 @@ Expected: all green.
 Local-mode smoke:
 ```bash
 cd /tmp && mkdir smoke-local && cd smoke-local && git init
-PYTHONPATH=C:\Users\user\Documents\Skills\atelier python -c "
+PYTHONPATH=/home/nitekeeper/apps/atelier python -c "
 from scripts.atelier_entrypoint import startup_check
 print(startup_check())
 "
@@ -980,7 +1077,7 @@ Expected: `{'action': 'proceed-local'}`.
 Memex-mode smoke (requires Memex installed):
 ```bash
 cd /tmp/some-fresh-repo
-PYTHONPATH=C:\Users\user\Documents\Skills\atelier python -c "
+PYTHONPATH=/home/nitekeeper/apps/atelier python -c "
 from scripts.atelier_entrypoint import startup_check
 print(startup_check())
 "
@@ -993,6 +1090,11 @@ Expected: `{'action': 'proceed-memex', ...}` and a fresh
 ---
 
 ### Task 9: Tag + push (Wave P)
+
+> **Note: release pipeline is intentionally manual.** Atelier does not
+> have a `notify-agora.yml` GitHub Action equivalent to memex's
+> auto-dispatch. After tagging here, Task 10 must be run by hand in the
+> agora repo.
 
 - [ ] **Step 1: Verify branch is clean**
 
@@ -1027,21 +1129,30 @@ git push origin v1.1.0
 
 ---
 
-### Task 10: Update agora marketplace pin (Wave P)
+### Task 10: Update agora marketplace pin (Wave P, manual)
+
+> This task is intentionally manual — no CI auto-dispatch exists.
 
 **Files:**
-- Modify (in agora repo, `C:\Users\user\Documents\Skills\agora`):
+- Modify (in agora repo, `/home/nitekeeper/apps/agora`):
   - `plugins.json`
   - `.claude-plugin/marketplace.json` (regenerated by the update script)
 
 - [ ] **Step 1: From the agora repo, run the update**
 
 ```bash
-cd C:\Users\user\Documents\Skills\agora
-python scripts/update.py atelier
+cd /home/nitekeeper/apps/agora
+python scripts/update.py atelier 2>&1 | tee /tmp/agora-update.out
 ```
 
-Expected: `atelier: v1.0.13 -> v1.1.0`.
+Expected: stdout contains the substring `1.1.0`. The agora script's
+output format is `<plugin>: <old> -> <new>` (verified against
+`agora/scripts/update.py:147`), but assert via pattern match rather
+than exact string to avoid fragility:
+
+```bash
+grep -q "1\.1\.0" /tmp/agora-update.out && echo OK || echo "no 1.1.0 in output"
+```
 
 - [ ] **Step 2: Diff to verify**
 
@@ -1063,7 +1174,7 @@ git push
 
 - `scripts/migrate_to_memex.py` migrates every row through the right backend; crash-safe.
 - `scripts/atelier_entrypoint.py:startup_check()` is called at the top of every user-facing skill.
-- 4 user-facing skills, ~22 internal procedures, no surface drift.
+- 4 user-facing skills (`ingest`, `load`, `run`, `save`), ~20 internal procedures, no surface drift.
 - `CLAUDE.md` + `README.md` reflect v2 reality; no `.ai/memex.db` references remain.
 - `CHANGELOG.md` has v1.1.0 entry.
 - `pytest tests/` green.

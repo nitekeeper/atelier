@@ -573,9 +573,7 @@ def _atelier_version() -> str:
         import importlib.metadata as md
         return md.version("atelier")
     except Exception:
-        # Fallback should match Plan 4 Task 7's bumped version. Today's
-        # "1.1.0-dev" tracks the in-progress retrofit work.
-        return "1.1.0-dev"
+        return "1.1.0"
 
 
 def _write_marker(marker_root: Path, *, memex_version: str | None = None,

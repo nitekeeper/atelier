@@ -231,6 +231,41 @@ def _memex_module(dotted: str) -> ModuleType:
     return _load_memex_module(_memex_plugin_root(), dotted)
 
 
+def require_memex_bootstrap() -> None:
+    """Verify Memex is bootstrapped before any Atelier→Memex write.
+
+    Delegates to Memex's own `db.require_bootstrap()` (the v2.5.0+
+    contract: raises `MemexNotInitializedError` if `~/.memex/registry.json`
+    is missing). On older Memex versions where the helper is absent we
+    fall back to checking for the registry file directly.
+
+    Any failure is wrapped in a clean `RuntimeError` that tells the
+    operator how to recover — Plan 4's migration prompt catches this
+    and instructs the user to `memex:run` once before migrating.
+
+    Lives here (rather than inside `migrate_to_memex.py`) so callers go
+    through the `backend_memex` facade boundary, and so tests can
+    monkeypatch a single attribute to a no-op.
+    """
+    try:
+        db_mod = _memex_module("db")
+        require = getattr(db_mod, "require_bootstrap", None)
+        if require is not None:
+            require()
+            return
+        # Fallback for pre-v2.5.0 Memex: probe the registry file directly.
+        registry = Path.home() / ".memex" / "registry.json"
+        if not registry.exists():
+            raise RuntimeError(
+                f"Memex registry not found at {registry}."
+            )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Memex is not initialized: {exc}. "
+            "Run `memex:run` once to bootstrap, then retry migration."
+        ) from exc
+
+
 # ── Memex Tier 2 thin wrappers (also serve as patch surfaces in tests) ─────
 
 

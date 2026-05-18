@@ -53,7 +53,14 @@ def create_meeting(db_path: str, meetings_dir: Path, title: str, date: str,
     meetings_dir is always honored — it's the workspace-local
     .ai/meetings/ directory humans browse. Memex mode ALSO writes to
     ~/.memex/raw/ via Archivist, but that's a separate concern
-    (content-addressable archive, not human-browsable workspace state)."""
+    (content-addressable archive, not human-browsable workspace state).
+
+    Single-writer policy: this function owns the .md file. In Local
+    mode we bypass the facade and call `backend_local.write_meeting`
+    directly with `skip_md=True` so its participants-blind renderer
+    cannot clobber the participants-aware file we just wrote (I1 from
+    round-1 review). Memex mode has no on-disk renderer in the
+    backend, so the facade is safe there."""
     filename = _meeting_filename(date, title)
     file_path = Path(meetings_dir) / filename
     file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,17 +68,30 @@ def create_meeting(db_path: str, meetings_dir: Path, title: str, date: str,
         _render_meeting_md(title, date, summary, decisions, participants),
         encoding="utf-8",
     )
-    result = backend.write_meeting(
-        workspace_id=workspace_id, project_id=project_id,
-        title=title, date=date, summary=summary, decisions=decisions,
-        subdomain=subdomain, created_by=created_by,
-    )
+    if mode_detector.detect_mode() == "memex":
+        result = backend.write_meeting(
+            workspace_id=workspace_id, project_id=project_id,
+            title=title, date=date, summary=summary, decisions=decisions,
+            subdomain=subdomain, created_by=created_by,
+        )
+    else:
+        # Direct backend_local call so we can pass skip_md=True (the
+        # facade doesn't accept skip_md — the kwarg is a Local-only
+        # implementation detail).
+        from scripts import backend_local
+        result = backend_local.write_meeting(
+            workspace_id=workspace_id, project_id=project_id,
+            title=title, date=date, summary=summary, decisions=decisions,
+            subdomain=subdomain, created_by=created_by,
+            skip_md=True,
+        )
+    now = _now()
     return {
         "id": result["row_id"], "title": title, "date": date,
         "filename": filename,
         "summary": summary, "decisions": decisions,
         "created_by": created_by,
-        "created_at": _now(), "updated_at": _now(),
+        "created_at": now, "updated_at": now,
         "index_id": result.get("index_id"),
     }
 
@@ -126,10 +146,9 @@ def remove_participant(db_path: str, meeting_id: int, agent_id: str) -> None:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
         backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore  # noqa: F401
-        # No row_id-based delete here (composite primary key). Use raw
-        # SQL via the SELECT-only query() — but DELETE needs the
-        # dedicated execute path. backend_memex provides a helper.
+        # No row_id-based delete here (composite primary key). Use the
+        # dedicated execute helper from backend_memex — `stores.query()`
+        # is SELECT-only and won't accept DELETE.
         backend_memex._memex_core_execute(
             store="atelier",
             sql="DELETE FROM meeting_participants WHERE meeting_id = ? AND agent_id = ?",
@@ -204,6 +223,17 @@ def delete_meeting(db_path: str, meetings_dir: Path, meeting_id: int) -> bool:
         from scripts import backend_memex
         backend_memex._ensure_memex_importable()
         from scripts import stores as memex_stores  # type: ignore
+        # Two-step (participants DELETE, then meeting DELETE) is NOT
+        # wrapped in a transaction here because Memex Core's API splits
+        # writes across two helpers: `_memex_core_execute` (raw SQL,
+        # needed for composite-key DELETE on meeting_participants) and
+        # `stores.delete(row_id=...)` (row-id-keyed, the only way to hit
+        # Memex's Index/Archivist hooks for meeting_minutes). The two
+        # paths don't share a connection, so a transaction across them
+        # isn't available. Worst case: participants DELETE succeeds and
+        # the meeting DELETE fails — re-running delete_meeting is
+        # idempotent (orphan participants don't exist because we deleted
+        # them; the meeting row is still there, so caller can retry).
         backend_memex._memex_core_execute(
             store="atelier",
             sql="DELETE FROM meeting_participants WHERE meeting_id = ?",
@@ -276,6 +306,11 @@ if __name__ == "__main__":
         parser.add_argument("--meetings-dir", default=".ai/meetings")
         parser.add_argument("--workspace-id", type=int, default=None)
         parser.add_argument("--project-id", type=int, default=None)
+        # TODO(N3): expose --subdomain (str) and --participants
+        # (comma-separated agent ids) on this CLI surface. The Python
+        # API already accepts them; the CLI wrapper just doesn't plumb
+        # them through yet. Low priority — most callers use the Python
+        # API directly via skill files.
         args = parser.parse_args(sys.argv[2:])
         result = create_meeting(db_path, Path(args.meetings_dir), title=args.title,
                                 date=args.date, summary=args.summary,

@@ -132,6 +132,26 @@ def test_delete_meeting(db_path, meetings_dir, agent_id, workspace_id):
     assert not (meetings_dir / "2026-05-12-sprint-planning.md").exists()
 
 
+def test_create_meeting_with_participants_preserves_block(
+    db_path, meetings_dir, agent_id, workspace_id
+):
+    """Regression for T21 round-1 I1: backend_local.write_meeting was
+    writing its own (participants-blind) renderer to the same .md
+    path, clobbering the participants-aware one. After the fix,
+    meetings.py owns the .md write and asks the backend to skip via
+    skip_md=True — the Participants block must survive."""
+    create_meeting(db_path, meetings_dir, title="Sprint Planning",
+                   date="2026-05-12", summary="Plan Q2 work",
+                   decisions="Ship auth by end of May", created_by=agent_id,
+                   participants=["pm-1", "dev-1"],
+                   workspace_id=workspace_id)
+    md_file = meetings_dir / "2026-05-12-sprint-planning.md"
+    content = md_file.read_text()
+    assert "## Participants" in content
+    assert "- pm-1" in content
+    assert "- dev-1" in content
+
+
 def test_search_meetings(db_path, meetings_dir, agent_id, workspace_id):
     create_meeting(db_path, meetings_dir, title="Sprint Planning",
                    date="2026-05-12", summary="Q2 roadmap", decisions="",

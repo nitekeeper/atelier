@@ -558,13 +558,21 @@ def write_task(*, title: str, description: str, project_id: int,
                created_by: str, assigned_to: str | None = None,
                priority: int = 0, notes: str | None = None,
                source_ref: str | None = None,
+               metadata: dict | None = None,
                relations: list[dict] | None = None) -> dict:
     """`source_ref` is an optional stable origin tag (e.g.
     `"atelier:tasks:42"`); Plan 4's `migrate_to_memex.py` passes it
     positionally so a rerun can locate the row via
     `lookup_index_id_by_source_ref` (Task 3) and skip duplicate writes.
     Folded into metadata so it survives into
-    `~/.memex/index.db.documents.metadata`."""
+    `~/.memex/index.db.documents.metadata`.
+
+    `metadata` is an optional merge-in dict; the facade folds
+    `subdomain` into this slot (see `backend.write_task`) so it survives
+    into the Memex Index even though `tasks` has no `subdomain` column.
+    Caller-supplied keys take precedence over the internally-built ones
+    so the facade's fold can't accidentally clobber `project_id` etc.
+    """
     body_lines = [f"# {title}", "", description or ""]
     if notes:
         body_lines += ["", "## Notes", notes]
@@ -578,17 +586,21 @@ def write_task(*, title: str, description: str, project_id: int,
     }
     # `notes` is searchable narrative — include it in metadata so
     # _metadata_narrative folds it into the FTS5 blob.
-    metadata: dict = {"project_id": project_id, "priority": priority}
+    merged: dict = {"project_id": project_id, "priority": priority}
     if assigned_to:
-        metadata["assigned_to"] = assigned_to
+        merged["assigned_to"] = assigned_to
     if notes:
-        metadata["notes"] = notes
+        merged["notes"] = notes
     if source_ref:
-        metadata["source_ref"] = source_ref
+        merged["source_ref"] = source_ref
+    if metadata:
+        # Caller's metadata wins — facade-folded subdomain / explicit
+        # caller overrides land on top of the internal defaults.
+        merged.update(metadata)
     return _atelier_write(
         target_table="tasks", domain="task",
         title=title, body=body, payload=payload,
-        metadata=metadata, relations=relations,
+        metadata=merged, relations=relations,
         caller_agent_id=created_by,
     )
 
@@ -597,10 +609,17 @@ def write_meeting(*, title: str, date: str, summary: str,
                   decisions: str, created_by: str,
                   project_id: int | None = None,
                   source_ref: str | None = None,
+                  metadata: dict | None = None,
                   relations: list[dict] | None = None) -> dict:
     """`source_ref` is an optional stable origin tag — same contract as
     `write_task`. Plan 4 line 306 passes it positionally during
-    migration replay."""
+    migration replay.
+
+    `metadata` is an optional merge-in dict; the facade folds
+    `subdomain` into this slot (see `backend.write_meeting`) so it
+    survives into the Memex Index even though `meeting_minutes` has no
+    `subdomain` column.
+    """
     body = (f"# {title}\n\nDate: {date}\n\n"
             f"## Summary\n\n{summary}\n\n"
             f"## Decisions\n\n{decisions}\n")
@@ -612,17 +631,19 @@ def write_meeting(*, title: str, date: str, summary: str,
         "created_by": created_by,
         "created_at": now, "updated_at": now,
     }
-    metadata: dict = {"date": date,
-                      "summary": summary or "",
-                      "decisions": decisions or ""}
+    merged: dict = {"date": date,
+                    "summary": summary or "",
+                    "decisions": decisions or ""}
     if project_id is not None:
-        metadata["project_id"] = project_id
+        merged["project_id"] = project_id
     if source_ref:
-        metadata["source_ref"] = source_ref
+        merged["source_ref"] = source_ref
+    if metadata:
+        merged.update(metadata)
     return _atelier_write(
         target_table="meeting_minutes", domain="meeting",
         title=title, body=body, payload=payload,
-        metadata=metadata, relations=relations,
+        metadata=merged, relations=relations,
         caller_agent_id=created_by,
     )
 

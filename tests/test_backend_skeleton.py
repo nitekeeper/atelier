@@ -20,11 +20,11 @@ The full surface mirrors spec §4.3 lines 187-223.
 # Red-phase verified 2026-05-17: removing scripts/backend.py and running this
 # file yields `ModuleNotFoundError: No module named 'scripts.backend'`.
 # Restored via commit 8ff2504.
-from unittest.mock import patch
+from unittest.mock import create_autospec, patch
 
 import pytest
 
-from scripts import backend, mode_detector
+from scripts import backend, backend_local, mode_detector
 
 
 EXPECTED_METHODS = [
@@ -226,42 +226,29 @@ def test_deferred_method_raises_not_implemented(fn_name, kwargs):
         fn(**kwargs)
 
 
-# Dispatch shims for the 14 implemented methods. Each method returns a
-# value type that matches its real return contract so the facade can
-# round-trip the result without coercion.
-_LOCAL_DISPATCH_STUBS = {
-    "write_project":            lambda **k: {"id": 1},
-    "write_document":           lambda **k: {"id": 1},
-    "write_task":               lambda **k: {"id": 1},
-    "write_meeting":            lambda **k: {"id": 1},
-    "upsert_session":           lambda **k: {"id": 1},
-    "transition_phase":         lambda **k: {"id": 1},
-    "update_task_status":       lambda **k: {"id": 1},
-    "record_phase_bypass":      lambda **k: {"id": 1},
-    "find_documents":           lambda **k: [],
-    "get_task":                 lambda **k: None,
-    "list_tasks":               lambda **k: [],
-    "lookup_index_id_by_source_ref": lambda **k: None,
-    "find_or_create_role":      lambda **k: {"id": 1},
-    "find_or_create_agent":     lambda **k: {"id": 1},
-}
-
-
 @pytest.mark.parametrize("fn_name,kwargs", _IMPLEMENTED_PARAMS)
 def test_implemented_method_dispatches(fn_name, kwargs):
     """The 14 spec §4.3 methods Plan 2 Task 9 wired through must NOT raise
-    NotImplementedError. Patching `detect_mode → 'local'` plus the matching
-    `backend_local` symbol lets us exercise the facade's adapter without
-    opening a real SQLite connection."""
-    mode_detector._clear_cache()
+    NotImplementedError AND must actually invoke the backend symbol.
+
+    Upgraded post-T16 (QA I1): the original test only asserted "no
+    NotImplementedError", which a method returning `None` would silently
+    pass. We now patch the facade's `_backend()` to return a
+    `create_autospec(backend_local)` mock — autospec ensures the call
+    signature matches the real backend symbol's signature, so signature
+    drift between facade and backend gets caught here too — and assert
+    the matching attribute was called once. The result value itself
+    isn't pinned (stays a dispatch test, not a result test)."""
+    mock_backend = create_autospec(backend_local, spec_set=True)
     with patch.object(mode_detector, "detect_mode", return_value="local"), \
-         patch.multiple("scripts.backend_local", **_LOCAL_DISPATCH_STUBS):
+         patch.object(backend, "_backend", return_value=mock_backend):
         fn = getattr(backend, fn_name)
-        # Must not raise NotImplementedError. Whatever the backend stub
-        # returns is the facade's return — we don't pin a value here so
-        # this stays a pure dispatch assertion, not a result assertion.
         fn(**kwargs)
-    mode_detector._clear_cache()
+    # Assert the matching backend symbol was invoked exactly once.
+    # `create_autospec` already enforces signature compatibility on the
+    # call, so a kwarg-mismatch fails before we reach this line.
+    called = getattr(mock_backend, fn_name)
+    called.assert_called_once()
 
 
 # Methods with no required parameters can't be tested for positional

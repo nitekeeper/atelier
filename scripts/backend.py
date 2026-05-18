@@ -21,9 +21,16 @@ before delegating. Local-mode is pure pass-through.
 
 ## Defense-in-depth: domain validation
 
-Both backends call `domain_vocabulary.assert_valid` themselves, but the
-facade validates first so the unknown-domain path stays hermetic — no
-SQLite connect, no Memex config read — callers see a clean `ValueError`.
+The facade ALWAYS validates `domain` via `assert_valid_domain` before
+dispatch so the unknown-domain path stays hermetic (no SQLite connect,
+no Memex config read — callers see a clean `ValueError`). Memex
+re-validates inside `backend_memex.write_document` as defense-in-depth,
+so the validation contract holds even when callers bypass the facade.
+Local mode does NOT re-validate inside `backend_local.write_document`:
+the facade is the only entry point in the Atelier codebase, so an
+extra validation pass would be redundant cost on the hot write path.
+If a future caller wires `backend_local` directly, add `assert_valid_domain`
+there at the top — keeping the rule "facade always validates" intact.
 
 ## Deferred to v1.2.0
 
@@ -57,6 +64,18 @@ def _backend() -> ModuleType:
         return backend_memex
     from scripts import backend_local
     return backend_local
+
+
+def _backend_is_memex(be: ModuleType) -> bool:
+    """Compare backend module identity (not name string).
+
+    Using `be is backend_memex` avoids brittle string matching on
+    `be.__name__.endswith("backend_memex")` — that would also match
+    e.g. a hypothetical `tests.fake_backend_memex` namespace and breaks
+    if someone re-exports the module under an alias.
+    """
+    from scripts import backend_memex
+    return be is backend_memex
 
 
 def _not_implemented(name: str) -> NoReturn:
@@ -99,15 +118,21 @@ def write_document(*, workspace_id: int, project_id: int,
     from scripts.domain_vocabulary import assert_valid_domain
     assert_valid_domain(domain)
     be = _backend()
-    if be.__name__.endswith("backend_memex"):
+    if _backend_is_memex(be):
         adapted_metadata = dict(metadata or {})
-        # workspace_id / project_id / subdomain belong on the Index row's
-        # metadata blob in Memex mode — they're not columns on the
-        # `documents` table, just searchable / filterable fields.
+        # workspace_id / project_id / subdomain / source_ref belong on
+        # the Index row's metadata blob in Memex mode — they're not
+        # columns on the `documents` table, just searchable / filterable
+        # fields. `setdefault` preserves caller-provided values, so a
+        # caller passing `metadata={"workspace_id": 99}` wins over the
+        # kwarg-level 42 — surprising at first but matches "caller knows
+        # best" semantics already used for write_task/write_meeting.
         adapted_metadata.setdefault("workspace_id", workspace_id)
         adapted_metadata.setdefault("project_id", project_id)
         if subdomain is not None:
             adapted_metadata.setdefault("subdomain", subdomain)
+        if source_ref is not None:
+            adapted_metadata.setdefault("source_ref", source_ref)
         return be.write_document(
             domain=domain, title=title, body=body,
             metadata=adapted_metadata, caller_agent_id=caller_agent_id,
@@ -134,19 +159,24 @@ def write_task(*, workspace_id: int, project_id: int,
                relations: Sequence[dict] = ()) -> dict:
     """Persist a task row and any declared relations.
 
-    Memex-mode signature is narrower (no `workspace_id` / `subdomain`);
-    those are dropped before delegating because Memex doesn't have a
-    `metadata` kwarg on `write_task` — `subdomain` is recoverable later
-    from the (project, task) relation and `workspace_id` is the singleton
-    `_WORKSPACE_SLUG` for now (spec §10 multi-workspace lands in v1.2).
+    Memex-mode signature is narrower (no `workspace_id` / `subdomain`).
+    `workspace_id` is dropped (singleton `_WORKSPACE_SLUG` for now; spec
+    §10 multi-workspace lands in v1.2). `subdomain` is folded into the
+    Memex Index row's metadata blob (matching `write_document`'s adapter
+    pattern) so it survives into searchable storage rather than getting
+    silently discarded.
     """
     be = _backend()
-    if be.__name__.endswith("backend_memex"):
+    if _backend_is_memex(be):
+        adapted_metadata: dict = {}
+        if subdomain is not None:
+            adapted_metadata["subdomain"] = subdomain
         return be.write_task(
             title=title, description=description,
             project_id=project_id, created_by=created_by,
             assigned_to=assigned_to, priority=priority, notes=notes,
             source_ref=source_ref,
+            metadata=adapted_metadata if adapted_metadata else None,
             relations=list(relations) if relations else None,
         )
     return be.write_task(
@@ -167,16 +197,22 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
     """Persist a meeting record (DB row + markdown payload) plus relations.
 
     `date` is ISO YYYY-MM-DD form. Same Memex-vs-Local signature drift
-    as `write_task` — `workspace_id` and `subdomain` are dropped on the
-    Memex path (no DB column for them; `subdomain` rides inside the
-    meeting body if needed).
+    as `write_task` — `workspace_id` is dropped on the Memex path (no
+    DB column; spec §10 multi-workspace lands in v1.2). `subdomain` is
+    folded into the Memex Index row's metadata blob (matching
+    `write_document`'s adapter pattern) so it survives into searchable
+    storage rather than getting silently discarded.
     """
     be = _backend()
-    if be.__name__.endswith("backend_memex"):
+    if _backend_is_memex(be):
+        adapted_metadata: dict = {}
+        if subdomain is not None:
+            adapted_metadata["subdomain"] = subdomain
         return be.write_meeting(
             title=title, date=date, summary=summary, decisions=decisions,
             created_by=created_by, project_id=project_id,
             source_ref=source_ref,
+            metadata=adapted_metadata if adapted_metadata else None,
             relations=list(relations) if relations else None,
         )
     return be.write_meeting(

@@ -27,6 +27,11 @@ def find_git_root(start: Path | None = None) -> Path | None:
     worktree — both still resolve to a valid workspace per the spec's
     workspace-identity rules.
 
+    Returns the linked-worktree path when invoked inside a linked worktree (not
+    the main repo). This matches spec §6.8 (filesystem co-location) and §10.2
+    (workspace identity normalization via `git_remote_url`). Bare-repo case is
+    not supported.
+
     Note: bare repositories (no `.git` entry, repo files live at the root) are
     not detected by this O(depth) walk. Atelier does not run inside bare repos
     in practice, so the limitation is accepted.
@@ -41,15 +46,13 @@ def find_git_root(start: Path | None = None) -> Path | None:
 
 def git_remote_url(root: Path) -> str | None:
     """Return `origin`'s URL for the repo at `root`, or None if no remote is
-    configured. Used by spec §10.2's workspace identity rule
-    (`identity = git_remote_url(root) or str(root)`).
+    configured (or `root` is not a git repository). Used by spec §10.2's
+    workspace identity rule (`identity = git_remote_url(root) or str(root)`).
+
+    Uses the shared `git()` helper for consistent subprocess hygiene (utf-8
+    encoding, captured output).
     """
-    res = subprocess.run(
-        ["git", "-C", str(root), "remote", "get-url", "origin"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    res = git(["remote", "get-url", "origin"], cwd=root, check=False)
     if res.returncode != 0:
         return None
     url = res.stdout.strip()

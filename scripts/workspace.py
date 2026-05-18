@@ -194,6 +194,8 @@ def agent_leave(workspace: str, room_name: str, pane_id: str) -> None:
 # to derive workspace identity.
 # ---------------------------------------------------------------------------
 
+# NOTE: imports are mid-file because plan Task 7 specified APPEND. Plan 3
+# cleanup will consolidate them with the module's top-level imports.
 from pathlib import Path  # noqa: E402  (deliberately co-located with helper)
 
 from scripts.git_utils import find_git_root  # noqa: E402

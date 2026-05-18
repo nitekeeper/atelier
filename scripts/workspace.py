@@ -184,6 +184,45 @@ def agent_leave(workspace: str, room_name: str, pane_id: str) -> None:
     pane.kill_pane()
 
 
+# ---------------------------------------------------------------------------
+# Workspace-root resolution (Plan 1 Task 7)
+#
+# Plan 3 `scripts/documents.py:create_document` imports `workspace_root` from
+# this module to locate the on-disk markdown file at `workspace_root() /
+# filename` before passing the body to `backend.write_document` (spec §6.8).
+# Spec §10.2's `resolve_scope()` uses `find_git_root` from `scripts.git_utils`
+# to derive workspace identity.
+# ---------------------------------------------------------------------------
+
+# NOTE: imports are mid-file because plan Task 7 specified APPEND. Plan 3
+# cleanup will consolidate them with the module's top-level imports.
+from pathlib import Path  # noqa: E402  (deliberately co-located with helper)
+
+from scripts.git_utils import find_git_root  # noqa: E402
+
+
+def workspace_root() -> Path:
+    """Resolve the workspace root (= git root) for the current process.
+
+    Plan 3's `scripts/documents.py:create_document` uses this to locate the
+    on-disk markdown file at `workspace_root() / filename` before passing
+    its body to `backend.write_document` (spec §6.8).
+
+    Raises FileNotFoundError when CWD isn't inside a git repository —
+    workspace-less callers (rare; mainly daily-log writes) must catch and
+    skip the workspace-bound path, or operate under explicit
+    `workspace_id=None` semantics per spec §10.4.
+    """
+    cwd = Path.cwd().resolve()
+    root = find_git_root(cwd)
+    if root is None:
+        raise FileNotFoundError(
+            f"not inside a git repository: {cwd}. "
+            f"workspace_root() requires CWD to be under a git workspace."
+        )
+    return root
+
+
 if __name__ == "__main__":
     import sys
     import argparse

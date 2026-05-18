@@ -11,7 +11,8 @@ MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 @pytest.fixture
 def db_path(tmp_path):
     path = str(tmp_path / "test.db")
-    apply_migrations(path, MIGRATIONS_DIR)
+    apply_migrations(path, MIGRATIONS_DIR / "shared")
+    apply_migrations(path, MIGRATIONS_DIR / "local-only")
     return path
 
 @pytest.fixture

@@ -2,6 +2,15 @@
 
 Deferred work tracked here so it survives session boundaries. Cross out items as they land or get explicitly dropped.
 
+## Wave 0 Task 5 follow-ups (migrations split audit)
+
+Findings from the reviewer + QA audit on commit `47f5b27` (now rebased / amended) that intentionally don't ship with the split itself.
+
+- [ ] **Reviewer Imp-3 — `tasks.priority` TEXT → INTEGER mismatch.** v1.0.13 stored priorities as strings (`'critical'|'high'|'medium'|'low'`); v1.1.0's schema (`migrations/shared/001_v110_schema.sql:86`) declares `priority INTEGER DEFAULT 0`. The footgun is now flagged with an inline comment, but `scripts/tasks.py` still inserts string literals. Plan 2 / Plan 3 will rewire callers and the legacy reader to convert.
+- [ ] **Reviewer Nit-1 — `idx_workspaces_identity` is redundant.** `workspaces.identity` is `UNIQUE NOT NULL`, so SQLite auto-indexes it; the explicit `CREATE INDEX idx_workspaces_identity` (shared schema line 28) duplicates that. Defer to a spec amendment — removing it now risks breaking consumers that drop the index by name. Add a one-line note when the spec is touched.
+- [ ] **Reviewer Nit-3 — `phase_bypasses.agent_id` no FK.** v1.0.13's `005_soft_walls.sql` declared `agent_id TEXT NOT NULL REFERENCES agents(id)`. v1.1.0 widens to `TEXT NOT NULL` so Memex-mode bypasses (where agents live in `~/.memex/agents.db`, not the workspace DB) can still log. The trade-off: audit-trail rows can now reference an agent that doesn't exist anywhere on disk. Reintroduce the FK if/when both modes share an agents source.
+- [ ] **Reviewer Nit-4 — `meeting_minutes.filename` is now nullable.** v1.0.13 required it; v1.1.0 makes it optional so DB-only minutes (no `.ai/meetings/*.md` export) are representable. Plan 4's legacy reader must default `NULL → ''` only if downstream code chokes on `None` — leave as `NULL` if callers handle it.
+
 ## Match the memex / agora gatekeeper setup
 
 Memex and agora got the full CI + release-workflow treatment on 2026-05-16/17. Atelier didn't — when it's worth the time, replicate that pattern here so atelier is protected to the same standard. References below point at the memex commits to copy from.

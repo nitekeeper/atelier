@@ -362,7 +362,8 @@ def _make_project_at_phase(db_path: str, phase: str) -> str:
     from scripts.session import write_session
     from scripts import workflow
 
-    apply_migrations(db_path, MIGRATIONS_DIR)
+    apply_migrations(db_path, MIGRATIONS_DIR / "shared")
+    apply_migrations(db_path, MIGRATIONS_DIR / "local-only")
     role = create_role(db_path, "pm", "Project Manager")
     create_agent(db_path, "test-agent", "Test Agent", role["id"], "")
     project = create_project(

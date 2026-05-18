@@ -8,6 +8,10 @@ MIGRATIONS_DIR: Path = Path(__file__).parent.parent / "migrations"
 
 def apply_migrations(db_path: str, migrations_dir: Path) -> None:
     conn = get_connection(db_path)
+    # Naming convention: shared/ uses 001-049, local-only/ uses 050+.
+    # The `migrations.filename` column is UNIQUE per file (not per directory) --
+    # a collision between shared/050_foo.sql and local-only/050_foo.sql would
+    # silently skip the second one. Enforce by convention.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS migrations (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,5 +40,10 @@ def apply_migrations(db_path: str, migrations_dir: Path) -> None:
 if __name__ == "__main__":
     import sys
     db_path = sys.argv[1] if len(sys.argv) > 1 else ".ai/memex.db"
-    apply_migrations(db_path, MIGRATIONS_DIR)
+    # Local-mode default: apply shared/ then local-only/.
+    # Memex-mode bootstrap supplies only shared/ via memex:core:create-store.
+    shared = MIGRATIONS_DIR / "shared"
+    local = MIGRATIONS_DIR / "local-only"
+    apply_migrations(db_path, shared)
+    apply_migrations(db_path, local)
     print(f"Migrations applied to {db_path}")

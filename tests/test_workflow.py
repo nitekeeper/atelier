@@ -13,7 +13,8 @@ from scripts.workflow import (
 @pytest.fixture
 def db_path(tmp_path):
     path = str(tmp_path / "test.db")
-    apply_migrations(path, MIGRATIONS_DIR)
+    apply_migrations(path, MIGRATIONS_DIR / "shared")
+    apply_migrations(path, MIGRATIONS_DIR / "local-only")
     role = create_role(path, name="pm", description="PM")
     create_agent(path, id="pm-1", name="PM", role_id=role["id"], profile="Expert PM")
     return path

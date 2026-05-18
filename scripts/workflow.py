@@ -60,8 +60,7 @@ def _catalog_query(sql: str, params: tuple = ()) -> list[dict]:
     schema, so the same SQL works against either."""
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
+        memex_stores = backend_memex._memex_module("stores")
         rows = memex_stores.query("atelier", sql, params)
         return [dict(r) for r in rows]
     from scripts import backend_local

@@ -158,3 +158,55 @@ def test_check_gate_fails_softly_when_phase_unmet(db_path, project_id):
     assert result.allowed is False
     assert result.current_phase == "design:open"
     assert result.required_phase == "design:approved"
+
+
+# ── Memex-mode catalog routing (T23 round-1 R1) ────────────────────────────
+
+def test_catalog_query_routes_through_memex_module(monkeypatch):
+    """In Memex mode, `_catalog_query` must resolve `stores` via
+    `backend_memex._memex_module("stores")` (not the broken
+    `from scripts import stores` pattern).
+
+    This pins the regression fixed in T23 round-1: the old path called
+    `_ensure_memex_importable()` then `from scripts import stores`,
+    which never resolved because Memex's `stores` module is not on
+    `sys.path` as a top-level package — it lives inside the Memex
+    plugin tree and must be loaded via `_load_memex_module` (the
+    file-path-based loader behind `_memex_module`).
+    """
+    from scripts import backend_memex, mode_detector
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+
+    calls: list[tuple[str, str, tuple]] = []
+
+    class FakeStores:
+        @staticmethod
+        def query(store: str, sql: str, params: tuple):
+            calls.append((store, sql, params))
+            # Mimic memex_stores.query: row-like dicts.
+            return [{"phase": "design:open"}]
+
+    requested: list[str] = []
+
+    def fake_memex_module(dotted: str):
+        requested.append(dotted)
+        assert dotted == "stores", (
+            f"_catalog_query must request 'stores', got {dotted!r}"
+        )
+        return FakeStores
+
+    monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
+
+    # Run through `get_phase` to exercise the full call site.
+    phase = workflow.get_phase("ignored.db", 42)
+
+    assert phase == "design:open"
+    assert requested == ["stores"], (
+        "_catalog_query must route through backend_memex._memex_module"
+    )
+    assert len(calls) == 1
+    store, sql, params = calls[0]
+    assert store == "atelier"
+    assert "FROM projects" in sql
+    assert params == (42,)

@@ -1,15 +1,30 @@
-"""Wave 0 contract tests for the persistence facade.
+"""Contract tests for the persistence facade.
 
-Each method must exist with the expected signature and raise
-NotImplementedError when called. Wave 1 / Wave 1' replace the bodies.
+Originally Wave 0 — every method raised NotImplementedError; this file
+asserted the signature + the raise. Plan 2 Task 9 wired 14 of the 20
+methods through to `backend_memex` / `backend_local`; this file now
+distinguishes:
+
+  * IMPLEMENTED methods (14): no longer raise NotImplementedError. We
+    confirm the signature still accepts the spec §4.3 kwargs (positional
+    rejection still tested) and that the call DOES dispatch (mocking
+    detect_mode → local + the underlying backend symbol).
+  * DEFERRED methods (6): `find_or_create_workspace`,
+    `find_workspace_by_identity`, `list_workspaces`, `find_project`,
+    `list_projects`, `get_document` — still raise NotImplementedError
+    per Plan 2 Task 9's "defer to v1.2.0" decision (spec §4.3 keeps them
+    on the surface so callers don't feature-flag).
+
 The full surface mirrors spec §4.3 lines 187-223.
 """
 # Red-phase verified 2026-05-17: removing scripts/backend.py and running this
 # file yields `ModuleNotFoundError: No module named 'scripts.backend'`.
 # Restored via commit 8ff2504.
+from unittest.mock import create_autospec, patch
+
 import pytest
 
-from scripts import backend
+from scripts import backend, backend_local, mode_detector
 
 
 EXPECTED_METHODS = [
@@ -161,6 +176,21 @@ METHOD_KWARGS: dict[str, list[dict]] = {
 }
 
 
+# ── Implemented vs deferred split (Plan 2 Task 9) ──────────────────────────
+#
+# 14 methods dispatch through to a backend; 6 remain stubs.
+DEFERRED_METHODS = {
+    "find_or_create_workspace",
+    "find_workspace_by_identity",
+    "list_workspaces",
+    "find_project",
+    "list_projects",
+    "get_document",
+}
+
+IMPLEMENTED_METHODS = set(EXPECTED_METHODS) - DEFERRED_METHODS
+
+
 def test_all_methods_defined():
     """Every expected method is present on `backend`, and METHOD_KWARGS
     covers exactly the same set (no drift between the two lists)."""
@@ -173,19 +203,52 @@ def test_all_methods_defined():
 # Flatten (name, kwargs) pairs into pytest.param rows with stable IDs so
 # failures read like `[write_document-1]` rather than the default
 # `[kwargs0]`. One ID per call site keeps multi-row methods unambiguous.
-_PARAMS = [
-    pytest.param(name, kw,
-                 id=name if len(kwlist) == 1 else f"{name}-{i}")
-    for name, kwlist in METHOD_KWARGS.items()
-    for i, kw in enumerate(kwlist)
-]
+def _params_for(method_set):
+    return [
+        pytest.param(name, kw,
+                     id=name if len(METHOD_KWARGS[name]) == 1 else f"{name}-{i}")
+        for name in EXPECTED_METHODS
+        if name in method_set
+        for i, kw in enumerate(METHOD_KWARGS[name])
+    ]
 
 
-@pytest.mark.parametrize("fn_name,kwargs", _PARAMS)
-def test_method_raises_not_implemented(fn_name, kwargs):
+_DEFERRED_PARAMS = _params_for(DEFERRED_METHODS)
+_IMPLEMENTED_PARAMS = _params_for(IMPLEMENTED_METHODS)
+
+
+@pytest.mark.parametrize("fn_name,kwargs", _DEFERRED_PARAMS)
+def test_deferred_method_raises_not_implemented(fn_name, kwargs):
+    """The 6 methods Plan 2 Task 9 deferred to v1.2.0 still raise
+    NotImplementedError. Spec §4.3 keeps them on the surface."""
     fn = getattr(backend, fn_name)
     with pytest.raises(NotImplementedError):
         fn(**kwargs)
+
+
+@pytest.mark.parametrize("fn_name,kwargs", _IMPLEMENTED_PARAMS)
+def test_implemented_method_dispatches(fn_name, kwargs):
+    """The 14 spec §4.3 methods Plan 2 Task 9 wired through must NOT raise
+    NotImplementedError AND must actually invoke the backend symbol.
+
+    Upgraded post-T16 (QA I1): the original test only asserted "no
+    NotImplementedError", which a method returning `None` would silently
+    pass. We now patch the facade's `_backend()` to return a
+    `create_autospec(backend_local)` mock — autospec ensures the call
+    signature matches the real backend symbol's signature, so signature
+    drift between facade and backend gets caught here too — and assert
+    the matching attribute was called once. The result value itself
+    isn't pinned (stays a dispatch test, not a result test)."""
+    mock_backend = create_autospec(backend_local, spec_set=True)
+    with patch.object(mode_detector, "detect_mode", return_value="local"), \
+         patch.object(backend, "_backend", return_value=mock_backend):
+        fn = getattr(backend, fn_name)
+        fn(**kwargs)
+    # Assert the matching backend symbol was invoked exactly once.
+    # `create_autospec` already enforces signature compatibility on the
+    # call, so a kwarg-mismatch fails before we reach this line.
+    called = getattr(mock_backend, fn_name)
+    called.assert_called_once()
 
 
 # Methods with no required parameters can't be tested for positional

@@ -277,8 +277,7 @@ def prune_sessions(db_path: str, project_id: int, keep: int) -> int:
     """
     if _is_memex_mode():
         from scripts import backend_memex
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
+        memex_stores = backend_memex._memex_module("stores")
         rows = backend_memex._memex_core_query(
             store="atelier", table="sessions",
             where={"project_id": project_id})

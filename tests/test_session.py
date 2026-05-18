@@ -167,3 +167,63 @@ def test_prune_noop_when_fewer_than_keep(db_path, project_id):
     write_session(db_path, project_id, "pm-1", "design:open", "complete")
     deleted = prune_sessions(db_path, project_id, keep=5)
     assert deleted == 0
+
+
+def test_prune_sessions_memex_mode_routes_through_memex_module(monkeypatch):
+    """Regression: prune_sessions in Memex mode must reach the Memex
+    ``stores`` module via ``backend_memex._memex_module("stores")`` —
+    NOT via ``from scripts import stores`` (which does not exist).
+    """
+    from scripts import mode_detector, backend_memex
+    import scripts.session as session_module
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+
+    # Fake stores module recording calls
+    delete_calls = []
+
+    class _FakeStores:
+        @staticmethod
+        def delete(*, name, table, row_id):
+            delete_calls.append({"name": name, "table": table,
+                                 "row_id": row_id})
+
+    module_calls = []
+
+    def fake_memex_module(dotted):
+        module_calls.append(dotted)
+        return _FakeStores
+
+    monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
+
+    # Fake the core query so we get back deterministic rows without
+    # touching the real Memex store.
+    query_calls = []
+
+    def fake_query(*, store, table, where):
+        query_calls.append({"store": store, "table": table, "where": where})
+        return [
+            {"id": 1, "project_id": 7},
+            {"id": 2, "project_id": 7},
+            {"id": 3, "project_id": 7},
+            {"id": 4, "project_id": 7},
+        ]
+
+    monkeypatch.setattr(backend_memex, "_memex_core_query", fake_query)
+
+    deleted = session_module.prune_sessions("ignored.db",
+                                            project_id=7, keep=2)
+
+    # Memex stores module was requested by the correct dotted name
+    assert "stores" in module_calls
+    # Query was issued for the right table/store
+    assert query_calls == [{"store": "atelier", "table": "sessions",
+                            "where": {"project_id": 7}}]
+    # The two oldest rows (ids 1 and 2 — kept rows are ids 4 and 3) were
+    # deleted via the fake stores module
+    assert deleted == 2
+    deleted_ids = sorted(call["row_id"] for call in delete_calls)
+    assert deleted_ids == [1, 2]
+    for call in delete_calls:
+        assert call["name"] == "atelier"
+        assert call["table"] == "sessions"

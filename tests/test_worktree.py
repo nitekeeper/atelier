@@ -1,5 +1,6 @@
 """Tests for scripts/worktree.py — merge-back flow."""
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -251,7 +252,7 @@ class TestMergeBack:
 class TestCLI:
     def test_unknown_command_exits_1(self):
         result = subprocess.run(
-            ["python", "scripts/worktree.py", "bogus"],
+            [sys.executable, "scripts/worktree.py", "bogus"],
             capture_output=True, text=True,
             env={**__import__("os").environ, "PYTHONPATH": "."},
         )
@@ -259,7 +260,7 @@ class TestCLI:
 
     def test_no_command_exits_1(self):
         result = subprocess.run(
-            ["python", "scripts/worktree.py"],
+            [sys.executable, "scripts/worktree.py"],
             capture_output=True, text=True,
             env={**__import__("os").environ, "PYTHONPATH": "."},
         )

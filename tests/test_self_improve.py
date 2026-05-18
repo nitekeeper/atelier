@@ -365,7 +365,7 @@ class TestRepoDir:
         wt_path = tmp_path / "worktree"
         _git(["worktree", "add", "-b", "feat/test", str(wt_path)], source_repo)
         result = subprocess.run(
-            ["python", str(Path.cwd() / "scripts" / "self_improve.py"),
+            [sys.executable, str(Path.cwd() / "scripts" / "self_improve.py"),
              "pull"],
             capture_output=True, text=True, encoding="utf-8",
             cwd=str(wt_path),
@@ -378,7 +378,7 @@ class TestRepoDir:
 class TestCLI:
     def test_unknown_command_exits_1(self):
         result = subprocess.run(
-            ["python", "scripts/self_improve.py", "bogus"],
+            [sys.executable, "scripts/self_improve.py", "bogus"],
             capture_output=True, text=True,
             env={**__import__("os").environ, "PYTHONPATH": "."},
         )
@@ -386,7 +386,7 @@ class TestCLI:
 
     def test_no_command_exits_1(self):
         result = subprocess.run(
-            ["python", "scripts/self_improve.py"],
+            [sys.executable, "scripts/self_improve.py"],
             capture_output=True, text=True,
             env={**__import__("os").environ, "PYTHONPATH": "."},
         )
@@ -397,7 +397,7 @@ class TestCLI:
         dest = tmp_path / "clone"
         clone_repo(str(bare_remote), dest)
         result = subprocess.run(
-            ["python", str(Path.cwd() / "scripts" / "self_improve.py"),
+            [sys.executable, str(Path.cwd() / "scripts" / "self_improve.py"),
              "run-tests", str(dest)],
             capture_output=True, text=True,
             env={**__import__("os").environ, "PYTHONPATH": str(Path.cwd())},
@@ -409,7 +409,7 @@ class TestCLI:
         exp = tmp_path / "experiment"
         exp.mkdir()
         result = subprocess.run(
-            ["python", str(Path.cwd() / "scripts" / "self_improve.py"),
+            [sys.executable, str(Path.cwd() / "scripts" / "self_improve.py"),
              "cleanup", str(exp)],
             capture_output=True, text=True,
             env={**__import__("os").environ, "PYTHONPATH": str(Path.cwd())},
@@ -424,7 +424,7 @@ class TestCLI:
         create_branch(dest, 3)
         (dest / "new.txt").write_text("change")
         result = subprocess.run(
-            ["python", str(Path.cwd() / "scripts" / "self_improve.py"),
+            [sys.executable, str(Path.cwd() / "scripts" / "self_improve.py"),
              "commit", str(dest), "3", "test subject",
              "Decision one|Decision two", "Dr. A|Dr. B", "5",
              "docs/self-improve/minutes.md"],

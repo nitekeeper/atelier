@@ -38,7 +38,7 @@ def test_seed_is_idempotent(db_path):
 
 def test_seed_no_duplicate_role_names(db_path):
     seed(db_path)
-    from scripts.db import get_connection
+    from scripts.migrate import get_connection
     conn = get_connection(db_path)
     rows = conn.execute(
         "SELECT name, COUNT(*) as cnt FROM roles GROUP BY name HAVING cnt > 1"
@@ -49,7 +49,7 @@ def test_seed_no_duplicate_role_names(db_path):
 
 def test_seed_pm_role_exists(db_path):
     seed(db_path)
-    from scripts.db import get_connection
+    from scripts.migrate import get_connection
     conn = get_connection(db_path)
     row = conn.execute("SELECT * FROM roles WHERE name = 'Product Manager'").fetchone()
     conn.close()
@@ -58,7 +58,7 @@ def test_seed_pm_role_exists(db_path):
 
 def test_seed_systems_engineer_exists(db_path):
     seed(db_path)
-    from scripts.db import get_connection
+    from scripts.migrate import get_connection
     conn = get_connection(db_path)
     row = conn.execute("SELECT * FROM agents WHERE id = 'systems-engineer-1'").fetchone()
     conn.close()

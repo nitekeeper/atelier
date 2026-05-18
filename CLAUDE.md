@@ -22,10 +22,10 @@ Atelier is a shared workspace for a human developer and a multi-agent system wor
    :: Windows (CMD)
    set PYTHONPATH=C:\path\to\atelier && python C:\path\to\atelier\scripts\migrate.py .ai\memex.db
    ```
-   - `PYTHONPATH` must point to the Atelier root — the scripts use `from scripts.db import ...` internally
+   - `PYTHONPATH` must point to the Atelier root — the scripts use `from scripts.migrate import get_connection` and other `from scripts.*` imports internally
    - Default db path: `.ai/memex.db`
    - The CLI entrypoint applies BOTH `migrations/shared/` THEN `migrations/local-only/` (Local-mode default). Memex-mode bootstrap supplies only `shared/` via `memex:core:create-store`.
-3. Ensure `memex.db` is in WAL mode (the migration script handles this via `db.py`)
+3. Ensure `memex.db` is in WAL mode (the migration script enables this via `get_connection` inlined in `scripts/migrate.py`)
 4. Add Atelier working directories to `.git/info/exclude` (not `.gitignore`) so they stay out of the project repo:
    ```
    .ai/
@@ -39,8 +39,7 @@ All deterministic operations live in `scripts/`. Each script is callable from th
 
 | Script | Purpose |
 |---|---|
-| `scripts/db.py` | DB connection with WAL + FK enforcement |
-| `scripts/migrate.py` | Idempotent migration runner |
+| `scripts/migrate.py` | Idempotent migration runner + inlined DB connection (WAL + FK pragma) |
 | `scripts/session.py` | Read/write `.ai/work.md` session state |
 | `scripts/roles.py` | Role CRUD |
 | `scripts/agents.py` | Agent CRUD |
@@ -69,7 +68,7 @@ Each markdown file is a thin wrapper that invokes a Python script in `scripts/` 
 1. **Never skip the Memex check.** Every command must verify Memex is present before acting.
 2. **Python scripts do the work.** Skill files handle only irreducible language tasks. Do not re-implement logic that belongs in a script.
 3. **Phase gates are advisory.** `workflow.py:check_gate` returns a `GateResult`; it does NOT raise on phase mismatch. When `allowed=False`, follow the bypass-confirm-log flow documented in `skills/run/SKILL.md` (Bypass procedure). `workflow.py:advance_phase` still validates the transition graph and DOES raise `WorkflowError` on invalid transitions.
-4. **WAL mode is required.** All DB connections go through `scripts/db.py`. Never connect directly.
+4. **WAL mode is required.** All DB connections go through `scripts/backend_local._conn()` (Local mode) or `backend_memex._memex_core_*` (Memex mode). Never use raw `sqlite3.connect`.
 5. **Meetings write two places.** `meetings.py` writes both a DB record and `.ai/meetings/YYYY-MM-DD-<slug>.md`. Both must stay in sync.
 
 ## DB path convention

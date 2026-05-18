@@ -106,6 +106,84 @@ def test_load_memex_module_resolves_agents_librarian_without_collision(
     backend_memex._load_memex_module.cache_clear()
 
 
+def test_load_memex_module_scripts_db_shim_is_scoped_to_exec(
+        tmp_path, monkeypatch):
+    """T26 round-1 regression: when Memex's bundled scripts do
+    `from scripts.db import get_connection` at module exec time, the
+    loader must install `sys.modules['scripts.db']` for the duration
+    of `exec_module` and remove it on exit.
+
+    Atelier retired its own `scripts/db.py` in Plan 3 Task 9, so the
+    parent symbol no longer exists; without the shim, every Memex
+    CRUD module (roles, agents, stores, meetings, …) would crash with
+    `ModuleNotFoundError: No module named 'scripts.db'` while being
+    exec'd by `_load_memex_module`.
+
+    This test stands up a minimal Memex plugin tree containing a
+    self-contained `scripts/db.py` plus a `scripts/needs_db.py` that
+    imports from it. We assert:
+      1. The needs_db module loads cleanly (proves the shim is
+         active during exec).
+      2. `sys.modules['scripts.db']` is absent (or restored) after
+         the loader returns (proves the shim does not pollute
+         globals).
+      3. The needs_db module's captured `get_connection` reference
+         points at the Memex helper, not at any Atelier symbol.
+    """
+    plugin = tmp_path / "memex_plugin"
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        _json.dumps({"name": "memex", "version": "test"}))
+    scripts_dir = plugin / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "__init__.py").write_text("")
+    # Minimal `scripts/db.py` that mirrors Memex's stdlib-only shape.
+    (scripts_dir / "db.py").write_text(
+        "MEMEX_DB_MARKER = 'memex-db-shim'\n"
+        "def get_connection(db_path):\n"
+        "    return ('fake-conn', db_path)\n"
+    )
+    # A module whose top-level `from scripts.db import get_connection`
+    # is the failure mode the shim must fix.
+    (scripts_dir / "needs_db.py").write_text(
+        "from scripts.db import get_connection\n"
+        "MARKER = 'needs-db'\n"
+        "BOUND = get_connection\n"
+    )
+
+    monkeypatch.setattr(backend_memex, "_memex_plugin_root", lambda: plugin)
+    backend_memex._load_memex_module.cache_clear()
+
+    # Snapshot pre-state so we can assert lack of pollution afterward.
+    pre_present = "scripts.db" in sys.modules
+    pre_value = sys.modules.get("scripts.db")
+
+    try:
+        needs_db = backend_memex._memex_module("needs_db")
+    finally:
+        # Always bust the cache so adjacent tests using the real Memex
+        # plugin don't get the fake `db`/`needs_db` modules.
+        backend_memex._load_memex_module.cache_clear()
+
+    # (1) Shim was active during exec — module loaded successfully and
+    # its captured reference is the Memex helper.
+    assert needs_db.MARKER == "needs-db"
+    assert needs_db.BOUND("test.db") == ("fake-conn", "test.db")
+    # (2) Pollution check: `sys.modules['scripts.db']` looks exactly
+    # like it did before the load (either both absent, or both equal
+    # to the same prior object).
+    post_present = "scripts.db" in sys.modules
+    post_value = sys.modules.get("scripts.db")
+    assert post_present is pre_present, (
+        "shim leaked: 'scripts.db' presence changed across the "
+        f"_memex_module call (pre={pre_present}, post={post_present})"
+    )
+    assert post_value is pre_value, (
+        "shim leaked: 'scripts.db' identity changed across the "
+        "_memex_module call"
+    )
+
+
 def test_write_document_validates_domain(fake_memex):
     """An unknown domain must be rejected before any Memex call."""
     with pytest.raises(ValueError, match="unknown domain"):

@@ -10,6 +10,22 @@ Atelier is a workspace and methodology for a human developer collaborating with 
 
 > **Session-open requirement.** On the first message of every session in an Atelier project: verify Memex is present, identify the active project and its current phase, then select the phase-recommended procedure from Phase guidance before responding to any user request.
 
+## Pre-flight (always first)
+
+Run `from scripts.atelier_entrypoint import startup_check; startup_check()`.
+
+Branch on the returned `action`:
+
+- **`proceed-local`** — Memex is not installed. Continue with the rest of
+  this skill's recipe; all writes go to the project-local `.ai/atelier.db`.
+- **`proceed-memex`** — Memex is installed and bootstrapped. Continue;
+  all writes go through Memex.
+- **`prompt-migration`** — Memex is installed but this project still
+  has a local DB. Read `internal/migrate-local-to-memex/SKILL.md` and
+  follow its prompt protocol. After the user answers, restart the
+  pre-flight (`startup_check()` will now return `proceed-memex` or
+  `proceed-local` depending on the user's choice).
+
 ## Internal procedures
 
 Most dev-arc work and project CRUD lives in `internal/<name>/SKILL.md` files. These are NOT Claude Code slash commands — they are plain markdown procedures only reachable via the Read tool. Whenever this skill references `internal/<name>/SKILL.md` below, the agent should: (1) Read that file, (2) follow the procedure inline. The 22 internal procedures cover the dev arc (`internal/dev-design`, `internal/dev-plan`, `internal/dev-tdd`, …) and project DB CRUD (`internal/project`, `internal/task`, `internal/meeting`, …).

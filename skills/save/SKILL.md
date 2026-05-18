@@ -10,6 +10,22 @@ Session-close command. Commits git state, writes a session row to the DB, and op
 
 Call `save` when closing a session or at a meaningful checkpoint. This is the last thing you do before ending work.
 
+## Pre-flight (always first)
+
+Run `from scripts.atelier_entrypoint import startup_check; startup_check()`.
+
+Branch on the returned `action`:
+
+- **`proceed-local`** — Memex is not installed. Continue with the rest of
+  this skill's recipe; all writes go to the project-local `.ai/atelier.db`.
+- **`proceed-memex`** — Memex is installed and bootstrapped. Continue;
+  all writes go through Memex.
+- **`prompt-migration`** — Memex is installed but this project still
+  has a local DB. Read `internal/migrate-local-to-memex/SKILL.md` and
+  follow its prompt protocol. After the user answers, restart the
+  pre-flight (`startup_check()` will now return `proceed-memex` or
+  `proceed-local` depending on the user's choice).
+
 ## Procedure
 
 ### Phase A — Git state

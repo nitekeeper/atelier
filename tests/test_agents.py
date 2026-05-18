@@ -1,11 +1,23 @@
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 from scripts.db import get_connection
 from scripts.migrate import apply_migrations
 from scripts.roles import create_role
 from scripts.agents import create_agent, get_agent, update_agent, delete_agent, list_agents, search_agents
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+
+
+@pytest.fixture(autouse=True)
+def _force_local_mode():
+    """Pin Local mode for every test in this module — the host may have a
+    real `~/.memex/registry.json` that would otherwise route the facade
+    through Memex's `agents.db`. These tests target the Local CRUD path
+    against `tmp_path`."""
+    with patch("scripts.mode_detector.detect_mode", return_value="local"):
+        yield
+
 
 @pytest.fixture
 def db_path(tmp_path):

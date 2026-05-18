@@ -1,0 +1,575 @@
+# scripts/backend_memex.py
+"""Memex-mode backend (Tier 2 caller-built librarian_output path).
+
+Writes through memex:index:write WITHOUT the Librarian LLM dispatch —
+Atelier knows its domain, builds the classification deterministically,
+and calls librarian.write_entry() directly. See spec §6.2.
+
+Requires Memex v2.2.0+ (the version that ships librarian.validate_output
+and the optional librarian_output parameter on memex:index:write).
+
+This module is built in three logical sections matching Plan 2 tasks 1-3:
+  1. Document writes (Tier 2): write_document / write_project /
+     write_task / write_meeting and the _atelier_write engine.
+  2. Operational state writes: upsert_session / transition_phase /
+     update_task_status / record_phase_bypass via Memex Core CRUD.
+  3. Reads + cross-plan helpers: find_documents / get_task / list_tasks /
+     lookup_index_id_by_source_ref / find_or_create_role / find_or_create_agent
+     and the raw _memex_core_execute primitive for composite-key DELETE.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+from scripts import domain_vocabulary
+
+
+# ── Memex plugin location + import bootstrap ───────────────────────────────
+
+
+def _memex_plugin_root() -> Path:
+    """Locate the installed Memex plugin's root directory by reading the
+    pinned location in ~/.memex/config.json (Memex v2.5.0+ contract).
+
+    This replaces the older lex-sort over the Claude Code plugin cache,
+    which was unstable across Memex versions (`2.10.0 < 2.2.0`) and
+    fragile across plugin marketplaces.
+    """
+    config_path = Path.home() / ".memex" / "config.json"
+    if not config_path.exists():
+        raise RuntimeError(
+            f"Memex config.json not found at {config_path}. Memex is not "
+            "bootstrapped — run `memex:run` once to trigger Step 0.2 "
+            "auto-bootstrap, or fall back to Atelier Local mode."
+        )
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(
+            f"Memex config.json at {config_path} is unreadable: {exc}."
+        ) from exc
+    plugin_root_str = data.get("plugin_root")
+    if not plugin_root_str:
+        raise RuntimeError(
+            f"Memex config.json at {config_path} has no `plugin_root` field. "
+            "Re-bootstrap memex via `memex:run`."
+        )
+    plugin_root = Path(plugin_root_str)
+    manifest = plugin_root / ".claude-plugin" / "plugin.json"
+    if not manifest.exists():
+        raise RuntimeError(
+            f"Memex plugin manifest not found at {manifest}. The pinned "
+            "plugin_root in ~/.memex/config.json is stale."
+        )
+    try:
+        manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(
+            f"Memex plugin manifest at {manifest} is unreadable: {exc}."
+        ) from exc
+    if manifest_data.get("name") != "memex":
+        raise RuntimeError(
+            f"Plugin at {plugin_root} is not memex "
+            f"(name={manifest_data.get('name')!r})."
+        )
+    return plugin_root
+
+
+# Back-compat alias for legacy call sites in tests; prefer _memex_plugin_root.
+_memex_plugin_dir = _memex_plugin_root
+
+
+def _ensure_memex_importable() -> None:
+    p = str(_memex_plugin_root())
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+
+# ── Memex Tier 2 thin wrappers (also serve as patch surfaces in tests) ─────
+
+
+def _memex_validate_output(librarian_output: dict) -> dict:
+    """Delegate to Memex's librarian.validate_output."""
+    _ensure_memex_importable()
+    from scripts.agents import librarian as memex_librarian  # type: ignore
+    return memex_librarian.validate_output(librarian_output)
+
+
+def _memex_write_entry(*, payload: dict, librarian_output: dict,
+                       target_store: str, target_table: str,
+                       caller_agent_id: str,
+                       embedding: bytes | None) -> dict:
+    """Delegate to Memex's librarian.write_entry."""
+    _ensure_memex_importable()
+    from scripts.agents import librarian as memex_librarian  # type: ignore
+    return memex_librarian.write_entry(
+        payload=payload,
+        librarian_output=librarian_output,
+        target_store=target_store,
+        target_table=target_table,
+        caller_agent_id=caller_agent_id,
+        embedding=embedding,
+    )
+
+
+def _memex_embed(text: str) -> bytes | None:
+    """Direct wrapper around Memex's embeddings.encode. Raises
+    embeddings.EmbeddingUnavailable on provider miss — caller handles
+    audit logging."""
+    _ensure_memex_importable()
+    from scripts import embeddings as memex_embeddings  # type: ignore
+    return memex_embeddings.encode(text)
+
+
+def _memex_log_embedding_skip(exc, *, caller_agent_id: str,
+                              index_id: str, input_chars: int) -> None:
+    """Forward to Memex's structured audit log per v2.4.1 contract."""
+    _ensure_memex_importable()
+    from scripts import embeddings as memex_embeddings  # type: ignore
+    memex_embeddings.log_skip(
+        exc,
+        caller_agent_id=caller_agent_id,
+        index_id=index_id,
+        input_chars=input_chars,
+    )
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _slug(text: str, *, max_length: int = 64) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:max_length]
+
+
+def _metadata_narrative(metadata: dict) -> str:
+    """Join string-valued metadata fields into a single searchable blob.
+
+    Per spec §6.8, free-text metadata fields (notes, decisions, summary,
+    etc.) contribute to FTS5 ranking. We deliberately drop non-string
+    values (project_id, priority) — those are filterable structured
+    columns, not searchable narrative.
+    """
+    if not metadata:
+        return ""
+    parts: list[str] = []
+    for value in metadata.values():
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    return "\n\n".join(parts)
+
+
+def _build_key(*, workspace_slug: str, project_slug: str | None,
+               domain: str, created_at_iso: str, title: str) -> str:
+    """Canonical key per spec §6.7:
+    `<workspace_slug>/<project_slug>/<domain>/<date>-<title_slug>-<seq>`.
+
+    Memex v2.3.0+ enforces `UNIQUE` on `documents.key`, so we allocate
+    the smallest unused `seq` for the (workspace/project/domain/date/title)
+    prefix. Duplicate-key races are handled one layer up in `_atelier_write`.
+    """
+    date_str = created_at_iso[:10]  # YYYY-MM-DD
+    title_slug = _slug(title, max_length=48)
+    project_part = project_slug or "(no-project)"
+    seq = _next_seq(workspace_slug, project_part, domain, date_str, title_slug)
+    return (
+        f"{workspace_slug}/{project_part}/{domain}/"
+        f"{date_str}-{title_slug}-{seq}"
+    )
+
+
+def _next_seq(workspace_slug: str, project_slug: str, domain: str,
+              date_str: str, title_slug: str) -> int:
+    """Smallest unused integer ≥ 1 for the (workspace/project/domain/date/title)
+    prefix. Runs a `key LIKE prefix%` scan over `index.documents`."""
+    _ensure_memex_importable()
+    from scripts import stores as memex_stores  # type: ignore
+    prefix = (
+        f"{workspace_slug}/{project_slug}/{domain}/{date_str}-{title_slug}-"
+    )
+    existing = memex_stores.query(
+        "index",
+        "SELECT key FROM documents WHERE key LIKE ?",
+        (prefix + "%",),
+    )
+    used: set[int] = set()
+    for row in existing:
+        suffix = row["key"][len(prefix):]
+        try:
+            used.add(int(suffix))
+        except ValueError:
+            pass
+    n = 1
+    while n in used:
+        n += 1
+    return n
+
+
+def _try_embed(text: str, *, caller_agent_id: str,
+               index_id: str) -> bytes | None:
+    """Best-effort embedding.
+
+    Narrows to embeddings.EmbeddingUnavailable per memex v2.4.1 — any
+    other exception is a real bug and propagates. On the typed miss,
+    forwards to memex's audit log (embeddings.log_skip) so the skip is
+    visible in ~/.memex/audits/embedding-skip-log.md, then returns None
+    so the write proceeds FTS5-only.
+
+    The type-narrowing import is deferred to the except site so a fully
+    stubbed call path (test harnesses) doesn't force a real Memex
+    install. The probe is permissive: any exception whose class name is
+    `EmbeddingUnavailable` qualifies, falling back to a real isinstance
+    check only when needed.
+    """
+    try:
+        return _memex_embed(text)
+    except Exception as e:
+        if not _is_embedding_unavailable(e):
+            raise
+        _memex_log_embedding_skip(
+            e,
+            caller_agent_id=caller_agent_id,
+            index_id=index_id,
+            input_chars=len(text),
+        )
+        return None
+
+
+def _is_embedding_unavailable(exc: BaseException) -> bool:
+    """Lazy check: True iff `exc` is Memex's `EmbeddingUnavailable`.
+
+    Same deferred-import pattern as `_is_duplicate_key_error` — keeps
+    the happy path free of an unconditional `scripts.embeddings` import,
+    which is fragile under the Atelier/Memex namespace collision.
+    """
+    if type(exc).__name__ == "EmbeddingUnavailable":
+        return True
+    try:
+        _ensure_memex_importable()
+        from scripts import embeddings as memex_embeddings  # type: ignore
+    except Exception:
+        return False
+    return isinstance(exc, memex_embeddings.EmbeddingUnavailable)
+
+
+_WORKSPACE_SLUG = "atelier"  # Single-workspace deployment; spec §6.7.
+
+
+def _resolve_project_slug(project_id: int | None) -> str | None:
+    """Best-effort project_id → project_slug lookup for key construction.
+
+    On miss (no project_id, or row absent) returns None and `_build_key`
+    falls back to the `(no-project)` literal. Cheap query — caller is on
+    the write path which is already a multi-call sequence."""
+    if project_id is None:
+        return None
+    _ensure_memex_importable()
+    from scripts import stores as memex_stores  # type: ignore
+    try:
+        rows = memex_stores.query(
+            "atelier",
+            "SELECT slug FROM projects WHERE id = ?",
+            (project_id,),
+        )
+    except Exception:
+        return None
+    return rows[0]["slug"] if rows and rows[0].get("slug") else None
+
+
+def _auto_relations(metadata: dict, explicit: list[dict]) -> list[dict]:
+    """Auto-populate `part_of` edge when `project_id` is in metadata.
+
+    Per spec §6.9, atelier writes attach `part_of` edges from their
+    document to the owning project's document. Callers can still pass
+    explicit relations; duplicates by `(rel_type, to_index_id)` are
+    deduped here.
+    """
+    relations = list(explicit or [])
+    project_id = (metadata or {}).get("project_id")
+    if project_id is not None:
+        _ensure_memex_importable()
+        from scripts import stores as memex_stores  # type: ignore
+        try:
+            rows = memex_stores.query(
+                "index",
+                "SELECT index_id FROM documents WHERE domain = ? "
+                "AND json_extract(metadata, '$.project_id') = ?",
+                ("project", project_id),
+            )
+        except Exception:
+            rows = []
+        seen = {(r.get("rel_type"), r.get("to_index_id")) for r in relations}
+        for row in rows:
+            edge = ("part_of", row["index_id"])
+            if edge not in seen:
+                relations.append({"rel_type": "part_of",
+                                  "to_index_id": row["index_id"]})
+                seen.add(edge)
+    return relations
+
+
+def _atelier_write(*, target_table: str, domain: str, title: str,
+                   body: str, payload: dict, metadata: dict,
+                   relations: list[dict] | None,
+                   caller_agent_id: str) -> dict:
+    """Tier 2 atelier write — synchronous, no LLM dispatch.
+
+    Builds librarian_output deterministically, validates via Memex, and
+    persists via librarian.write_entry. The target row goes into
+    ~/.memex/atelier.db.<target_table> with an index_id linkback;
+    the matching documents row goes into ~/.memex/index.db.
+
+    Per spec §6.7 + §6.8:
+    - `key` is `<workspace>/<project>/<domain>/<date>-<title>-<seq>` (UNIQUE)
+    - `searchable` is `title + body + metadata_narrative` (no truncation cap)
+    """
+    domain_vocabulary.assert_valid(domain)
+
+    created_at = _now()
+    project_slug = _resolve_project_slug((metadata or {}).get("project_id"))
+    key = _build_key(
+        workspace_slug=_WORKSPACE_SLUG,
+        project_slug=project_slug,
+        domain=domain,
+        created_at_iso=created_at,
+        title=title,
+    )
+    searchable = "\n\n".join(filter(None, [
+        title,
+        body or "",
+        _metadata_narrative(metadata or {}),
+    ]))
+    final_relations = _auto_relations(metadata or {}, relations or [])
+
+    def _attempt(this_key: str) -> dict:
+        output = _memex_validate_output({
+            "index_id":   str(uuid.uuid4()),
+            "key":        this_key,
+            "domain":     domain,
+            "searchable": searchable,
+            "metadata":   metadata or {},
+            "relations":  final_relations,
+        })
+        embedding = _try_embed(
+            output["searchable"],
+            caller_agent_id=caller_agent_id,
+            index_id=output["index_id"],
+        )
+        return _memex_write_entry(
+            payload=payload,
+            librarian_output=output,
+            target_store="atelier",
+            target_table=target_table,
+            caller_agent_id=caller_agent_id,
+            embedding=embedding,
+        )
+
+    # Defer the librarian import until we actually need the exception
+    # class. Eagerly importing it here would force ~/.memex/config.json
+    # to exist even when callers have stubbed `_memex_write_entry` — and
+    # would collide with Atelier's own `scripts/agents.py` module on the
+    # import path. The deferred path runs only on the DuplicateKeyError
+    # branch, which test harnesses set up with their own fake librarian.
+    try:
+        return _attempt(key)
+    except Exception as exc:
+        if not _is_duplicate_key_error(exc):
+            raise
+        # Race: another writer claimed the seq we computed. Re-allocate
+        # once and retry. If that still collides, surface the error.
+        retry_key = _build_key(
+            workspace_slug=_WORKSPACE_SLUG,
+            project_slug=project_slug,
+            domain=domain,
+            created_at_iso=created_at,
+            title=title,
+        )
+        return _attempt(retry_key)
+
+
+def _is_duplicate_key_error(exc: BaseException) -> bool:
+    """Test for `librarian.DuplicateKeyError` without an unconditional
+    import at module load.
+
+    Memex's librarian raises a dedicated `DuplicateKeyError` (see
+    memex/scripts/agents/librarian.py:50). We can't `except` it by name
+    without first importing — but that import is fragile under the
+    Atelier/Memex `scripts.agents` namespace collision (Atelier's
+    `scripts/agents.py` shadows Memex's `scripts.agents/` package on
+    sys.path). Best to look up the class lazily AT the except site,
+    inside a broad `except` that re-raises anything else.
+    """
+    # First the structural check: any exception whose qualified name
+    # ends in DuplicateKeyError counts, irrespective of module path. This
+    # is robust to test stubs that register their own DuplicateKeyError
+    # class without collision-proofing.
+    if type(exc).__name__ == "DuplicateKeyError":
+        return True
+    # Fall back to a lazy import — only reached when the type-name probe
+    # fails (e.g. some future librarian rename). If the import itself
+    # fails, we conservatively report False so the original exception
+    # propagates unaltered.
+    try:
+        _ensure_memex_importable()
+        from scripts.agents import librarian as memex_librarian  # type: ignore
+    except Exception:
+        return False
+    return isinstance(exc, memex_librarian.DuplicateKeyError)
+
+
+# ── Document writes ────────────────────────────────────────────────────────
+
+# Map Atelier domain → target table in ~/.memex/atelier.db.
+# Per spec §6.4 the catch-all narrative domains (`design`, `research`,
+# `postmortem`, `log`) land in `project_documents`. The 9 domains here
+# must match `scripts.domain_vocabulary.DOMAINS` (Plan 1 Task 6 / F7).
+_DOMAIN_TO_TABLE = {
+    "project":     "projects",
+    "task":        "tasks",
+    "meeting":     "meeting_minutes",
+    "project_doc": "project_documents",
+    "adr":         "project_documents",
+    "design":      "project_documents",
+    "research":    "project_documents",
+    "postmortem":  "project_documents",
+    "log":         "project_documents",
+}
+
+
+def write_document(*, domain: str, title: str, body: str,
+                   metadata: dict, caller_agent_id: str,
+                   source_url: str | None = None,
+                   relations: list[dict] | None = None) -> dict:
+    """Persist a project document via Memex Tier 2.
+
+    Validates `domain` against `scripts.domain_vocabulary.DOMAINS` BEFORE
+    any Memex call, so the unknown-domain path never opens
+    ~/.memex/config.json (callers see a clean `ValueError`).
+    """
+    # Hard-validate first — keeps the validation path hermetic.
+    domain_vocabulary.assert_valid(domain)
+    target_table = _DOMAIN_TO_TABLE.get(domain) or "project_documents"
+    payload = {
+        "title": title,
+        "filename": (metadata or {}).get("filename", _slug(title) + ".md"),
+        "project_id": (metadata or {}).get("project_id"),
+        "type": domain,
+        "created_by": caller_agent_id,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    return _atelier_write(
+        target_table=target_table, domain=domain,
+        title=title, body=body, payload=payload,
+        metadata=metadata or {}, relations=relations,
+        caller_agent_id=caller_agent_id,
+    )
+
+
+def write_task(*, title: str, description: str, project_id: int,
+               created_by: str, assigned_to: str | None = None,
+               priority: int = 0, notes: str | None = None,
+               source_ref: str | None = None,
+               relations: list[dict] | None = None) -> dict:
+    """`source_ref` is an optional stable origin tag (e.g.
+    `"atelier:tasks:42"`); Plan 4's `migrate_to_memex.py` passes it
+    positionally so a rerun can locate the row via
+    `lookup_index_id_by_source_ref` (Task 3) and skip duplicate writes.
+    Folded into metadata so it survives into
+    `~/.memex/index.db.documents.metadata`."""
+    body_lines = [f"# {title}", "", description or ""]
+    if notes:
+        body_lines += ["", "## Notes", notes]
+    body = "\n".join(body_lines)
+    payload = {
+        "title": title, "description": description, "project_id": project_id,
+        "created_by": created_by, "assigned_to": assigned_to,
+        "priority": priority, "notes": notes, "status": "pending",
+        "created_at": _now(), "updated_at": _now(),
+    }
+    # `notes` is searchable narrative — include it in metadata so
+    # _metadata_narrative folds it into the FTS5 blob.
+    metadata: dict = {"project_id": project_id, "priority": priority}
+    if assigned_to:
+        metadata["assigned_to"] = assigned_to
+    if notes:
+        metadata["notes"] = notes
+    if source_ref:
+        metadata["source_ref"] = source_ref
+    return _atelier_write(
+        target_table="tasks", domain="task",
+        title=title, body=body, payload=payload,
+        metadata=metadata, relations=relations,
+        caller_agent_id=created_by,
+    )
+
+
+def write_meeting(*, title: str, date: str, summary: str,
+                  decisions: str, created_by: str,
+                  project_id: int | None = None,
+                  source_ref: str | None = None,
+                  relations: list[dict] | None = None) -> dict:
+    """`source_ref` is an optional stable origin tag — same contract as
+    `write_task`. Plan 4 line 306 passes it positionally during
+    migration replay."""
+    body = (f"# {title}\n\nDate: {date}\n\n"
+            f"## Summary\n\n{summary}\n\n"
+            f"## Decisions\n\n{decisions}\n")
+    payload = {
+        "title": title, "date": date,
+        "filename": f"{date}-{_slug(title)}.md",
+        "summary": summary, "decisions": decisions,
+        "created_by": created_by,
+        "created_at": _now(), "updated_at": _now(),
+    }
+    metadata: dict = {"date": date,
+                      "summary": summary or "",
+                      "decisions": decisions or ""}
+    if project_id is not None:
+        metadata["project_id"] = project_id
+    if source_ref:
+        metadata["source_ref"] = source_ref
+    return _atelier_write(
+        target_table="meeting_minutes", domain="meeting",
+        title=title, body=body, payload=payload,
+        metadata=metadata, relations=relations,
+        caller_agent_id=created_by,
+    )
+
+
+def write_project(*, workspace_id: int, slug: str, name: str,
+                  description: str, created_by: str,
+                  relations: list[dict] | None = None) -> dict:
+    """Create a new project — distinct facade method per user decision +
+    spec §4.3. Mirrors `write_document` but pins `domain="project"` and
+    targets `projects`. `slug` is the canonical project identifier used
+    later by `_resolve_project_slug` for key construction."""
+    payload = {
+        "workspace_id": workspace_id,
+        "slug": slug,
+        "name": name,
+        "description": description,
+        "phase": "design:open",
+        "created_by": created_by,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    metadata = {
+        "workspace_id": workspace_id,
+        "slug": slug,
+        "description": description or "",
+    }
+    return _atelier_write(
+        target_table="projects", domain="project",
+        title=name, body=description or "", payload=payload,
+        metadata=metadata, relations=relations,
+        caller_agent_id=created_by,
+    )

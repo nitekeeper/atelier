@@ -1299,7 +1299,9 @@ Then replace each direct INSERT with `backend.find_or_create_role(name=..., desc
 
 When normalizing role names during seed, the canonical PM role name is "Product Manager" (per user decision). Legacy variants like "PM", "product-manager", "Project Manager" should be rewritten to "Product Manager" at seed time.
 
-Alternative: if Plan 2 ships `scripts/bootstrap.py` that fully subsumes role/agent seeding, document that decision here and add `git rm scripts/seed_roles.py` to Plan 4 instead of rewiring it. Pick one path and don't leave both partially done.
+**Also fix the docstring count drift (D3).** The file's module docstring at line 1 currently reads `"""Idempotent seed: inserts 46 world-class expert roles ..."""` but the `ROLES` list actually contains 61 entries (per the Plan 1 audit). Update the line to read `"""Idempotent seed: inserts 61 world-class expert roles ..."""` — or, safer, dynamic: `inserts len(ROLES) world-class expert roles`. Pick the dynamic form so future catalog edits don't re-introduce drift.
+
+Alternative: if Plan 2 ships `scripts/bootstrap.py` that fully subsumes role/agent seeding, document that decision here and add `git rm scripts/seed_roles.py` to Plan 4 instead of rewiring it. Pick one path and don't leave both partially done. (If you pick deletion, D3's docstring is moot — drop this sub-step.)
 
 - [ ] **Step 3: Delete `scripts/db.py`**
 

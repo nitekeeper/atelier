@@ -720,6 +720,12 @@ def _memex_core_update(*, store: str, table: str, row_id: int,
     return updated or {}
 
 
+def _memex_core_delete(*, store: str, table: str, row_id: int) -> None:
+    """Mode-aware delete primitive — sibling of _memex_core_update."""
+    memex_stores = _memex_module("stores")
+    memex_stores.delete(store, table, row_id)
+
+
 def _memex_core_query(*, store: str, table: str,
                      where: dict | None = None) -> list[dict]:
     """Read-side helper. Builds a simple equality WHERE clause; column

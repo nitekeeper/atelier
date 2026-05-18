@@ -463,3 +463,171 @@ def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
     finally:
         c.close()
     return dict(row) if row else {}
+
+
+# ── Reads ──────────────────────────────────────────────────────────────────
+
+def find_documents(*, query: str, workspace_id: int | None = None,
+                   project_id: int | None = None,
+                   domain: str | None = None, subdomain: str | None = None,
+                   limit: int = 10) -> list[dict]:
+    """Search `project_documents` with optional scope filters.
+
+    NOTE: the v1.1.0 schema does NOT include an FTS5 virtual table —
+    the spec's "Local-mode FTS5" (§7) is deferred. Until the schema
+    adds one, this falls back to `LIKE` on `title`. That is good enough
+    for the v1.1.0 acceptance tests (which exercise filters, not
+    full-text relevance) and matches what the existing
+    `scripts/documents.py:search_documents` already does. Surface the
+    gap upstream — adding FTS5 is a schema-level change that's out of
+    scope for Plan 2.
+
+    Empty `query` returns the full filtered set; `query="*"` is treated
+    the same way (consumer convention).
+    """
+    where: list[str] = []
+    params: list[Any] = []
+    if query and query.strip() and query.strip() != "*":
+        where.append("(title LIKE ? OR filename LIKE ?)")
+        like = f"%{query}%"
+        params.extend([like, like])
+    if workspace_id is not None:
+        where.append("workspace_id = ?")
+        params.append(workspace_id)
+    if project_id is not None:
+        where.append("project_id = ?")
+        params.append(project_id)
+    if domain is not None:
+        where.append("domain = ?")
+        params.append(domain)
+    if subdomain is not None:
+        where.append("subdomain = ?")
+        params.append(subdomain)
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    sql = (f"SELECT * FROM project_documents {clause} "
+           f"ORDER BY created_at DESC LIMIT ?")
+    params.append(limit)
+    c = _conn()
+    try:
+        rows = c.execute(sql, params).fetchall()
+    finally:
+        c.close()
+    return [dict(r) for r in rows]
+
+
+def get_task(*, task_id: int) -> dict | None:
+    """Return the task row for `task_id` or None when missing."""
+    c = _conn()
+    try:
+        row = c.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else None
+
+
+def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
+    """Return every task in `project_id`, optionally filtered by `status`."""
+    c = _conn()
+    try:
+        if status is not None:
+            rows = c.execute(
+                "SELECT * FROM tasks WHERE project_id = ? AND status = ? "
+                "ORDER BY priority DESC, created_at",
+                (project_id, status),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM tasks WHERE project_id = ? "
+                "ORDER BY priority DESC, created_at",
+                (project_id,),
+            ).fetchall()
+    finally:
+        c.close()
+    return [dict(r) for r in rows]
+
+
+# ── Cross-plan helpers ─────────────────────────────────────────────────────
+
+def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:
+    """Local-mode equivalent of the Memex-backend method.
+
+    Local mode has NO federated Memex Index — there is no `index_id`
+    namespace to look up. The method exists for facade-signature parity
+    with the Memex backend (`backend.lookup_index_id_by_source_ref`),
+    used by Plan 4's idempotent migrator. In Local mode the migrator is
+    the *source* of the migration, not its target, so this method is
+    never the resume key.
+
+    Returns None for every input. Don't be tempted to surface
+    `project_documents.id` here: row ids are local integers and have
+    no meaning outside this DB; returning them as a "fake index_id"
+    would corrupt cross-mode behaviour if a caller ever assumed
+    semantic equivalence.
+    """
+    return None
+
+
+def find_or_create_role(*, name: str, description: str) -> dict:
+    """Return the local `roles` row for `name`, creating it if absent.
+
+    Idempotent: a second call with the same `name` returns the existing
+    row unchanged — `description` is NOT updated on hit (matches the
+    Memex-mode contract; updates go through a separate `update_role`).
+
+    Used by `scripts/seed_roles.py` (Plan 3) so the bootstrap path is
+    safe to call on a populated DB.
+    """
+    c = _conn()
+    try:
+        existing = c.execute(
+            "SELECT * FROM roles WHERE name = ?", (name,)
+        ).fetchone()
+        if existing is not None:
+            return dict(existing)
+        now = _now()
+        cur = c.execute(
+            "INSERT INTO roles (name, description, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (name, description, now, now),
+        )
+        new_id = cur.lastrowid
+        c.commit()
+        row = c.execute(
+            "SELECT * FROM roles WHERE id = ?", (new_id,)
+        ).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else {}
+
+
+def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
+                         profile: str) -> dict:
+    """Return the local `agents` row for `agent_id`, creating it if absent.
+
+    Idempotent: same shape as `find_or_create_role`. Local mode owns its
+    own `agents` table (per `migrations/local-only/050_local_roles_agents.sql`);
+    Memex mode defers to `~/.memex/agents.db`. The facade dispatches per
+    mode so neither caller has to know which store backs the call.
+    """
+    c = _conn()
+    try:
+        existing = c.execute(
+            "SELECT * FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()
+        if existing is not None:
+            return dict(existing)
+        now = _now()
+        c.execute(
+            "INSERT INTO agents (id, name, role_id, profile, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (agent_id, name, role_id, profile, now, now),
+        )
+        c.commit()
+        row = c.execute(
+            "SELECT * FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else {}

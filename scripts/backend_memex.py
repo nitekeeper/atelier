@@ -710,3 +710,182 @@ def record_phase_bypass(*, project_id: int, from_phase: str,
             "agent_id": agent_id,
         },
     )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Section 3: Reads + cross-plan helpers (Plan 2 Task 3)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# find_documents goes through Memex's reference librarian (FTS5-only;
+# we skip the LLM dispatch). get_task / list_tasks are simple Core reads.
+#
+# The cross-plan helpers (source_ref lookup, idempotent role/agent,
+# raw execute) belong here because they're built on the same plumbing
+# as the reads, and Plans 3/4 reference them directly.
+
+
+# ── Reads ──────────────────────────────────────────────────────────────────
+
+
+def _memex_search(*, query: str, project_id: int | None = None,
+                  domain: str | None = None,
+                  limit: int = 10) -> list[dict]:
+    """Run an FTS5-only Memex Index search by calling the Reference
+    Librarian's `execute_query_plan` directly. We skip the subagent step
+    (`ask_prepare` builds an LLM prompt we'd never dispatch), so the
+    prep helper is dead code on this path. Brain-style ask/synthesize
+    (with the subagent loop) still go via `memex:run`.
+    """
+    _ensure_memex_importable()
+    from scripts.agents import reference_librarian as memex_ref  # type: ignore
+    plan: dict = {
+        "fts_query": query,
+        "vector_query": None,
+        "filters": {},
+        "limit": limit,
+    }
+    if domain:
+        plan["filters"]["domain"] = domain
+    if project_id is not None:
+        # FTS5 metadata filter on JSON-extracted project_id.
+        plan["filters"]["project_id"] = project_id
+    return memex_ref.execute_query_plan(plan, with_embedding=False)
+
+
+def find_documents(*, query: str, workspace_id: int | None = None,
+                   project_id: int | None = None,
+                   domain: str | None = None,
+                   subdomain: str | None = None,
+                   limit: int = 10) -> list[dict]:
+    """FTS5 search over the Memex index. `workspace_id` and `subdomain`
+    are accepted for facade-contract symmetry with backend.py but are
+    not yet pushed into the FTS plan — both will route through `filters`
+    once spec §6.4 nails down the canonical column for subdomain.
+    """
+    return _memex_search(query=query, project_id=project_id,
+                         domain=domain, limit=limit)
+
+
+def get_task(*, task_id: int) -> dict | None:
+    """Read a single task row by id. Returns None on miss."""
+    rows = _memex_core_query(store="atelier", table="tasks",
+                             where={"id": task_id})
+    return rows[0] if rows else None
+
+
+def list_tasks(*, project_id: int,
+               status: str | None = None) -> list[dict]:
+    """List tasks for a project, optionally filtered by status."""
+    where: dict = {"project_id": project_id}
+    if status:
+        where["status"] = status
+    return _memex_core_query(store="atelier", table="tasks", where=where)
+
+
+# ── Cross-plan helpers ─────────────────────────────────────────────────────
+
+
+def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:
+    """Look up the `index_id` of a previously-written document whose
+    `metadata.source_ref` equals `source_ref`. Returns None if absent.
+
+    Plan 4 contract: `migrate_to_memex.py` calls this before every
+    replay write so a rerun after a partial outage skips rows that
+    already landed in Memex (avoiding `librarian.DuplicateKeyError`).
+    Source refs are stable strings like `"atelier:tasks:42"`.
+    """
+    _ensure_memex_importable()
+    from scripts import stores as memex_stores  # type: ignore
+    rows = memex_stores.query(
+        "index",
+        "SELECT index_id FROM documents "
+        "WHERE json_extract(metadata, '$.source_ref') = ? LIMIT 1",
+        (source_ref,),
+    )
+    return rows[0]["index_id"] if rows else None
+
+
+def _agents_db_path() -> str:
+    """Resolve the path to `~/.memex/agents.db` via the public registry.
+
+    Memex's `scripts.registry.get_store("agents")` returns the
+    registered store record (which carries `path`). `agents` is a
+    reserved store name seeded by Memex bootstrap.
+    """
+    _ensure_memex_importable()
+    from scripts import registry as memex_registry  # type: ignore
+    rec = memex_registry.get_store("agents")
+    if rec is None:
+        raise RuntimeError(
+            "Memex has no 'agents' store registered. Run `memex:run` once "
+            "to bootstrap before calling Atelier role/agent helpers."
+        )
+    return rec["path"]
+
+
+def find_or_create_role(*, name: str, description: str) -> dict:
+    """Return the role row with this `name`, creating it if absent.
+
+    Idempotent — safe to call against a populated agents.db. Used by
+    Plan 3's `scripts/seed_roles.py` rewire to re-seed canonical roles
+    without `IntegrityError` on already-present names.
+    """
+    _ensure_memex_importable()
+    from scripts import roles as memex_roles  # type: ignore
+    db_path = _agents_db_path()
+    for r in memex_roles.list_roles(db_path):
+        if r["name"] == name:
+            return r
+    return memex_roles.create_role(db_path, name=name,
+                                    description=description)
+
+
+def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
+                         profile: str) -> dict:
+    """Return the agent row with this `agent_id`, creating it if absent.
+
+    Idempotent — symmetric to `find_or_create_role`. Memex's
+    `scripts.agents.create_agent` signature is
+    `(db_path, agent_id, name, role_id, profile)` per
+    `memex/scripts/agents/__init__.py:26`.
+    """
+    _ensure_memex_importable()
+    from scripts import agents as memex_agents  # type: ignore
+    db_path = _agents_db_path()
+    existing = memex_agents.get_agent(db_path, agent_id)
+    if existing is not None:
+        return existing
+    return memex_agents.create_agent(db_path, agent_id, name, role_id,
+                                      profile)
+
+
+def _memex_core_execute(*, store: str, sql: str,
+                        params: tuple = ()) -> int:
+    """Composite-key / non-equality DELETE / UPDATE primitive.
+
+    `memex_stores.query()` is SELECT-only (no commit);
+    `memex_stores.delete()` only handles integer-PK rows. Plan 3's
+    `scripts/meetings.py` rewrite needs to clear `meeting_participants`
+    rows by composite `(meeting_id, agent_id)` — neither helper covers
+    this case, so we open the underlying connection directly via the
+    public registry record and `scripts.db.get_connection`.
+
+    Returns affected `rowcount`. Caller passes hand-built SQL; this
+    helper does NOT validate identifiers (the SQL string is wholly
+    inside Atelier's source — no user-controlled fragments reach
+    here). Restrict use to DELETE / UPDATE statements that the other
+    `_memex_core_*` helpers can't express.
+    """
+    _ensure_memex_importable()
+    from scripts import registry as memex_registry  # type: ignore
+    from scripts.db import get_connection  # type: ignore
+    rec = memex_registry.get_store(store)
+    if rec is None:
+        raise ValueError(f"Unknown store: {store}")
+    conn = get_connection(rec["path"])
+    try:
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()

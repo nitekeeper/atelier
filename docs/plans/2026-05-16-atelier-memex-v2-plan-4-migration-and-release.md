@@ -16,9 +16,10 @@
 
 ```
 Wave 3 — Migration                              [serial; depends on Plan 3]
-  T1: migration replay function + per-project markers
-  T2: prompt UX + entry-skill integration
-  T3: crash-safety + idempotency tests
+  T1:  migration replay function + per-project markers
+  T2:  prompt UX + entry-skill integration (auto-prompt path)
+  T2b: skills/migrate/SKILL.md (manual /atelier:migrate trigger, v1.1.0 surface)
+  T3:  crash-safety + idempotency tests
 
 Wave 4 — Surface + docs                         [parallel after Wave 3]
   ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
@@ -563,7 +564,9 @@ def startup_check() -> dict:
     return {"action": "proceed-memex", "bootstrap": bootstrap_state}
 ```
 
-- [ ] **Step 4: Update each of the 4 user-facing SKILL.md files**
+- [ ] **Step 4: Update each of the 4 pre-existing user-facing SKILL.md files**
+
+`skills/migrate/SKILL.md` (added in Task 2b) is intentionally excluded — it IS the manual migration path and would create circular pre-flight logic.
 
 For each of `skills/{load,save,ingest,run}/SKILL.md`, add this block at the very top of its recipe section (BEFORE any existing instructions):
 
@@ -597,6 +600,139 @@ pytest tests/ -x
 ```bash
 git add scripts/atelier_entrypoint.py skills/load/SKILL.md skills/save/SKILL.md skills/ingest/SKILL.md skills/run/SKILL.md tests/test_atelier_entrypoint.py
 git commit -m "feat(entrypoint): wave-3 startup pre-flight + migration prompt in user-facing skills"
+```
+
+---
+
+### Task 2b: Add `/atelier:migrate` user-facing skill (Wave 3)
+
+Spec §9 + §15 #4 resolution: alongside the auto-prompt that fires when both Local DB and Memex are present (Task 2 above), atelier ships a dedicated `/atelier:migrate` skill so users can manually trigger the same migration. Use cases:
+
+- User declined the auto-prompt (`.ai/atelier.local-only` marker exists) and now wants to migrate.
+- A prior migration failed mid-flight; user wants to retry.
+- User has many projects to migrate and wants to script the operation (one slash command per project).
+
+**Files:**
+- Create: `skills/migrate/SKILL.md`
+- Test: `tests/test_skill_migrate_surface.py`
+
+- [ ] **Step 1: Write the surface-invariant test**
+
+```python
+# tests/test_skill_migrate_surface.py
+"""The /atelier:migrate skill is the 5th user-facing surface (v1.1.0).
+This test pins its presence + frontmatter so accidental removal fails CI."""
+from pathlib import Path
+import re
+
+REPO = Path(__file__).parent.parent
+
+
+def test_migrate_skill_file_exists():
+    assert (REPO / "skills" / "migrate" / "SKILL.md").is_file()
+
+
+def test_migrate_skill_has_description_frontmatter():
+    """Per CLAUDE.md, every public skill at skills/<name>/SKILL.md
+    must carry YAML frontmatter with a `description` field."""
+    md = (REPO / "skills" / "migrate" / "SKILL.md").read_text(encoding="utf-8")
+    m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n", md, re.DOTALL)
+    assert m is not None, "skills/migrate/SKILL.md missing YAML frontmatter"
+    fm = m.group(1)
+    assert "description:" in fm, "frontmatter missing description field"
+    # Description routing trigger should mention 'migrate' so /atelier:migrate
+    # autocompletes for users typing 'migr…'
+    assert "migrat" in fm.lower()
+
+
+def test_migrate_skill_routes_to_internal_procedure():
+    """The skill body should reference the internal procedure that does
+    the actual work — same routing pattern as the other 4 skills."""
+    md = (REPO / "skills" / "migrate" / "SKILL.md").read_text(encoding="utf-8")
+    assert "internal/migrate-local-to-memex/SKILL.md" in md
+```
+
+- [ ] **Step 2: Run the test — expect FAIL (skill file missing).**
+
+- [ ] **Step 3: Create `skills/migrate/SKILL.md`**
+
+```markdown
+---
+description: Use when manually triggering or re-triggering Local → Memex migration for the current Atelier project — bypasses the .ai/atelier.local-only opt-out marker and retries on prior failure.
+---
+
+# migrate
+
+Manual trigger for the Local → Memex migration documented in spec §8 and
+implemented in `internal/migrate-local-to-memex/SKILL.md`. The same
+migration logic auto-prompts at the top of `/atelier:{load,save,ingest,run}`
+when both a project-local `.ai/atelier.db` and Memex are present and no
+marker has been written. This skill is the **manual** path for the
+exception cases.
+
+## When to use
+
+- You previously answered `n` to the auto-prompt and now want to migrate.
+  (Auto-prompt won't fire again because `.ai/atelier.local-only` is set.)
+- A prior migration failed partway through. You've resolved the cause
+  (disk full, Memex bootstrap issue, etc.) and want to resume.
+- You're scripting bulk migration across many projects: invoke
+  `/atelier:migrate` from each project root rather than waiting for
+  the auto-prompt at next session-open.
+
+## Procedure
+
+1. **Verify mode.** Run `from scripts.mode_detector import detect_mode;
+   detect_mode()`. If it returns `"local"`, surface to user:
+   "Memex is not installed (or not bootstrapped). Run `memex:run` once
+   first, then re-invoke `/atelier:migrate`." Stop.
+
+2. **Clear opt-out marker if present.** If `.ai/atelier.local-only`
+   exists, delete it. (Whether the user explicitly opt-out is no longer
+   relevant — they're explicitly opting back in now.)
+
+3. **Verify there's something to migrate.** If `.ai/atelier.db` doesn't
+   exist, surface: "No local atelier database in this project. Nothing
+   to migrate." Stop.
+
+4. **Run the internal migration procedure.** Read
+   `internal/migrate-local-to-memex/SKILL.md` and follow it inline.
+   The procedure is idempotent — rows already replayed (detected via
+   `source_ref` lookup in memex's Index, per Plan 4 Task 1) are skipped
+   and counted under `already_present`. Surface the summary to the user.
+
+5. **On success**, the procedure writes `.ai/atelier.migrated` with the
+   timestamp + row counts. On failure, the local DB is untouched and no
+   marker is written; the user can fix the underlying issue and re-run
+   this skill.
+
+## Differences from the auto-prompt path
+
+| Aspect | Auto-prompt (Task 2) | `/atelier:migrate` (this skill) |
+|---|---|---|
+| When triggered | Top of any other skill, on first session-open after Memex appears | User-invoked explicitly |
+| Respects `.ai/atelier.local-only` | Yes — won't fire if marker present | **No** — clears the marker |
+| Respects `.ai/atelier.migrated` | Yes — won't fire if marker present | **Same** — but the internal procedure detects already-migrated rows via source_ref and counts them rather than re-writing |
+| Required answer | `y/N` from user | None — invocation IS the consent |
+
+## Hard rules
+
+- Never proceed if `detect_mode() != "memex"`. Atelier cannot migrate
+  TO a target that doesn't exist.
+- Never skip the internal procedure — call into
+  `internal/migrate-local-to-memex/SKILL.md` directly so all replay
+  logic, source_ref checks, and crash-safety guarantees are honored.
+- Surface the row-count summary to the user before stopping. Do not
+  swallow the migration's output.
+```
+
+- [ ] **Step 4: Run the test — expect PASS (3/3).**
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add skills/migrate/SKILL.md tests/test_skill_migrate_surface.py
+git commit -m "feat(migrate): wave-3 dedicated /atelier:migrate skill for manual re-trigger"
 ```
 
 ---
@@ -740,12 +876,13 @@ git commit -m "test(migrate): wave-3 crash-safety regression coverage"
 **Files:**
 - Create: `tests/test_skill_surface.py`
 
-- [ ] **Step 1: Write tests asserting only 4 user-facing skills + no internal SKILL.md leaks via plugin.json**
+- [ ] **Step 1: Write tests asserting exactly 5 user-facing skills + no internal SKILL.md leaks via plugin.json**
 
 ```python
 # tests/test_skill_surface.py
-"""Lock in the contract that Atelier exposes ONLY 4 user-facing skills
-to Claude Code and that every internal procedure stays under internal/."""
+"""Lock in the contract that Atelier exposes EXACTLY 5 user-facing skills
+to Claude Code (v1.1.0 surface — adds `migrate` to the v1.0.13 set of 4)
+and that every internal procedure stays under internal/."""
 import json
 from pathlib import Path
 
@@ -754,15 +891,15 @@ SKILLS = REPO / "skills"
 INTERNAL = REPO / "internal"
 
 
-def test_exactly_four_user_skills():
+def test_exactly_five_user_skills():
     skill_dirs = [p for p in SKILLS.iterdir()
                   if p.is_dir() and (p / "SKILL.md").exists()]
     names = sorted(p.name for p in skill_dirs)
-    assert names == ["ingest", "load", "run", "save"], names
+    assert names == ["ingest", "load", "migrate", "run", "save"], names
 
 
 def test_plugin_manifest_lists_no_extra_skills():
-    """If plugin.json declares any skill, it must be one of the four."""
+    """If plugin.json declares any skill, it must be one of the five."""
     manifest_path = REPO / ".claude-plugin" / "plugin.json"
     if not manifest_path.exists():
         return  # nothing to check
@@ -772,7 +909,7 @@ def test_plugin_manifest_lists_no_extra_skills():
         for s in declared:
             name = s if isinstance(s, str) else s.get("name", "")
             assert any(name.endswith(n)
-                       for n in ("load", "save", "ingest", "run")), \
+                       for n in ("load", "save", "ingest", "run", "migrate")), \
                 f"manifest declares unknown skill: {name}"
 
 
@@ -902,7 +1039,7 @@ Memex v2 detected. Migrate this project's Atelier data?  [y/N]
 
 | Location | Discoverable as `/atelier:<name>`? | Count |
 |---|---|---|
-| `skills/{load,save,ingest,run}/SKILL.md` | **Yes** | 4 |
+| `skills/{ingest,load,migrate,run,save}/SKILL.md` | **Yes** | 5 |
 | `internal/*` (procedures invoked via Read tool) | No | approximately 20 (see `internal/` directory) |
 
 Internal procedures are reached only by reading the file from within a
@@ -1012,7 +1149,9 @@ following typed exceptions propagated from memex:
 - `scripts/migrate_to_memex.py` — one-shot per-project replay from
   Local to Memex; crash-safe (no marker without full success).
 - `scripts/atelier_entrypoint.py:startup_check()` — pre-flight for the
-  four user-facing skills; handles bootstrap + migration prompt.
+  four pre-existing user-facing skills (load, save, ingest, run); handles
+  bootstrap + migration prompt. `/atelier:migrate` is excluded from
+  pre-flight to avoid circular logic (it IS the migration path).
 - `scripts/domain_vocabulary.py` — fixed Atelier domain set
   (`project` / `task` / `meeting` / `project_doc` / `adr`); validated
   on every Tier 2 write.
@@ -1184,8 +1323,8 @@ git push
 ## Plan 4 acceptance
 
 - `scripts/migrate_to_memex.py` migrates every row through the right backend; crash-safe.
-- `scripts/atelier_entrypoint.py:startup_check()` is called at the top of every user-facing skill.
-- 4 user-facing skills (`ingest`, `load`, `run`, `save`), ~20 internal procedures, no surface drift.
+- `scripts/atelier_entrypoint.py:startup_check()` is called at the top of every pre-existing user-facing skill (load, save, ingest, run).
+- 5 user-facing skills (`ingest`, `load`, `migrate`, `run`, `save`), ~20 internal procedures, no other surface drift.
 - `CLAUDE.md` + `README.md` reflect v2 reality; no `.ai/memex.db` references remain.
 - `CHANGELOG.md` has v1.1.0 entry.
 - `pytest tests/` green.

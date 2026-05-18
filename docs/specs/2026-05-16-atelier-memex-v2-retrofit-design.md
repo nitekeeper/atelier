@@ -116,7 +116,7 @@ Memex v2 §12 ("Out-of-scope") names "Atelier retrofit to write through Memex Li
 3. **Auto-detected mode.** Mode selection is automatic at every operation. Users do not configure it.
 4. **Self-installing into Memex.** On first run in Memex mode, Atelier seeds its roles and shipped agent profiles into `~/.memex/agents.db`, creates its store via `memex:core:create-store` with its own migrations, and records bootstrap state. Idempotent — safe to re-run.
 5. **Frictionless migration.** When Memex becomes available after Atelier has been running locally, prompt the user once; on consent, replay every local row through the appropriate Memex write path and retire the local file.
-6. **No surface bloat.** The 4 user-facing skills (load, save, ingest, execute) stay the only Claude-Code-visible Atelier surface. All new procedures (bootstrap, migration, local-mode WIKI, dispatch) live under `internal/` and are reached via routing — same pattern Memex v2 itself uses with `memex:run`.
+6. **Bounded surface growth.** v1.0.13 had 4 user-facing skills (load, save, ingest, run); v1.1.0 adds exactly one (`migrate`, per §9) — explicitly motivated by the Local→Memex transition users hit on first install. All other new procedures (bootstrap, dispatch wrappers, local-mode WIKI, mode detection) live under `internal/` and are reached via routing — same pattern Memex v2 itself uses with `memex:run`.
 
 ## 3. Non-goals
 
@@ -135,7 +135,7 @@ Memex v2 §12 ("Out-of-scope") names "Atelier retrofit to write through Memex Li
 
 ```
                          ┌────────────────── Atelier user-facing skills (UNCHANGED) ──────────────────┐
-                         │       /atelier:load    /atelier:save    /atelier:ingest    /atelier:execute  │
+                         │  /atelier:load  /atelier:save  /atelier:ingest  /atelier:run  /atelier:migrate │
                          └────────────────────────────────┬──────────────────────────────────────────────┘
                                                           │
                                                           ▼
@@ -602,14 +602,15 @@ Migration is **non-destructive on failure**. If any step fails, the migrated fil
 
 ## 9. Skill surface
 
-Visible to Claude Code (unchanged from today):
+Visible to Claude Code (4 unchanged from v1.0.13 + 1 new in v1.1.0):
 
-- `/atelier:load` — load context for a project
+- `/atelier:load` — load context for a project (accepts `--project <slug>` flag per §10.3)
 - `/atelier:save` — persist session state
 - `/atelier:ingest` — pull external doc into Atelier-managed Brain
-- `/atelier:execute` — phase/workflow entry point
+- `/atelier:run` — phase/workflow entry point
+- `/atelier:migrate` — **new in v1.1.0.** Manual trigger for Local → Memex migration (§8). The same migration logic also auto-prompts at the top of any other atelier command when both Local DB and Memex are present and no marker exists; this dedicated skill lets power users re-trigger after declining (`.ai/atelier.local-only`), retry after failure, or script bulk migrations across projects.
 
-Internal (not surfaced; reached only by reading via routing from the four above):
+Internal (not surfaced; reached only by reading via routing from the five above):
 
 | New under `internal/` | Purpose |
 |---|---|
@@ -1056,7 +1057,7 @@ Wave-based per the user's intent for the implementation plan; this section docum
 | Mode-switch migration | Seed a local DB, install Memex (in-test mock), assert migration replays every row and leaves a marker |
 | Migration declined | Seed local DB, decline migration, assert `.local-only` marker, assert subsequent commands still work in Local mode |
 | Crash mid-migration | Inject failure on row 3 of 10 — assert no marker, assert local DB intact, assert retry succeeds |
-| Surface invariants | Assert exactly 4 user-facing skills are registered in `.claude-plugin/plugin.json` |
+| Surface invariants | Assert exactly 5 user-facing skills are registered in `.claude-plugin/plugin.json` (`ingest`, `load`, `migrate`, `run`, `save` — alphabetic) |
 | Internal-only invariant | Assert all `internal/local/*` and `internal/memex/*` procedures have no `name:` field that would expose them as slash commands |
 | **Workspace detection** | Monorepo fixture with two projects; assert `resolve_scope()` finds the right workspace + prompts for project when ambiguous; auto-selects when single project; persists session state |
 | **Project switch** | `/atelier:load --project <slug>` updates state.json; subsequent commands operate on the new project |
@@ -1106,10 +1107,10 @@ These do not block design approval but are decisions the plan-writer will need t
 1. Two migration directories (`migrations/shared/` + `migrations/local-only/`) — resolved in §11.1.
 2. Where Atelier's shipped agent personas live as JSON in this repo — `templates/agents/*.json` per Plan 1 Task 4.
 3. Exact dispatch wrapper API in `scripts/backend.py` — pure dict-in/dict-out; preserved facade signatures from current modules where possible.
-4. Migration prompt UX — single y/N at the top of the next command (Plan 4 Task 2). Optionally also offer a dedicated `atelier:migrate` skill as a manual trigger; deferred to v1.1.
+4. **RESOLVED (2026-05-17): Migration UX = auto-prompt + dedicated `/atelier:migrate` skill (both, in v1.1.0).** Auto-prompt at the top of any atelier command when both Local DB and Memex are present (Plan 4 Task 2). Dedicated skill at `skills/migrate/SKILL.md` for manual re-trigger after decline (`.ai/atelier.local-only`), retry after failure, or scripted bulk migration (Plan 4 Task 2b). Both paths route to the same `internal/migrate-local-to-memex/SKILL.md` procedure. §9 surface count: 5.
 5. **Memex-side capability gaps (§6.10)** — Plan 2 Task 3 (reads) is BLOCKED until the three questions in §6.10 are answered by reading Memex's `internal/index/search/SKILL.md`. The plan-writer must add this as a Wave-1 precondition.
 6. **RESOLVED (2026-05-17): Workspace identity edge case.** Rule: identity = `repo_url` if a remote exists, else `realpath(git_root)` (already encoded at §0.1 + §10.1). Two checkouts of the same remote → one workspace (URL match). Two checkouts of a remoteless repo → two workspaces (paths differ). No behavior change; edge accepted.
-7. **RESOLVED (2026-05-17): Project-switch UX is a flag on `/atelier:load`.** `/atelier:load --project <slug>` resolves the slug, updates the per-workspace pointer in `~/.atelier/state.json`, and loads the session in one step. No new top-level skill — keeps the "4 user-visible skills" invariant intact. Plan 4 Task 5 documents the flag.
+7. **RESOLVED (2026-05-17): Project-switch UX is a flag on `/atelier:load`.** `/atelier:load --project <slug>` resolves the slug, updates the per-workspace pointer in `~/.atelier/state.json`, and loads the session in one step. No new top-level skill for this op — folds into an existing surface. (The retrofit DOES add one new top-level skill, `/atelier:migrate`, per §9 / §15 #4 — those two surfaces are decoupled.) Plan 4 Task 5 documents the flag.
 8. **Legacy reader workspace synthesis** — `scripts/migrate_to_memex.py` (§11.4) reads v1.0.13 `projects` rows that have no `workspace_id`. The reader synthesizes one workspace per distinct project's `repo` URL (or per project name if no `repo` was set), writes the workspace first, then writes the project with the new `workspace_id`. v1.0.13 → v1.1.0 mapping is recorded in an in-memory translation table during the migration. Plan 4 Task 1 (migration) implements this.
 
 ## 16. Wave structure (preview for `writing-plans`)
@@ -1174,7 +1175,8 @@ Wave 3 — Migration                                         [serial; depends W2
   - Round-trip fixture tests: known v1.0.13 DB → translated v1.1.0 rows
 
 Wave 4 — Surface + docs                                    [parallel; depends W2]
-  - Update .claude-plugin/plugin.json (verify only 4 surfaced skills)
+  - Add skills/migrate/SKILL.md (Plan 4 Task 2b — manual migration trigger)
+  - Update .claude-plugin/plugin.json (verify 5 surfaced skills: ingest, load, migrate, run, save)
   - Update CLAUDE.md (drop v1 dependency check, document dual-mode +
     workspace/project model)
   - Update README.md

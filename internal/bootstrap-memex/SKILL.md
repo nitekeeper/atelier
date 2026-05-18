@@ -84,6 +84,9 @@ for r in seed_data.load_role_seed():
 # 5. Seed agents via the idempotent helper (memex:core:register-agent under the hood).
 #    seed_data.load_agent_seed() iterates the full templates/agents/ directory
 #    (~50 personas) — one record per .json file.
+#    Prerequisite: `backend.find_or_create_role` and `backend.find_or_create_agent`
+#    must be implemented (Plan 2 Task 1 / Task 8). This file documents the
+#    bootstrap shape; T6 / Plan 2 Task 10 wires them up.
 role_map = {row["name"]: row["id"] for row in memex_roles.list_roles(agents_db)}
 for a in seed_data.load_agent_seed():
     backend.find_or_create_agent(

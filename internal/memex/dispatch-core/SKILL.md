@@ -27,10 +27,18 @@ agent profile lookups.
 | `add_meeting_participant` | `memex:core:insert` | `atelier.meeting_participants` |
 | `assign_task` (assignee change only) | `memex:core:update` | `atelier.tasks` |
 | Read by primary key (`get_task`, `get_project`) | `memex:core:query` | `atelier.<table>` |
-| Bootstrap: seed roles | `memex:core:register-role` | `agents.roles` |
-| Bootstrap: seed agents | `memex:core:register-agent` | `agents.agents` |
+| Bootstrap: seed roles | `memex:core:register-role` `*` | `agents.roles` |
+| Bootstrap: seed agents | `memex:core:register-agent` `*` | `agents.agents` |
 | Agent profile lookup (e.g., resolve `tasks.assigned_to`) | `memex:core:get-agent` | `agents.agents` |
-| Raw SQL inside a transaction (multi-row migrations, audits) | `memex:core:execute` (see note) | `atelier.*` |
+| Raw SQL inside a transaction (multi-row migrations, audits) | `memex:core:execute` `*` (see note) | `atelier.*` |
+
+> `*` register-* is Atelier shorthand — precheck-then-create is required;
+> raw `memex.roles.create_role` / `memex.agents.create_agent` raise
+> `sqlite3.IntegrityError` on collision. See `backend.find_or_create_role`
+> / `backend.find_or_create_agent` wrappers. Likewise `memex:core:execute`
+> is Atelier shorthand for raw SQL that doesn't fit
+> `insert`/`update`/`delete`/`query`; Memex v2.5.1 does not expose a
+> public `execute` op (see note below).
 
 > Note on `memex:core:execute`: Memex v2.5.1 does NOT expose a public
 > `execute` op — `scripts/stores.py` ships `query`, `insert`, `update`,
@@ -80,8 +88,13 @@ row = memex_stores.update(
 # returns the updated row dict, or None if row_id absent
 ```
 
-`row_id` is the **integer** primary key. For tables keyed by a TEXT PK
-(e.g., `agents.id`), fall through to `memex:core:execute` (see note).
+`row_id` is the **integer** primary key. For tables keyed by a TEXT PK,
+fall through to `memex:core:execute` (see note). Atelier's v1.1.0 schema
+has integer PKs throughout; this fall-through is reserved for hypothetical
+future TEXT-PK tables. The `agents.id` TEXT case lives in
+`~/.memex/agents.db` (not the atelier store) and is covered by
+`register-agent` / `get-agent` rows in the routing table above — it does
+NOT route through `memex:core:update`.
 
 ### Query — `memex:core:query`
 

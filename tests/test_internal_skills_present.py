@@ -12,7 +12,7 @@ from pathlib import Path
 INTERNAL = Path(__file__).resolve().parent.parent / "internal"
 
 
-def test_internal_memex_dispatch_write_skill_exists():
+def test_internal_memex_dispatch_write_skill_present_with_markers():
     p = INTERNAL / "memex" / "dispatch-write" / "SKILL.md"
     assert p.is_file(), f"missing file: {p}"
     text = p.read_text(encoding="utf-8")
@@ -24,7 +24,7 @@ def test_internal_memex_dispatch_write_skill_exists():
         assert marker in text, f"dispatch-write missing marker: {marker!r}"
 
 
-def test_internal_memex_dispatch_core_skill_exists():
+def test_internal_memex_dispatch_core_skill_present_with_markers():
     p = INTERNAL / "memex" / "dispatch-core" / "SKILL.md"
     assert p.is_file(), f"missing file: {p}"
     text = p.read_text(encoding="utf-8")
@@ -39,7 +39,7 @@ def test_internal_memex_dispatch_core_skill_exists():
         assert marker in text, f"dispatch-core missing marker: {marker!r}"
 
 
-def test_internal_bootstrap_memex_skill_exists():
+def test_internal_bootstrap_memex_skill_present_with_markers():
     p = INTERNAL / "bootstrap-memex" / "SKILL.md"
     assert p.is_file(), f"missing file: {p}"
     text = p.read_text(encoding="utf-8")

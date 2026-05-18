@@ -79,6 +79,8 @@ The procedure body is `scripts.backend_memex._atelier_write(...)`. It:
        title, body or "", metadata_narrative_excerpt(metadata),
    ]))
    ```
+   Function name follows spec §6.8 (`metadata_narrative_excerpt`), not
+   Plan 2's draft (`metadata_narrative`).
 4. Builds the `librarian_output` dict:
    ```python
    from scripts.agents import librarian as memex_librarian
@@ -97,7 +99,7 @@ The procedure body is `scripts.backend_memex._atelier_write(...)`. It:
    ```python
    from scripts import embeddings as memex_embeddings
    try:
-       embedding = memex_embeddings.encode(librarian_output["searchable"])
+       embedding = memex_embeddings.encode(librarian_output["searchable"])  # bytes
    except memex_embeddings.EmbeddingUnavailable as e:
        memex_embeddings.log_skip(
            e, caller_agent_id=caller_agent_id,

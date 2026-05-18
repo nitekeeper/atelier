@@ -201,6 +201,7 @@ backend.write_task(*, workspace_id, project_id, title, description,
 backend.write_meeting(*, workspace_id, project_id, title, date,
                       summary, decisions, subdomain, created_by,
                       relations: list[dict] = ()) -> dict
+# `date` is ISO YYYY-MM-DD form.
 
 # Operational state — Tier 1 (direct CRUD, no Index touch)
 backend.upsert_session(*, project_id, agent_id, ...) -> dict
@@ -210,7 +211,8 @@ backend.record_phase_bypass(*, project_id, from_phase, to_phase,
                             reason, agent_id) -> dict
 
 # Workspace + project resolution (used by scripts/scope.py)
-backend.find_or_create_workspace(*, identity, slug, name) -> dict
+backend.find_or_create_workspace(*, identity, slug, name,
+                                 description=None) -> dict
 backend.find_workspace_by_identity(*, identity) -> dict | None
 backend.list_workspaces() -> list[dict]
 backend.find_project(*, workspace_id, slug) -> dict | None

@@ -45,8 +45,11 @@ Each method must exist with the expected signature and raise
 NotImplementedError when called. Wave 1 / Wave 1' replace the bodies.
 The full surface mirrors spec §4.3 lines 187-223.
 """
+# Red-phase verified 2026-05-17: removing scripts/backend.py and running this
+# file yields `ModuleNotFoundError: No module named 'scripts.backend'`.
+# Restored via commit 8ff2504.
 import pytest
-import inspect
+
 from scripts import backend
 
 
@@ -81,58 +84,168 @@ EXPECTED_METHODS = [
 ]
 
 
-def test_facade_module_exists():
+# Single source of truth for both `test_all_methods_defined` and
+# `test_method_raises_not_implemented`. Each value is a dict of kwargs
+# that satisfy the signature. Multiple rows per method exercise optional
+# kwargs so signature drift is caught.
+METHOD_KWARGS: dict[str, list[dict]] = {
+    "write_project": [
+        dict(workspace_id=1, slug="proj", name="Proj",
+             description="d", created_by="a"),
+    ],
+    "write_document": [
+        # Required-only.
+        dict(workspace_id=1, project_id=1, domain="design",
+             subdomain=None, title="t", body="b",
+             metadata={}, caller_agent_id="a"),
+        # All optionals exercised: source_url + relations.
+        dict(workspace_id=1, project_id=1, domain="design",
+             subdomain="x", title="t", body="b",
+             metadata={"k": "v"}, caller_agent_id="a",
+             source_url="https://example.test/doc",
+             relations=[{"target_id": 1, "kind": "part_of"}]),
+    ],
+    "write_task": [
+        # Required-only.
+        dict(workspace_id=1, project_id=1, title="t",
+             description="d", subdomain=None, created_by="a"),
+        # All optionals: assigned_to, priority, notes, relations.
+        dict(workspace_id=1, project_id=1, title="t",
+             description="d", subdomain="x", created_by="a",
+             assigned_to="b", priority=5, notes="n",
+             relations=[{"target_id": 2, "kind": "blocks"}]),
+    ],
+    "write_meeting": [
+        # Required-only.
+        dict(workspace_id=1, project_id=1, title="t",
+             date="2026-05-16", summary="s", decisions="d",
+             subdomain=None, created_by="a"),
+        # All optionals: relations.
+        dict(workspace_id=1, project_id=1, title="t",
+             date="2026-05-16", summary="s", decisions="d",
+             subdomain="x", created_by="a",
+             relations=[{"target_id": 3, "kind": "part_of"}]),
+    ],
+    "upsert_session": [
+        # Required-only.
+        dict(project_id=1, agent_id="a"),
+        # All optionals: phase, current_tasks, accomplished, next_action,
+        # status, pm_notes.
+        dict(project_id=1, agent_id="a", phase="design:open",
+             current_tasks="t1", accomplished="acc",
+             next_action="next", status="done", pm_notes="n"),
+    ],
+    "transition_phase": [
+        # Required-only.
+        dict(project_id=1, to_phase="plan:open", agent_id="a"),
+        # Optional bypass_reason.
+        dict(project_id=1, to_phase="plan:open", agent_id="a",
+             bypass_reason="urgent fix"),
+    ],
+    "update_task_status": [
+        # Required-only.
+        dict(task_id=1, status="in-progress"),
+        # Optional notes.
+        dict(task_id=1, status="done", notes="shipped"),
+    ],
+    "record_phase_bypass": [
+        dict(project_id=1, from_phase="x", to_phase="y",
+             reason="r", agent_id="a"),
+    ],
+    "find_or_create_workspace": [
+        # Required-only.
+        dict(identity="repo:x", slug="x", name="X"),
+        # Optional description.
+        dict(identity="repo:x", slug="x", name="X",
+             description="first-create description"),
+    ],
+    "find_workspace_by_identity": [
+        dict(identity="repo:x"),
+    ],
+    "list_workspaces": [
+        dict(),
+    ],
+    "find_project": [
+        dict(workspace_id=1, slug="proj"),
+    ],
+    "list_projects": [
+        dict(workspace_id=1),
+    ],
+    "find_documents": [
+        # Required-only.
+        dict(query="q"),
+        # All optionals: workspace_id, project_id, domain, subdomain, limit.
+        dict(query="q", workspace_id=1, project_id=1,
+             domain="design", subdomain="x", limit=25),
+    ],
+    "get_task": [
+        dict(task_id=1),
+    ],
+    "list_tasks": [
+        # Required-only.
+        dict(project_id=1),
+        # Optional status.
+        dict(project_id=1, status="done"),
+    ],
+    "get_document": [
+        dict(doc_id=1),
+    ],
+    "lookup_index_id_by_source_ref": [
+        dict(source_ref="atelier:tasks:1"),
+    ],
+    "find_or_create_role": [
+        dict(name="Product Manager", description="PM"),
+    ],
+    "find_or_create_agent": [
+        dict(agent_id="atelier-pm-1", name="PM", role_id=1, profile="pm"),
+    ],
+}
+
+
+def test_all_methods_defined():
+    """Every expected method is present on `backend`, and METHOD_KWARGS
+    covers exactly the same set (no drift between the two lists)."""
+    assert set(METHOD_KWARGS.keys()) == set(EXPECTED_METHODS), \
+        "EXPECTED_METHODS and METHOD_KWARGS keys must match"
     for name in EXPECTED_METHODS:
         assert hasattr(backend, name), f"backend.{name} missing"
 
 
-@pytest.mark.parametrize("fn_name,kwargs", [
-    ("write_project", dict(workspace_id=1, slug="proj", name="Proj",
-                           description="d", created_by="a")),
-    ("write_document", dict(workspace_id=1, project_id=1, domain="design",
-                            subdomain=None, title="t", body="b",
-                            metadata={}, caller_agent_id="a")),
-    ("write_task", dict(workspace_id=1, project_id=1, title="t",
-                        description="d", subdomain=None, created_by="a")),
-    ("write_meeting", dict(workspace_id=1, project_id=1, title="t",
-                           date="2026-05-16", summary="s", decisions="d",
-                           subdomain=None, created_by="a")),
-    ("upsert_session", dict(project_id=1, agent_id="a", phase="design:open")),
-    ("transition_phase", dict(project_id=1, to_phase="plan:open", agent_id="a")),
-    ("update_task_status", dict(task_id=1, status="in-progress")),
-    ("record_phase_bypass", dict(project_id=1, from_phase="x", to_phase="y",
-                                 reason="r", agent_id="a")),
-    ("find_or_create_workspace", dict(identity="repo:x", slug="x", name="X")),
-    ("find_workspace_by_identity", dict(identity="repo:x")),
-    ("list_workspaces", dict()),
-    ("find_project", dict(workspace_id=1, slug="proj")),
-    ("list_projects", dict(workspace_id=1)),
-    ("find_documents", dict(query="q")),
-    ("get_task", dict(task_id=1)),
-    ("list_tasks", dict(project_id=1)),
-    ("get_document", dict(doc_id=1)),
-    ("lookup_index_id_by_source_ref",
-     dict(source_ref="atelier:tasks:1")),
-    ("find_or_create_role", dict(name="Product Manager",
-                                  description="PM")),
-    ("find_or_create_agent", dict(agent_id="atelier-pm-1", name="PM",
-                                   role_id=1, profile="pm")),
-])
+# Flatten (name, kwargs) pairs into pytest.param rows with stable IDs so
+# failures read like `[write_document-1]` rather than the default
+# `[kwargs0]`. One ID per call site keeps multi-row methods unambiguous.
+_PARAMS = [
+    pytest.param(name, kw,
+                 id=name if len(kwlist) == 1 else f"{name}-{i}")
+    for name, kwlist in METHOD_KWARGS.items()
+    for i, kw in enumerate(kwlist)
+]
+
+
+@pytest.mark.parametrize("fn_name,kwargs", _PARAMS)
 def test_method_raises_not_implemented(fn_name, kwargs):
     fn = getattr(backend, fn_name)
     with pytest.raises(NotImplementedError):
         fn(**kwargs)
 
 
-def test_methods_accept_keyword_args_only():
+# Methods with no required parameters can't be tested for positional
+# rejection (there are no positional args to pass). Exclude them so the
+# TypeError check below only runs against methods that take >=1 arg.
+_METHODS_WITH_ARGS = [name for name in EXPECTED_METHODS
+                     if name != "list_workspaces"]
+
+
+@pytest.mark.parametrize("fn_name", _METHODS_WITH_ARGS)
+def test_methods_reject_positional_args(fn_name):
     """Wave 1 / 1' will swap implementations; keyword-only signatures
-    prevent positional-arg drift between backends."""
-    for name in EXPECTED_METHODS:
-        sig = inspect.signature(getattr(backend, name))
-        for p in sig.parameters.values():
-            # All params should be KEYWORD_ONLY or have a default
-            assert p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD), \
-                f"{name}.{p.name} should be keyword-callable"
+    prevent positional-arg drift between backends. Calling each method
+    with positional args must raise TypeError."""
+    fn = getattr(backend, fn_name)
+    kwargs = METHOD_KWARGS[fn_name][0]
+    positional_args = list(kwargs.values())
+    with pytest.raises(TypeError):
+        fn(*positional_args)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -155,29 +268,33 @@ Every method is keyword-only to prevent positional-arg drift between
 the two backends as they evolve. Surface mirrors spec §4.3.
 """
 from __future__ import annotations
-from typing import Any
+from collections.abc import Sequence
+from typing import NoReturn
 
 
-def _not_implemented(name: str) -> None:
+def _not_implemented(name: str) -> NoReturn:
     raise NotImplementedError(
         f"backend.{name} has no implementation yet. "
         f"Wave 1 (Memex) or Wave 1' (Local) supplies the body."
     )
 
 
-# ── Document-shaped writes — Tier 2 ─────────────────────────────────────
+# --- Document-shaped writes — Tier 2 -----------------------------------
 
 def write_project(*, workspace_id: int, slug: str, name: str,
                   description: str, created_by: str) -> dict:
+    """Create a project row scoped to a workspace. Returns the new row."""
     _not_implemented("write_project")
 
 
 def write_document(*, workspace_id: int, project_id: int,
                    domain: str, subdomain: str | None,
                    title: str, body: str,
-                   metadata: dict, caller_agent_id: str,
+                   metadata: dict[str, object], caller_agent_id: str,
                    source_url: str | None = None,
-                   relations: list[dict] = ()) -> dict:
+                   relations: Sequence[dict] = ()) -> dict:
+    """Persist a project document (design / plan / spec / etc.) and any
+    declared relations. Returns the new row with index identifiers."""
     _not_implemented("write_document")
 
 
@@ -186,7 +303,8 @@ def write_task(*, workspace_id: int, project_id: int,
                subdomain: str | None, created_by: str,
                assigned_to: str | None = None,
                priority: int = 0, notes: str | None = None,
-               relations: list[dict] = ()) -> dict:
+               relations: Sequence[dict] = ()) -> dict:
+    """Persist a task row and any declared relations. Returns the new row."""
     _not_implemented("write_task")
 
 
@@ -194,11 +312,13 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
                   title: str, date: str, summary: str,
                   decisions: str, subdomain: str | None,
                   created_by: str,
-                  relations: list[dict] = ()) -> dict:
+                  relations: Sequence[dict] = ()) -> dict:
+    """Persist a meeting record (and its markdown payload) plus relations.
+    `date` is ISO YYYY-MM-DD form. Returns the new row."""
     _not_implemented("write_meeting")
 
 
-# ── Operational state — Tier 1 ──────────────────────────────────────────
+# --- Operational state — Tier 1 ----------------------------------------
 
 def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
                    current_tasks: str | None = None,
@@ -206,83 +326,108 @@ def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
                    next_action: str | None = None,
                    status: str = "in-progress",
                    pm_notes: str | None = None) -> dict:
+    """Idempotent session upsert for `(project_id, agent_id)`.
+
+    Optional fields: `phase` (current dev phase), `current_tasks` (free-form
+    task summary), `accomplished` (what landed this session),
+    `next_action` (planned next step), `status` (default `'in-progress'`),
+    `pm_notes` (PM-visible commentary). Returns the resulting row.
+    """
     _not_implemented("upsert_session")
 
 
 def transition_phase(*, project_id: int, to_phase: str,
                      agent_id: str, bypass_reason: str | None = None) -> dict:
+    """Advance the project phase; if a bypass is required, the caller must
+    supply `bypass_reason` so `record_phase_bypass` can log it. Returns the
+    new phase row."""
     _not_implemented("transition_phase")
 
 
 def update_task_status(*, task_id: int, status: str,
                        notes: str | None = None) -> dict:
+    """Set the task status (e.g. 'in-progress' → 'done'). Returns the
+    updated row."""
     _not_implemented("update_task_status")
 
 
 def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
                         reason: str, agent_id: str) -> dict:
+    """Log a soft-wall bypass to the `phase_bypasses` table. Returns the
+    new row. Surfaced by `internal/dev-handoff` retros."""
     _not_implemented("record_phase_bypass")
 
 
-# ── Workspace + project resolution ──────────────────────────────────────
+# --- Workspace + project resolution ------------------------------------
 
 def find_or_create_workspace(*, identity: str, slug: str, name: str,
                              description: str | None = None) -> dict:
+    """Return the workspace row for `identity` (e.g. `repo:<git-root>`),
+    creating it if absent. Idempotent."""
     _not_implemented("find_or_create_workspace")
 
 
 def find_workspace_by_identity(*, identity: str) -> dict | None:
+    """Return the workspace row for `identity` or None if absent."""
     _not_implemented("find_workspace_by_identity")
 
 
 def list_workspaces() -> list[dict]:
+    """Return every workspace row, ordered by slug."""
     _not_implemented("list_workspaces")
 
 
 def find_project(*, workspace_id: int, slug: str) -> dict | None:
+    """Return the project row matching `(workspace_id, slug)` or None."""
     _not_implemented("find_project")
 
 
 def list_projects(*, workspace_id: int) -> list[dict]:
+    """Return every project row in the workspace, ordered by slug."""
     _not_implemented("list_projects")
 
 
-# ── Reads ───────────────────────────────────────────────────────────────
+# --- Reads -------------------------------------------------------------
 
 def find_documents(*, query: str, workspace_id: int | None = None,
                    project_id: int | None = None,
                    domain: str | None = None, subdomain: str | None = None,
                    limit: int = 10) -> list[dict]:
+    """Full-text / metadata search over documents, optionally scoped to a
+    workspace / project / domain. Returns ranked rows."""
     _not_implemented("find_documents")
 
 
 def get_task(*, task_id: int) -> dict | None:
+    """Return the task row for `task_id` or None if absent."""
     _not_implemented("get_task")
 
 
 def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
+    """Return every task row in the project, optionally filtered by status."""
     _not_implemented("list_tasks")
 
 
 def get_document(*, doc_id: int) -> dict | None:
+    """Return the document row for `doc_id` or None if absent."""
     _not_implemented("get_document")
 
 
 def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:
     """Reverse-lookup for the idempotent-migration use case.
 
-    Plan 4's `scripts/migrate_to_memex.py` writes each migrated row with
-    `metadata["source_ref"] = "atelier:<table>:<local_id>"`. On a rerun
-    after a partial outage, the migrator calls this method first; if it
-    returns a non-None index_id, the row already landed and is skipped
-    (avoiding `librarian.DuplicateKeyError`).
+    Used by the idempotent migrator to skip rows that already landed
+    during a previous partial run. Each migrated row is written with
+    `metadata["source_ref"] = "atelier:<table>:<local_id>"`; on a rerun
+    the migrator calls this method first, and if it returns a non-None
+    index_id the row is skipped (avoiding `librarian.DuplicateKeyError`).
 
     Returns the Memex Index `index_id` (str) on hit; None on miss.
     """
     _not_implemented("lookup_index_id_by_source_ref")
 
 
-# ── Idempotent role / agent helpers ──────────────────────────────────────
+# --- Idempotent role / agent helpers -----------------------------------
 #
 # Used by `scripts/seed_roles.py` (Plan 3) and the Memex-mode bootstrap.
 # Both must be safe to call on a populated DB — return the existing row
@@ -306,7 +451,7 @@ def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
 ```
 pytest tests/test_backend_skeleton.py -v
 ```
-Expected: 22 passed (1 facade-module test + 20 parametrized NotImplementedError tests + 1 keyword-only signature test). The parametrized count includes `lookup_index_id_by_source_ref`, `find_or_create_role`, and `find_or_create_agent` per the cross-plan dependency audit.
+Expected: 49 passed (1 facade-module test + 29 parametrized NotImplementedError tests covering required-only and all-optional kwarg shapes + 19 parametrized positional-rejection tests). The parametrized counts include `lookup_index_id_by_source_ref`, `find_or_create_role`, and `find_or_create_agent` per the cross-plan dependency audit.
 
 - [ ] **Step 5: Commit**
 
@@ -594,6 +739,10 @@ def _memex_plugin_reachable() -> bool:
 
 
 def detect_mode() -> Mode:
+    """Return "memex" if Memex v2 is installed and reachable, else "local".
+
+    Result is cached per-process; call _clear_cache() to force re-detection (tests only).
+    """
     global _cached
     if _cached is not None:
         return _cached

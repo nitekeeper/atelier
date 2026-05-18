@@ -11,7 +11,11 @@
 --
 -- Source of truth: docs/specs/2026-05-16-atelier-memex-v2-retrofit-design.md §11.2.
 
--- Note: PRAGMA foreign_keys is connection-scoped; enforce in scripts/db.py.get_connection() instead.
+-- Note: PRAGMA foreign_keys is connection-scoped; enforce in
+-- scripts/migrate.py.get_connection() (and every other consumer that
+-- opens a SQLite handle directly — business-logic callers route through
+-- scripts/backend.py, which delegates pragma management to its
+-- mode-specific backend module).
 
 ------------------------------------------------------------------------
 -- workspaces -- one row per repository on disk
@@ -25,6 +29,13 @@ CREATE TABLE workspaces (
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+-- Nit-1 (TODO.md, Wave 0 Task 5 audit): `workspaces.identity` is
+-- `UNIQUE NOT NULL`, so SQLite already creates an auto-index named
+-- `sqlite_autoindex_workspaces_<n>` for the uniqueness constraint.
+-- The explicit `idx_workspaces_identity` below duplicates that index.
+-- Kept for now because consumers may drop it by name and removing it
+-- now would risk breaking those callers; revisit when the spec is
+-- amended (see TODO.md "Reviewer Nit-1").
 CREATE INDEX idx_workspaces_identity ON workspaces(identity);
 
 ------------------------------------------------------------------------

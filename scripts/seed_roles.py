@@ -1,6 +1,9 @@
 # scripts/seed_roles.py
-"""Idempotent seed: inserts 46 world-class expert roles and one default agent per role.
-Re-running is safe — skips roles and agents that already exist by name/id.
+"""Idempotent seed: inserts world-class expert roles and one default agent per role.
+
+The exact count is `len(ROLES)` (dynamic — bare integer would drift as the
+catalog evolves). Re-running is safe — `backend.find_or_create_role` and
+`backend.find_or_create_agent` skip existing entries by name/id.
 
 Usage:
     python scripts/seed_roles.py [db_path]
@@ -9,7 +12,8 @@ Usage:
 from __future__ import annotations
 import sys
 from datetime import datetime, timezone
-from scripts.db import get_connection
+
+from scripts import backend
 
 
 def _now() -> str:
@@ -1140,45 +1144,51 @@ Communication style: Interdisciplinary, mind-modeler. Brings human cognition res
 # ---------------------------------------------------------------------------
 
 def seed(db_path: str) -> tuple[int, int]:
-    """Insert roles and agents. Skips existing entries by name/id. Returns (roles_added, agents_added)."""
-    conn = get_connection(db_path)
-    now = _now()
+    """Insert roles and agents. Skips existing entries by name/id.
+
+    Returns `(roles_added, agents_added)` — counts only NEWLY created rows
+    on this call. Idempotent re-seed returns `(0, 0)`.
+
+    Routes through `scripts.backend` so the same code path works in
+    Memex-mode (writes to `~/.memex/agents.db`) and Local-mode (writes
+    to the workspace DB's `roles` / `agents` tables created by
+    `migrations/local-only/050_local_roles_agents.sql`).
+
+    `db_path` is accepted for CLI / test-fixture compatibility; the
+    active backend resolves its own store via `mode_detector.detect_mode()`.
+    Callers must still apply migrations against the path before seeding.
+
+    Novelty detection: a row is "added" iff its returned `created_at`
+    timestamp is at or after this seed() call's start time. Both backend
+    implementations stamp `created_at` once at INSERT and leave it
+    untouched on idempotent hits (per `backend_local.find_or_create_role`
+    / `backend_memex.find_or_create_role`). On a re-seed every row
+    returns its old `created_at`, which is strictly less than the new
+    `seed_started_at` — yielding the required `(0, 0)`.
+    """
+    _ = db_path  # backend resolves store from mode_detector, not the arg
+
+    seed_started_at = _now()
     roles_added = 0
     agents_added = 0
 
-    try:
-        for entry in ROLES:
-            # Check if role exists by name
-            existing_role = conn.execute(
-                "SELECT id FROM roles WHERE name = ?", (entry["role_name"],)
-            ).fetchone()
+    for entry in ROLES:
+        role = backend.find_or_create_role(
+            name=entry["role_name"], description=entry["role_desc"],
+        )
+        if role.get("created_at", "") >= seed_started_at:
+            roles_added += 1
 
-            if existing_role is None:
-                cur = conn.execute(
-                    "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (entry["role_name"], entry["role_desc"], now, now),
-                )
-                role_id = cur.lastrowid
-                roles_added += 1
-            else:
-                role_id = existing_role[0]
+        agent = backend.find_or_create_agent(
+            agent_id=entry["agent_id"],
+            name=entry["agent_name"],
+            role_id=role["id"],
+            profile=entry["agent_profile"],
+        )
+        if agent.get("created_at", "") >= seed_started_at:
+            agents_added += 1
 
-            # Check if agent exists by id
-            existing_agent = conn.execute(
-                "SELECT id FROM agents WHERE id = ?", (entry["agent_id"],)
-            ).fetchone()
-
-            if existing_agent is None:
-                conn.execute(
-                    "INSERT INTO agents (id, name, role_id, profile, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (entry["agent_id"], entry["agent_name"], role_id, entry["agent_profile"], now, now),
-                )
-                agents_added += 1
-
-        conn.commit()
-        return roles_added, agents_added
-    finally:
-        conn.close()
+    return roles_added, agents_added
 
 
 if __name__ == "__main__":

@@ -8,17 +8,18 @@ Every method is keyword-only to prevent positional-arg drift between
 the two backends as they evolve. Surface mirrors spec §4.3.
 """
 from __future__ import annotations
-from typing import Any
+from collections.abc import Sequence
+from typing import NoReturn
 
 
-def _not_implemented(name: str) -> None:
+def _not_implemented(name: str) -> NoReturn:
     raise NotImplementedError(
         f"backend.{name} has no implementation yet. "
         f"Wave 1 (Memex) or Wave 1' (Local) supplies the body."
     )
 
 
-# ── Document-shaped writes — Tier 2 ─────────────────────────────────────
+# --- Document-shaped writes — Tier 2 -----------------------------------
 
 def write_project(*, workspace_id: int, slug: str, name: str,
                   description: str, created_by: str) -> dict:
@@ -29,9 +30,9 @@ def write_project(*, workspace_id: int, slug: str, name: str,
 def write_document(*, workspace_id: int, project_id: int,
                    domain: str, subdomain: str | None,
                    title: str, body: str,
-                   metadata: dict, caller_agent_id: str,
+                   metadata: dict[str, object], caller_agent_id: str,
                    source_url: str | None = None,
-                   relations: list[dict] = ()) -> dict:
+                   relations: Sequence[dict] = ()) -> dict:
     """Persist a project document (design / plan / spec / etc.) and any
     declared relations. Returns the new row with index identifiers."""
     _not_implemented("write_document")
@@ -42,7 +43,7 @@ def write_task(*, workspace_id: int, project_id: int,
                subdomain: str | None, created_by: str,
                assigned_to: str | None = None,
                priority: int = 0, notes: str | None = None,
-               relations: list[dict] = ()) -> dict:
+               relations: Sequence[dict] = ()) -> dict:
     """Persist a task row and any declared relations. Returns the new row."""
     _not_implemented("write_task")
 
@@ -51,13 +52,13 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
                   title: str, date: str, summary: str,
                   decisions: str, subdomain: str | None,
                   created_by: str,
-                  relations: list[dict] = ()) -> dict:
+                  relations: Sequence[dict] = ()) -> dict:
     """Persist a meeting record (and its markdown payload) plus relations.
-    Returns the new row."""
+    `date` is ISO YYYY-MM-DD form. Returns the new row."""
     _not_implemented("write_meeting")
 
 
-# ── Operational state — Tier 1 ──────────────────────────────────────────
+# --- Operational state — Tier 1 ----------------------------------------
 
 def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
                    current_tasks: str | None = None,
@@ -65,8 +66,13 @@ def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
                    next_action: str | None = None,
                    status: str = "in-progress",
                    pm_notes: str | None = None) -> dict:
-    """Insert-or-update the active session row for `(project_id, agent_id)`.
-    Returns the resulting row."""
+    """Idempotent session upsert for `(project_id, agent_id)`.
+
+    Optional fields: `phase` (current dev phase), `current_tasks` (free-form
+    task summary), `accomplished` (what landed this session),
+    `next_action` (planned next step), `status` (default `'in-progress'`),
+    `pm_notes` (PM-visible commentary). Returns the resulting row.
+    """
     _not_implemented("upsert_session")
 
 
@@ -92,7 +98,7 @@ def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
     _not_implemented("record_phase_bypass")
 
 
-# ── Workspace + project resolution ──────────────────────────────────────
+# --- Workspace + project resolution ------------------------------------
 
 def find_or_create_workspace(*, identity: str, slug: str, name: str,
                              description: str | None = None) -> dict:
@@ -121,7 +127,7 @@ def list_projects(*, workspace_id: int) -> list[dict]:
     _not_implemented("list_projects")
 
 
-# ── Reads ───────────────────────────────────────────────────────────────
+# --- Reads -------------------------------------------------------------
 
 def find_documents(*, query: str, workspace_id: int | None = None,
                    project_id: int | None = None,
@@ -150,18 +156,18 @@ def get_document(*, doc_id: int) -> dict | None:
 def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:
     """Reverse-lookup for the idempotent-migration use case.
 
-    Plan 4's `scripts/migrate_to_memex.py` writes each migrated row with
-    `metadata["source_ref"] = "atelier:<table>:<local_id>"`. On a rerun
-    after a partial outage, the migrator calls this method first; if it
-    returns a non-None index_id, the row already landed and is skipped
-    (avoiding `librarian.DuplicateKeyError`).
+    Used by the idempotent migrator to skip rows that already landed
+    during a previous partial run. Each migrated row is written with
+    `metadata["source_ref"] = "atelier:<table>:<local_id>"`; on a rerun
+    the migrator calls this method first, and if it returns a non-None
+    index_id the row is skipped (avoiding `librarian.DuplicateKeyError`).
 
     Returns the Memex Index `index_id` (str) on hit; None on miss.
     """
     _not_implemented("lookup_index_id_by_source_ref")
 
 
-# ── Idempotent role / agent helpers ──────────────────────────────────────
+# --- Idempotent role / agent helpers -----------------------------------
 #
 # Used by `scripts/seed_roles.py` (Plan 3) and the Memex-mode bootstrap.
 # Both must be safe to call on a populated DB — return the existing row

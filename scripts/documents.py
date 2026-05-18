@@ -24,11 +24,25 @@ v1.0.13 `type` column is gone in v1.1.0 (replaced by `domain` +
   `subdomain`.
 """
 from __future__ import annotations
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts import backend
 from scripts.domain_vocabulary import TYPE_TO_DOMAIN
+
+
+_BARE_WORD = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _maybe_prefix(q: str) -> str:
+    """Rewrite a bare-word query to an FTS5 prefix query (``OAuth -> OAuth*``).
+
+    Anything containing whitespace, quotes, FTS5 operators, or boolean
+    keywords is passed through unchanged so callers can supply explicit
+    FTS5 expressions when literal token matching is desired.
+    """
+    return f"{q}*" if _BARE_WORD.match(q) else q
 
 
 def _now() -> str:
@@ -120,9 +134,9 @@ def _row_to_legacy_dict(row: dict) -> dict:
     domain = out.get("domain")
     subdomain = out.get("subdomain")
     if domain == "project_doc" and subdomain:
-        out.setdefault("type", subdomain)
+        out["type"] = subdomain
     elif domain:
-        out.setdefault("type", domain)
+        out["type"] = domain
     return out
 
 
@@ -160,7 +174,17 @@ def update_document(db_path: str, doc_id: int, **kwargs) -> dict | None:
     Unknown kwargs are silently dropped (matches the v1.0.13 contract).
     The legacy ``type`` kwarg is re-mapped through `TYPE_TO_DOMAIN` and
     written to `domain` / `subdomain`.
+
+    Passing both `type` and `subdomain` is ambiguous: the `type` mapping
+    determines a `subdomain` too, so an explicit caller-supplied
+    `subdomain` would silently lose to whichever wins. Raise
+    `ValueError` so the caller picks one or the other.
     """
+    if kwargs.get("type") is not None and kwargs.get("subdomain") is not None:
+        raise ValueError(
+            "update_document: pass either `type` or `subdomain`, not both — "
+            "`type` already determines a subdomain via TYPE_TO_DOMAIN."
+        )
     allowed_direct = {"title", "filename", "subdomain"}
     changes: dict[str, object] = {
         k: v for k, v in kwargs.items() if k in allowed_direct and v is not None
@@ -168,8 +192,7 @@ def update_document(db_path: str, doc_id: int, **kwargs) -> dict | None:
     if kwargs.get("type") is not None:
         domain, subdomain = _translate_type(kwargs["type"])
         changes["domain"] = domain
-        # Only overwrite subdomain if the caller didn't pass one directly.
-        changes.setdefault("subdomain", subdomain)
+        changes["subdomain"] = subdomain
     changes["updated_at"] = _now()
     from scripts import mode_detector
     if mode_detector.detect_mode() == "memex":
@@ -198,12 +221,8 @@ def delete_document(db_path: str, doc_id: int) -> bool:
     from scripts import mode_detector
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
-        # memex_stores.query() is SELECT-only and never commits — use the
-        # dedicated `delete()` primitive so the row is actually removed.
-        memex_stores.delete(name="atelier", table="project_documents",
-                            row_id=doc_id)
+        backend_memex._memex_core_delete(
+            store="atelier", table="project_documents", row_id=doc_id)
         return True
     from scripts import backend_local
     c = backend_local._conn()
@@ -268,12 +287,9 @@ def search_documents(db_path: str, query: str,
     "OAuth" still finds "OAuth2 Design". Callers that want literal token
     matching can pass an explicit FTS5 expression (anything containing
     whitespace, quotes, ``*``, or boolean operators is passed through
-    unchanged).
+    unchanged — see `_maybe_prefix`).
     """
-    q = query.strip() if query else ""
-    if q and not any(c in q for c in (" ", "\"", "*", ":", "(", ")")) \
-            and q.upper() not in ("AND", "OR", "NOT"):
-        q = f"{q}*"
+    q = _maybe_prefix(query.strip() if query else "")
     rows = backend.find_documents(query=q, project_id=project_id)
     return [_row_to_legacy_dict(r) for r in rows]
 

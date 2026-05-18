@@ -1313,6 +1313,22 @@ git rm scripts/db.py
 git rm tests/test_db.py
 ```
 
+- [ ] **Step 4b: Retire the obsolete `feedback_sqlite_broken.md` auto-memory**
+
+The memory at `~/.claude/projects/-home-nitekeeper-apps-atelier/memory/feedback_sqlite_broken.md` was flagged 2026-05-17 with the rule "do not use memex.db / scripts/db.py until user says it's fixed." With Step 3 above, the path it warns about no longer exists. Retire the memory:
+
+```bash
+rm ~/.claude/projects/-home-nitekeeper-apps-atelier/memory/feedback_sqlite_broken.md
+```
+
+Also remove the corresponding line from `~/.claude/projects/-home-nitekeeper-apps-atelier/memory/MEMORY.md` (the index). The line looks like:
+
+```
+- [SQLite connection broken](feedback_sqlite_broken.md) — do not use memex.db / scripts/db.py until user says it's fixed (flagged 2026-05-17)
+```
+
+Per the auto-memory protocol, removing both the file and its MEMORY.md entry is the canonical retire flow.
+
 - [ ] **Step 5: Run full test suite**
 
 ```

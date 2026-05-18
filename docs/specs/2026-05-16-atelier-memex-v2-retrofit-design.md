@@ -705,6 +705,20 @@ def resolve_scope() -> Scope:
     return resolve_scope()
 ```
 
+#### Linked-worktree identity
+
+When the user is in a linked git worktree, `find_git_root` returns the linked
+worktree path (not the main repo path) — matching §6.8's filesystem
+co-location rule. If `git_remote_url` returns a value, identity normalizes
+across the main repo and all of its worktrees (same remote URL → same
+workspace). If no remote is configured AND the user is in a linked worktree,
+then `identity = str(linked_worktree_path)` and the linked worktree appears
+as a *separate* workspace from its main repo. Plan 3 Task 1
+(`scripts/scope.py:resolve_scope`) will decide whether to normalize
+remoteless linked worktrees to their main repo. Until that decision lands,
+the remoteless-worktree case is accepted as-is: distinct paths produce
+distinct workspaces.
+
 ### 10.3 Session state
 
 `~/.atelier/state.json` holds per-workspace "current project" pointers, indexed by workspace id:

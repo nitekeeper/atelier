@@ -16,6 +16,7 @@ acceptable here because the facade explicitly defers these to v1.2.0
 """
 from __future__ import annotations
 import re
+import warnings
 from datetime import datetime, timezone
 
 from scripts import backend, mode_detector
@@ -41,6 +42,12 @@ def _resolve_workspace_id() -> int:
     so the write doesn't violate the FK. Local mode only — Memex mode
     folds workspace identity into the librarian_output, which the
     backend handles.
+
+    Note: this opens its own `_conn()` and `create_project` opens a
+    second one inside `backend.write_project`. The double-open is
+    intentional — WAL mode handles concurrent reads on the same DB
+    fine, and folding the resolution into the facade is a v1.2.0 task
+    (it requires the workspaces script to land first).
     """
     from scripts import backend_local
     c = backend_local._conn()
@@ -116,14 +123,26 @@ def get_project(db_path: str, project_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def update_project(db_path: str, project_id: int, **kwargs) -> dict | None:
+def update_project(db_path: str, project_id: int, *,
+                   agent_id: str = "system", **kwargs) -> dict | None:
     """Update mutable project columns. `phase` routes through
     `backend.transition_phase`; other columns go direct.
 
-    Allowed: `name`, `description`, `phase`. `repo` is silently dropped.
+    Allowed: `name`, `description`, `phase`. `agent_id` is passed
+    through to `backend.transition_phase` for audit attribution
+    (defaults to `"system"` for back-compat). Any other kwargs trigger
+    a `DeprecationWarning` so the v1.1.0 migration window stays
+    observable — pre-v1.1.0 callers updating `repo` will see a warning
+    instead of a silent no-op.
     """
     del db_path
     allowed = {"name", "description", "phase"}
+    extra = {k: v for k, v in kwargs.items() if k not in allowed}
+    if extra:
+        warnings.warn(
+            f"unrecognized kwargs dropped: {sorted(extra)}",
+            DeprecationWarning, stacklevel=2,
+        )
     updates = {k: v for k, v in kwargs.items() if k in allowed}
 
     # Phase changes go through the facade so the audit-trail kwargs
@@ -131,7 +150,7 @@ def update_project(db_path: str, project_id: int, **kwargs) -> dict | None:
     if "phase" in updates:
         backend.transition_phase(
             project_id=project_id, to_phase=updates.pop("phase"),
-            agent_id="system",
+            agent_id=agent_id,
         )
 
     if updates:
@@ -161,13 +180,11 @@ def delete_project(db_path: str, project_id: int) -> bool:
     """Hard-delete a project row. No facade method yet — Plan 3 keeps
     deletes as a direct backend operation."""
     del db_path
+    # Memex Index rows are not row-deletable through the public facade;
+    # soft-delete via metadata is the v1.2.0 path. For now, treat Memex
+    # delete as a no-op that matches the old contract (returns False so
+    # callers can tell it didn't happen).
     if mode_detector.detect_mode() == "memex":
-        from scripts import backend_memex
-        # Memex Index rows are not row-deletable through the public
-        # facade; soft-delete via metadata is the v1.2.0 path. For now,
-        # treat Memex delete as a no-op that matches the old contract
-        # (returns False so callers can tell it didn't happen).
-        del backend_memex
         return False
     from scripts import backend_local
     c = backend_local._conn()
@@ -219,12 +236,11 @@ def search_projects(db_path: str, query: str) -> list[dict]:
     folds this into `backend.list_projects(query=...)`.
     """
     del db_path
+    # Memex backend exposes `find_documents` for FTS but not a structured
+    # projects search; spec §10 / v1.2.0 folds this into
+    # `backend.list_projects(query=...)`. Until then, Memex mode returns
+    # an empty list rather than crash.
     if mode_detector.detect_mode() == "memex":
-        # Defer to find_documents over the project domain so the Memex
-        # path still returns *something* useful. Returns empty list if
-        # no project-domain documents match.
-        from scripts import backend_memex
-        del backend_memex
         return []
     from scripts import backend_local
     pattern = f"%{query}%"
@@ -246,7 +262,11 @@ if __name__ == "__main__":
     import json
     import argparse
 
-    db_path = ".ai/memex.db"
+    # v1.1.0 default — kept as a literal for signature parity with the
+    # other CLI entrypoints, but `db_path` is ignored by every function
+    # below (the backend resolves the active DB via `mode_detector` +
+    # workspace root).
+    db_path = ".ai/atelier.db"
     cmd = sys.argv[1]
 
     if cmd == "create":
@@ -269,11 +289,16 @@ if __name__ == "__main__":
         parser.add_argument("--name")
         parser.add_argument("--description")
         parser.add_argument("--phase")
+        parser.add_argument("--agent", default="system",
+                            help="audit attribution for phase transitions "
+                                 "(default: system)")
         args = parser.parse_args(sys.argv[2:])
         kwargs = {k: v for k, v in vars(args).items()
-                  if k != "project_id" and v is not None}
-        print(json.dumps(update_project(db_path, args.project_id, **kwargs),
-                         indent=2))
+                  if k not in ("project_id", "agent") and v is not None}
+        print(json.dumps(
+            update_project(db_path, args.project_id,
+                           agent_id=args.agent, **kwargs),
+            indent=2))
     elif cmd == "delete":
         print("Deleted" if delete_project(db_path, int(sys.argv[2]))
               else "Not found")

@@ -129,3 +129,16 @@ def test_search_projects(db_path, agent_id):
     results = search_projects(db_path, query="OAuth")
     assert len(results) == 1
     assert results[0]["name"] == "Auth Service"
+
+
+def test_slug_parity_with_backend_local():
+    """`projects._slug` must produce the same slug as `backend_local._slug`
+    for normal inputs — the docstring claims parity so a project created
+    via the script is reachable by the slug a direct backend caller
+    would generate. If this ever drifts the docstring lies.
+    """
+    from scripts import projects, backend_local
+    for name in ("Foo Bar", "Auth Service", "OAuth2 Implementation",
+                 "payment-api", "Multi  Spaces"):
+        assert projects._slug(name) == backend_local._slug(name), (
+            f"slug drift on {name!r}")

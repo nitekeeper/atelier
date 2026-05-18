@@ -349,53 +349,59 @@ class TestGetPhaseGuidance:
 # ---------------------------------------------------------------------------
 
 def _make_project_at_phase(db_path: str, phase: str) -> str:
-    """Set up a project at the given phase and write a session row. Returns project_id as string.
+    """Set up a project at the given phase and write a session row.
+    Returns project_id as a string.
 
-    Walks the valid transition graph to reach the target phase without
-    using force_phase (which does not exist). The DB must already have
-    migrations applied before calling this.
+    Plan 3 Task 5: session.py now routes through the backend facade
+    (``scripts/backend.py``) and so reads/writes through
+    ``backend_local._local_db()`` — the literal ``db_path`` is only used
+    for migration application. Projects.py + workflow.py have NOT yet been
+    rewired (Wave-2 Tasks 2 + 6) so we seed via direct SQL against the
+    v1.1.0 schema instead of routing through them.
     """
+    import sqlite3
     from scripts.migrate import apply_migrations, MIGRATIONS_DIR
-    from scripts.projects import create_project
-    from scripts.roles import create_role
-    from scripts.agents import create_agent
-    from scripts.session import write_session
-    from scripts import workflow
 
     apply_migrations(db_path, MIGRATIONS_DIR / "shared")
     apply_migrations(db_path, MIGRATIONS_DIR / "local-only")
-    role = create_role(db_path, "pm", "Project Manager")
-    create_agent(db_path, "test-agent", "Test Agent", role["id"], "")
-    project = create_project(
-        db_path, name="t", description="d", created_by="test-agent"
+
+    now = "2026-05-18T00:00:00Z"
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys=ON")
+    cur = conn.execute(
+        "INSERT INTO workspaces (slug, identity, name, description, "
+        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("test", "repo:test", "Test", None, now, now),
     )
-    pid = project["id"]
-
-    # Walk valid transitions to reach the target phase.
-    _TRANSITION_PATH = [
-        "design:open",
-        "design:approved",
-        "plan:open",
-        "plan:approved",
-        "tdd:red",
-        "tdd:green",
-        "tdd:clean",
-        "review:open",
-        "review:approved",
-        "security:open",
-        "security:approved",
-        "qa:open",
-        "qa:approved",
-    ]
-    if phase not in _TRANSITION_PATH:
-        raise ValueError(f"Phase '{phase}' not in known transition path")
-    target_idx = _TRANSITION_PATH.index(phase)
-    for next_phase in _TRANSITION_PATH[1:target_idx + 1]:
-        workflow.advance_phase(db_path, pid, next_phase)
-
-    # Write a session row so read-latest returns JSON (not the "No session found" message).
-    write_session(db_path, pid, "test-agent", phase, "in-progress")
-
+    ws_id = cur.lastrowid
+    cur = conn.execute(
+        "INSERT INTO roles (name, description, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("pm", "Project Manager", now, now),
+    )
+    role_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO agents (id, name, role_id, profile, "
+        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("test-agent", "Test Agent", role_id, "", now, now),
+    )
+    cur = conn.execute(
+        "INSERT INTO projects (workspace_id, slug, name, description, "
+        "phase, created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (ws_id, "t", "t", "d", phase, "test-agent", now, now),
+    )
+    pid = cur.lastrowid
+    # Seed an in-progress session row so the hook's `read-latest` sees JSON.
+    conn.execute(
+        "INSERT INTO sessions (workspace_id, project_id, agent_id, phase, "
+        "status, opened_at, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (ws_id, pid, "test-agent", phase, "in-progress",
+         now, now, now),
+    )
+    conn.commit()
+    conn.close()
     return str(pid)
 
 
@@ -404,20 +410,37 @@ def project_at_phase(tmp_path):
     """Factory fixture: returns a callable that sets up a project at a given phase.
 
     Returns (db_path_str, project_id_str, working_dir).
-    The working_dir contains .ai/memex.db and .ai/active_project as
-    session.py expects.
+    The working_dir contains ``.git`` (so ``backend_local._workspace_root``
+    resolves), ``.ai/atelier.db`` (the v2 Local-mode DB path), and
+    ``.ai/active_project`` so the hook can locate the project.
     """
     def _make(phase: str):
+        # Fabricate a git workspace so backend_local resolves DB location.
+        (tmp_path / ".git").mkdir(exist_ok=True)
         ai_dir = tmp_path / ".ai"
         ai_dir.mkdir(exist_ok=True)
-        db_path = str(ai_dir / "memex.db")
+        db_path = str(ai_dir / "atelier.db")
         pid = _make_project_at_phase(db_path, phase)
         (ai_dir / "active_project").write_text(pid, encoding="utf-8")
         return db_path, pid, tmp_path
     return _make
 
 
-_HOOK_ENV = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "PYTHONUTF8": "1"}
+def _hook_env(cwd) -> dict:
+    """Subprocess env that pins Local mode by isolating HOME.
+
+    ``mode_detector.detect_mode()`` returns ``"memex"`` whenever
+    ``~/.memex/config.json`` exists and is reachable. The dev host has
+    Memex installed, so we redirect HOME to the test workspace to keep the
+    subprocess in Local mode (spec §7) without needing an env-var override
+    in ``mode_detector`` itself.
+    """
+    return {
+        **os.environ,
+        "PYTHONPATH": str(REPO_ROOT),
+        "PYTHONUTF8": "1",
+        "HOME": str(cwd),
+    }
 
 
 @pytest.mark.parametrize("phase,expected_skill", [
@@ -434,7 +457,7 @@ def test_hook_appends_phase_guidance(project_at_phase, phase, expected_skill):
         [sys.executable, str(HOOK_PATH)],
         capture_output=True, text=True, encoding="utf-8",
         cwd=str(cwd),
-        env=_HOOK_ENV,
+        env=_hook_env(cwd),
     )
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert phase in result.stdout, f"phase '{phase}' not in output: {result.stdout!r}"
@@ -460,7 +483,7 @@ def test_hook_handles_missing_using_atelier_gracefully(project_at_phase, tmp_pat
         [sys.executable, str(target_hook)],
         capture_output=True, text=True, encoding="utf-8",
         cwd=str(cwd),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT), "PYTHONUTF8": "1"},
+        env=_hook_env(cwd),
     )
     assert result.returncode == 0
     assert "design:open" in result.stdout

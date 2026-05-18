@@ -1,10 +1,10 @@
 # tests/test_session.py
-import pytest
+import sqlite3
 from pathlib import Path
+
+import pytest
+
 from scripts.migrate import apply_migrations
-from scripts.roles import create_role
-from scripts.agents import create_agent
-from scripts.projects import create_project
 from scripts.session import (
     write_session, get_session, read_latest,
     list_sessions, update_session, prune_sessions,
@@ -13,20 +13,80 @@ from scripts.session import (
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
 
+def _seed_baseline(db: str) -> int:
+    """Seed workspace + role + agent so write_session has its FK targets.
+
+    Plan 3 Task 5 routes through the backend facade, which resolves the DB
+    from the workspace root (not the explicit ``db_path``). The other
+    Wave-2 rewrites (projects.py / roles.py / agents.py — Tasks 2, 7, 8)
+    will land their own facade routing; until then we seed via raw SQL
+    against the v1.1.0 schema (same pattern as
+    ``tests/test_backend_local_state.py``).
+    """
+    now = "2026-05-18T00:00:00Z"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA foreign_keys=ON")
+    cur = conn.execute(
+        "INSERT INTO workspaces (slug, identity, name, description, "
+        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("test", "repo:test", "Test", None, now, now),
+    )
+    ws_id = cur.lastrowid
+    cur = conn.execute(
+        "INSERT INTO roles (name, description, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("pm", "PM role", now, now),
+    )
+    role_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO agents (id, name, role_id, profile, "
+        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("pm-1", "PM Agent", role_id, "Expert PM", now, now),
+    )
+    conn.commit()
+    conn.close()
+    return ws_id
+
+
 @pytest.fixture
-def db_path(tmp_path):
-    path = str(tmp_path / "test.db")
-    apply_migrations(path, MIGRATIONS_DIR / "shared")
-    apply_migrations(path, MIGRATIONS_DIR / "local-only")
-    role = create_role(path, name="pm", description="PM role")
-    create_agent(path, id="pm-1", name="PM Agent", role_id=role["id"], profile="Expert PM")
-    return path
+def db_path(tmp_path, monkeypatch):
+    # backend_local resolves DB from the git workspace root, so we fabricate
+    # one inside tmp_path and chdir into it.
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / ".git").mkdir()
+    monkeypatch.chdir(root)
+    # Pin Local mode — the dev host has Memex installed, which would
+    # otherwise route the facade through backend_memex (spec §7).
+    from scripts import mode_detector
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
+    db = root / ".ai" / "atelier.db"
+    db.parent.mkdir()
+    apply_migrations(str(db), MIGRATIONS_DIR / "shared")
+    apply_migrations(str(db), MIGRATIONS_DIR / "local-only")
+    _seed_baseline(str(db))
+    return str(db)
 
 
 @pytest.fixture
 def project_id(db_path):
-    project = create_project(db_path, name="TestProject", description="Test", created_by="pm-1")
-    return project["id"]
+    now = "2026-05-18T00:00:00Z"
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys=ON")
+    ws_id = conn.execute(
+        "SELECT id FROM workspaces LIMIT 1"
+    ).fetchone()[0]
+    cur = conn.execute(
+        "INSERT INTO projects (workspace_id, slug, name, description, "
+        "phase, created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (ws_id, "test-project", "TestProject", "Test", "design:open",
+         "pm-1", now, now),
+    )
+    pid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return pid
 
 
 def test_write_session_creates_row(db_path, project_id):

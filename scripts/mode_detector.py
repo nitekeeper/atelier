@@ -2,6 +2,10 @@
 
 Result is cached for the lifetime of the Python process. Each Atelier
 command invocation re-imports and therefore re-detects.
+
+Note: _cached is process-global without locking. Concurrent threads may
+each run detection once before the cache populates; the result is the
+same so the wasted work is benign.
 """
 from __future__ import annotations
 import json
@@ -22,13 +26,15 @@ _MEMEX_API_FLOOR = (2, 2, 0)  # spec §6 prerequisite — caller-built librarian
 
 def _parse_version_tuple(s: str) -> tuple[int, int, int] | None:
     """Parse a "X.Y.Z" string into a (major, minor, patch) tuple of ints.
-    Returns None if the string isn't parseable (e.g., empty, malformed)."""
+    Returns None if the string isn't parseable (e.g., empty, malformed).
+    Trailing components are ignored; only major.minor.patch are read."""
     if not isinstance(s, str):
         return None
     parts = s.strip().split(".")
     if len(parts) < 3:
         return None
     try:
+        # Pre-releases (e.g. "2.5.0-rc1") are intentionally rejected; track if Memex starts shipping -rcN.
         return (int(parts[0]), int(parts[1]), int(parts[2]))
     except ValueError:
         return None
@@ -57,8 +63,12 @@ def _memex_plugin_reachable() -> bool:
         data = json.loads(config.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
+    if not isinstance(data, dict):
+        return False
     plugin_root = data.get("plugin_root")
-    if not isinstance(plugin_root, str):
+    if not isinstance(plugin_root, str) or not plugin_root.strip():
+        return False
+    if not Path(plugin_root).is_absolute():
         return False
     root = Path(plugin_root)
     if not root.is_dir():
@@ -70,6 +80,8 @@ def _memex_plugin_reachable() -> bool:
         manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
+    if not isinstance(manifest_data, dict):
+        return False
     if manifest_data.get("name") != "memex":
         return False
     version = _parse_version_tuple(manifest_data.get("version", ""))
@@ -79,6 +91,10 @@ def _memex_plugin_reachable() -> bool:
 
 
 def detect_mode() -> Mode:
+    """Return "memex" if Memex v2 is installed and reachable, else "local".
+
+    Result is cached per-process; call _clear_cache() to force re-detection (tests only).
+    """
     global _cached
     if _cached is not None:
         return _cached

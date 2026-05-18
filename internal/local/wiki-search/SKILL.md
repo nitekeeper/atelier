@@ -65,5 +65,6 @@ the original body, open `raw_path` from disk.
 - **No deletes feed the FTS index.** If you ever delete a row from
   `documents`, also `DELETE FROM documents_fts WHERE rowid = ?` (the
   insert trigger is one-directional in the v1.1.0 schema). See
-  `migrations/local-only/<file>.sql` — only the AFTER INSERT trigger is
-  shipped; AFTER DELETE / AFTER UPDATE are not.
+  `migrations/local-only/<future-fts-migration>.sql` (Plan 2 will ship
+  this — the file does not yet exist in v1.1.0). Only the AFTER INSERT
+  trigger is shipped; AFTER DELETE / AFTER UPDATE are not.

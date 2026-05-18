@@ -21,7 +21,7 @@ document. It performs three side-effects atomically per call:
 
 1. **Archive the raw body.** Computes a sha256 over `body`, slugifies
    `title`, and writes the bytes to
-   `<workspace>/.ai/raw/<2char-hash>/<canonical_key>.md`. Idempotent
+   `<workspace>/.ai/raw/<2char-hash>/<archive_basename>.md`. Idempotent
    on content hash — re-archiving identical bytes is a no-op. See
    `internal/local/wiki-archive/SKILL.md`.
 2. **Insert one row into `documents`.** Columns: `key`, `domain`,

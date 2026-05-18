@@ -573,3 +573,140 @@ def write_project(*, workspace_id: int, slug: str, name: str,
         metadata=metadata, relations=relations,
         caller_agent_id=created_by,
     )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Section 2: Operational state writes (Plan 2 Task 2)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Tier 1 writes — direct Memex Core CRUD, no Librarian dispatch. These
+# rows are operational state (sessions, phase bypasses, status flips)
+# that don't carry searchable narrative, so they bypass index.documents
+# entirely and live only in atelier.db.<table>.
+
+
+# ── Memex Core CRUD helpers ────────────────────────────────────────────────
+#
+# Route through memex.stores' public API rather than hand-built SQL so we
+# benefit from `safe_identifier` validation and don't reintroduce
+# SQL-injection risk. `insert` returns the inserted row; `update` returns
+# the updated row; `query` is SELECT-only (no commit).
+
+
+def _memex_core_insert(*, store: str, table: str, row: dict) -> dict:
+    _ensure_memex_importable()
+    from scripts import stores as memex_stores  # type: ignore
+    return memex_stores.insert(store, table, row)
+
+
+def _memex_core_update(*, store: str, table: str, row_id: int,
+                      changes: dict) -> dict:
+    _ensure_memex_importable()
+    from scripts import stores as memex_stores  # type: ignore
+    updated = memex_stores.update(store, table, row_id, changes)
+    return updated or {}
+
+
+def _memex_core_query(*, store: str, table: str,
+                     where: dict | None = None) -> list[dict]:
+    """Read-side helper. Builds a simple equality WHERE clause; column
+    names are pinned to safe identifiers by callers (no user-controlled
+    column names reach here)."""
+    _ensure_memex_importable()
+    from scripts import stores as memex_stores  # type: ignore
+    if where:
+        clauses = " AND ".join(f"{k} = ?" for k in where)
+        sql = f"SELECT * FROM {table} WHERE {clauses}"
+        return memex_stores.query(store, sql, tuple(where.values()))
+    return memex_stores.query(store, f"SELECT * FROM {table}", ())
+
+
+# ── Operational state writes ───────────────────────────────────────────────
+
+
+def upsert_session(*, project_id: int, agent_id: str,
+                   phase: str | None = None,
+                   current_tasks: str | None = None,
+                   accomplished: str | None = None,
+                   next_action: str | None = None,
+                   status: str = "in-progress",
+                   pm_notes: str | None = None) -> dict:
+    """Idempotent session row for (project_id, agent_id).
+
+    Looks up the open-status row for the (project_id, agent_id) pair; if
+    one exists we UPDATE only the supplied fields (None values are
+    skipped so callers can do incremental updates), otherwise we INSERT
+    a new row.
+
+    Per spec §11.1 the `sessions` table carries (project_id, agent_id,
+    phase, current_tasks, accomplished, next_action, status, pm_notes,
+    created_at, updated_at). created_at/updated_at are filled by the
+    table's DEFAULT clauses; we don't override.
+    """
+    existing = _memex_core_query(store="atelier", table="sessions",
+                                 where={"project_id": project_id,
+                                        "agent_id": agent_id,
+                                        "status": "in-progress"})
+    payload = {
+        "phase": phase, "current_tasks": current_tasks,
+        "accomplished": accomplished, "next_action": next_action,
+        "status": status, "pm_notes": pm_notes,
+    }
+    # Drop unset fields so callers can do incremental updates.
+    payload = {k: v for k, v in payload.items() if v is not None}
+    if existing:
+        return _memex_core_update(store="atelier", table="sessions",
+                                  row_id=existing[0]["id"],
+                                  changes=payload)
+    payload.update({"project_id": project_id, "agent_id": agent_id})
+    return _memex_core_insert(store="atelier", table="sessions",
+                              row=payload)
+
+
+def transition_phase(*, project_id: int, to_phase: str,
+                     agent_id: str,
+                     bypass_reason: str | None = None) -> dict:
+    """Advance projects.phase. Bypass logging is the CALLER's job — they
+    pre-record via `record_phase_bypass` BEFORE invoking
+    transition_phase, so a transient failure between the two writes
+    leaves a coherent audit trail (bypass-logged-but-not-transitioned
+    is a soft state we can detect; transitioned-but-not-logged would
+    silently drop the bypass record)."""
+    rows = _memex_core_query(store="atelier", table="projects",
+                             where={"id": project_id})
+    if not rows:
+        raise ValueError(f"project_id {project_id} not found")
+    return _memex_core_update(store="atelier", table="projects",
+                              row_id=project_id,
+                              changes={"phase": to_phase})
+
+
+def update_task_status(*, task_id: int, status: str,
+                       notes: str | None = None) -> dict:
+    """Set tasks.status; optionally append notes. Future enhancement
+    (Plan 3) will write status-derived timestamps (claimed_at,
+    completed_at) when those columns are reachable through the
+    backend's CRUD surface."""
+    changes: dict = {"status": status}
+    if notes:
+        changes["notes"] = notes
+    return _memex_core_update(store="atelier", table="tasks",
+                              row_id=task_id, changes=changes)
+
+
+def record_phase_bypass(*, project_id: int, from_phase: str,
+                        to_phase: str, reason: str,
+                        agent_id: str) -> dict:
+    """Log a soft-wall bypass to atelier.db.phase_bypasses. Surfaced by
+    internal/dev-handoff retros so the team can audit how often soft
+    walls were crossed and whether the policy needs tightening."""
+    return _memex_core_insert(
+        store="atelier", table="phase_bypasses",
+        row={
+            "project_id": project_id,
+            "from_phase": from_phase,
+            "to_phase": to_phase,
+            "reason": reason,
+            "agent_id": agent_id,
+        },
+    )

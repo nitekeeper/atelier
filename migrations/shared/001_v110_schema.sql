@@ -11,7 +11,7 @@
 --
 -- Source of truth: docs/specs/2026-05-16-atelier-memex-v2-retrofit-design.md §11.2.
 
-PRAGMA foreign_keys = ON;
+-- Note: PRAGMA foreign_keys is connection-scoped; enforce in scripts/db.py.get_connection() instead.
 
 ------------------------------------------------------------------------
 -- workspaces -- one row per repository on disk
@@ -83,7 +83,7 @@ CREATE TABLE tasks (
     description  TEXT,
     subdomain    TEXT,                           -- bug / feature / chore / spike / refactor (soft; §6.4)
     status       TEXT NOT NULL DEFAULT 'pending',
-    priority     INTEGER DEFAULT 0,
+    priority     INTEGER DEFAULT 0, -- spec §11.2; consumers must convert v1.0.13 'critical'|'high'|'medium'|'low' to ints — Plan 2 / 3 rewire.
     notes        TEXT,
     created_by   TEXT NOT NULL,
     assigned_to  TEXT,

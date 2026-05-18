@@ -24,6 +24,7 @@ Atelier is a shared workspace for a human developer and a multi-agent system wor
    ```
    - `PYTHONPATH` must point to the Atelier root — the scripts use `from scripts.db import ...` internally
    - Default db path: `.ai/memex.db`
+   - The CLI entrypoint applies BOTH `migrations/shared/` THEN `migrations/local-only/` (Local-mode default). Memex-mode bootstrap supplies only `shared/` via `memex:core:create-store`.
 3. Ensure `memex.db` is in WAL mode (the migration script handles this via `db.py`)
 4. Add Atelier working directories to `.git/info/exclude` (not `.gitignore`) so they stay out of the project repo:
    ```

@@ -30,7 +30,7 @@ $env:PYTHONPATH = 'C:\path\to\atelier'; python C:\path\to\atelier\scripts\migrat
 set PYTHONPATH=C:\path\to\atelier && python C:\path\to\atelier\scripts\migrate.py .ai\memex.db
 ```
 
-That's it. The migration is idempotent — safe to re-run.
+That's it. The migration is idempotent — safe to re-run. The CLI entrypoint applies BOTH `migrations/shared/` THEN `migrations/local-only/` (Local-mode default); Memex-mode bootstrap supplies only `shared/` via `memex:core:create-store`.
 
 > **Note:** `PYTHONPATH` must point to the Atelier root (where `scripts/` lives) whenever
 > running Atelier scripts directly. The skills handle this automatically; it only matters

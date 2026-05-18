@@ -239,7 +239,8 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
                   decisions: str, subdomain: str | None,
                   created_by: str,
                   source_ref: str | None = None,
-                  relations: Sequence[dict] = ()) -> dict:
+                  relations: Sequence[dict] = (),
+                  skip_md: bool = False) -> dict:
     """Persist a row into `meeting_minutes` and write the markdown file.
 
     The on-disk markdown at `.ai/meetings/<date>-<slug>.md` is the
@@ -254,14 +255,22 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
     `source_ref` is persisted to `meeting_minutes.source_ref` (added in
     `002_source_ref_and_fts.sql`) so Plan 4's idempotent migrator can find
     the local row id for a v1.0.13 source key.
+
+    `skip_md`: when True, the .md file write is suppressed. Callers in
+    `scripts/meetings.py:create_meeting` already render a richer markdown
+    (with optional Participants block) before invoking this backend; the
+    flag prevents this method's participants-blind renderer from
+    last-writer-wins clobbering that file. The DB row + `filename` value
+    are still produced exactly as in the normal path.
     """
     root = _workspace_root()
     filename = f"{date}-{_slug(title)}.md"
     meetings_dir = root / ".ai" / "meetings"
     meetings_dir.mkdir(parents=True, exist_ok=True)
-    body = (f"# {title}\n\nDate: {date}\n\n## Summary\n\n{summary}\n\n"
-            f"## Decisions\n\n{decisions}\n")
-    (meetings_dir / filename).write_text(body, encoding="utf-8")
+    if not skip_md:
+        body = (f"# {title}\n\nDate: {date}\n\n## Summary\n\n{summary}\n\n"
+                f"## Decisions\n\n{decisions}\n")
+        (meetings_dir / filename).write_text(body, encoding="utf-8")
     # Store filename as workspace-relative for parity with project_documents.
     rel_filename = str((meetings_dir / filename).relative_to(root))
     c = _conn()

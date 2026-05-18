@@ -332,11 +332,22 @@ def migrate_project(local_db: Path) -> dict:
 
     # Project documents — go through write_document
     for r in c.execute("SELECT * FROM project_documents"):
+        source_ref = f"atelier:project_documents:{r['id']}"
+        if backend_memex.lookup_index_id_by_source_ref(source_ref):
+            already_present["documents"] += 1
+            continue
+        # Migration replay uses a placeholder body — the historical file
+        # at <workspace>/<filename> may already have been edited or
+        # deleted since the original write. Indexing the placeholder is
+        # acceptable here (migration semantics differ from create_document;
+        # see spec §6.8 caveat). A future v1.1.1 pass could optionally
+        # re-read disk files when present.
         body = f"# {r['title']}\n\nFile: {r['filename']}\n\nType: {r['type']}"
         backend_memex.write_document(
             domain=r["type"], title=r["title"], body=body,
             metadata={"project_id": r["project_id"],
-                      "filename": r["filename"], "type": r["type"]},
+                      "filename": r["filename"], "type": r["type"],
+                      "source_ref": source_ref},
             caller_agent_id=r["created_by"],
         )
         migrated["documents"] += 1

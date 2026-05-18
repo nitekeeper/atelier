@@ -713,7 +713,7 @@ def search_meetings(db_path: str, query: str) -> list[dict]:
     return rows
 ```
 
-**Note on `_memex_core_execute`:** This helper does not exist in Plan 2's facade yet. Either (a) extend `backend_memex.py` to add a thin wrapper that opens an attached store connection and runs a raw SQL `execute()` with commit, OR (b) inline the equivalent (`memex_stores.delete(...)` for row-id deletes; for composite-key deletes the helper is required). Flag this dependency to the Plan 2 implementer if `_memex_core_execute` is not present; the alternative is to keep `meeting_participants` cleanup in a single `_memex_core_execute` shim added alongside this task.
+**Note on `_memex_core_execute`:** Provided by Plan 2 (`scripts/backend_memex.py` — composite-key DELETE primitive added during the cross-plan facade reconciliation pass). Intentionally NOT exposed through `scripts/backend.py` because it takes raw SQL; this module imports `backend_memex` directly behind a mode gate. The Local-mode equivalent uses `backend_local._conn()` per the symmetric call sites below.
 
 **Errors `create_meeting` may surface (Tier 2 write):**
 - `scripts.agents.librarian.DuplicateKeyError` — meeting key collision; surface to user as "A meeting with this key already exists. Most callers don't see this; if you do, the seq allocator may need investigation."
@@ -1295,7 +1295,7 @@ def get_connection(db_path: str) -> sqlite3.Connection:
 from scripts import roles  # the wave-2-rewritten module that mode-dispatches
 ```
 
-Then replace each direct INSERT with `roles.create_role(db_path, name=..., description=...)`. If the seed needs idempotency (re-running shouldn't error on existing roles), either (a) check existence via `roles.search_roles(db_path, name)` first, or (b) add a `backend.find_or_create_role(name, description)` helper to the facade and route through that. Recommend (b) — it's a one-line addition to `scripts/backend.py` that dispatches to `find_or_create_role` in `backend_local` / `backend_memex`. **Flag to Plan 2 implementer if `find_or_create_role` is not present in the facade.**
+Then replace each direct INSERT with `backend.find_or_create_role(name=..., description=...)` and `backend.find_or_create_agent(agent_id=..., name=..., role_id=..., profile=...)` — both helpers are provided by Plan 2's facade (added during the cross-plan reconciliation pass). They are idempotent by construction: existing rows are returned unchanged, missing rows are created. Re-running the seed is safe.
 
 When normalizing role names during seed, the canonical PM role name is "Product Manager" (per user decision). Legacy variants like "PM", "product-manager", "Project Manager" should be rewritten to "Product Manager" at seed time.
 

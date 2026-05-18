@@ -63,8 +63,10 @@ def get_role(db_path: str, role_id: int) -> dict | None:
 
 
 def update_role(db_path: str, role_id: int, **kwargs) -> dict | None:
-    """Update role fields. Allowed: `name`, `description`. `updated_at`
-    is always refreshed.
+    """Update role fields. Allowed: `name`, `description`. If at least
+    one allowed key is supplied, `updated_at` is refreshed alongside the
+    update; if no allowed keys are supplied, the call is a no-op and the
+    current row is returned without touching `updated_at`.
 
     In Memex mode, dispatches to `memex_stores.update` against the
     `agents` store (Memex's roles module does not expose a dedicated
@@ -72,11 +74,14 @@ def update_role(db_path: str, role_id: int, **kwargs) -> dict | None:
     via `backend_local._conn()` and updates in-place."""
     allowed = {"name", "description"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        # No allowed keys supplied — avoid touching `updated_at` for a
+        # payload-pollution-only update.
+        return get_role(db_path, role_id)
     updates["updated_at"] = _now()
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
+        memex_stores = backend_memex._memex_module("stores")
         memex_stores.update(name="agents", table="roles",
                             row_id=role_id, updates=updates)
         return get_role(db_path, role_id)
@@ -97,8 +102,7 @@ def update_role(db_path: str, role_id: int, **kwargs) -> dict | None:
 def delete_role(db_path: str, role_id: int) -> bool:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
+        memex_stores = backend_memex._memex_module("stores")
         memex_stores.delete(name="agents", table="roles", row_id=role_id)
         return True
     from scripts import backend_local
@@ -115,8 +119,7 @@ def delete_role(db_path: str, role_id: int) -> bool:
 def list_roles(db_path: str) -> list[dict]:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
+        memex_stores = backend_memex._memex_module("stores")
         return memex_stores.query(
             "agents", "SELECT * FROM roles ORDER BY name", ())
     from scripts import backend_local
@@ -136,8 +139,7 @@ def search_roles(db_path: str, query: str) -> list[dict]:
     pattern = f"%{query}%"
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
+        memex_stores = backend_memex._memex_module("stores")
         return memex_stores.query(
             "agents",
             "SELECT * FROM roles WHERE name LIKE ? OR description LIKE ? "
@@ -170,6 +172,9 @@ if __name__ == "__main__":
         result = get_role(db_path, int(sys.argv[2]))
         print(json.dumps(result, indent=2) if result else "Not found")
     elif cmd == "update":
+        # Note: `--description ""` (empty string) clears the description
+        # field (passed through to update_role as-is). Omit the flag
+        # entirely to leave the field untouched.
         import argparse
         parser = argparse.ArgumentParser()
         parser.add_argument("role_id", type=int)

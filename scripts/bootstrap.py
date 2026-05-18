@@ -82,7 +82,7 @@ def _require_memex_version(floor: tuple[int, int, int] = MIN_MEMEX_VERSION) -> s
 # ── Public entry ──────────────────────────────────────────────────────────────
 
 
-def run_bootstrap() -> dict:
+def run_bootstrap(*, force: bool = False) -> dict:
     """Run the appropriate bootstrap procedure for the current mode.
 
     Returns a dict describing the outcome:
@@ -100,12 +100,138 @@ def run_bootstrap() -> dict:
     `memex:run` so they can bootstrap Memex first. This avoids the
     pathological "half-installed Memex, atelier writes to local DB by
     surprise" footgun.
+
+    Memex-version floor (spec §6 prerequisite): if Memex is pinned
+    (`~/.memex/config.json` resolves to a memex plugin) but the manifest
+    version is below `MIN_MEMEX_VERSION`, we raise BEFORE consulting
+    `detect_mode`. `detect_mode` silently downgrades old memex to
+    "local"; that's the right behavior for runtime code paths but it
+    would let bootstrap silently write to the local DB on an old-memex
+    machine — exactly the surprise we want to avoid. Reading the version
+    directly here keeps bootstrap's "memex pinned but unusable" branch
+    explicit.
+
+    `force=True` bypasses the marker version-skip optimization (spec §5
+    step 1). Useful for migrations and tests that need to re-seed on
+    every invocation regardless of the recorded marker.
     """
     _refuse_half_installed_memex()
+    _enforce_memex_version_floor()
+    if not force and _check_marker_and_skip():
+        return _load_marker_result()
     mode = mode_detector.detect_mode()
     if mode == "memex":
         return _run_bootstrap_memex()
     return _run_bootstrap_local()
+
+
+def _enforce_memex_version_floor() -> None:
+    """If Memex appears pinned (config.json → memex plugin manifest),
+    require version >= MIN_MEMEX_VERSION before letting `detect_mode`
+    decide the mode.
+
+    `detect_mode` returns "local" on under-floor Memex (intentional
+    runtime fallback). Bootstrap must NOT silently fall through to local
+    mode in that case — the user has Memex installed and pinned, and a
+    quiet local-mode bootstrap would surprise them.
+
+    No-op when Memex isn't pinned at all (no config.json, stale pin,
+    non-memex plugin manifest) — those cases legitimately want local mode.
+    """
+    home = Path.home() / ".memex"
+    config = home / "config.json"
+    if not config.exists():
+        return
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    plugin_root_str = data.get("plugin_root")
+    if not plugin_root_str:
+        return
+    plugin_root = Path(plugin_root_str)
+    manifest = plugin_root / ".claude-plugin" / "plugin.json"
+    if not manifest.exists():
+        return
+    try:
+        manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    if manifest_data.get("name") != "memex":
+        return
+    # Memex is pinned. Enforce the floor (raises on under-floor).
+    _require_memex_version()
+
+
+def _check_marker_and_skip() -> bool:
+    """Return True if a marker exists at the mode-appropriate path AND
+    its recorded `version` matches the running Atelier version.
+
+    Reads the Memex-mode marker (`~/.memex/atelier.bootstrap.json`) when
+    Memex is pinned + bootstrapped; otherwise reads the local-mode marker
+    (`<workspace>/.ai/atelier.bootstrap.json`). On match, returns True so
+    `run_bootstrap` can short-circuit before doing any DB / seed work.
+
+    Returns False on:
+      - missing marker
+      - unreadable marker (JSON error / OSError)
+      - version mismatch
+      - workspace lookup failure (no git root → no local marker path)
+    """
+    marker_path = _marker_path_for_current_mode()
+    if marker_path is None or not marker_path.exists():
+        return False
+    try:
+        prior = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return prior.get("version") == _atelier_version()
+
+
+def _marker_path_for_current_mode() -> Path | None:
+    """Return the path to where the bootstrap marker would live for the
+    current mode (memex vs local), or None if neither path is resolvable.
+
+    Memex marker lives at `~/.memex/atelier.bootstrap.json` (when Memex
+    is the detected mode); local marker lives at
+    `<workspace_root>/.ai/atelier.bootstrap.json`. We pick based on
+    `mode_detector.detect_mode()` so the marker we read agrees with the
+    mode bootstrap would actually run.
+    """
+    mode = mode_detector.detect_mode()
+    if mode == "memex":
+        return Path.home() / ".memex" / "atelier.bootstrap.json"
+    # Local mode — resolve the workspace root via backend_local.
+    try:
+        from scripts import backend_local
+        return backend_local._workspace_root() / ".ai" / "atelier.bootstrap.json"
+    except Exception:
+        return None
+
+
+def _load_marker_result() -> dict:
+    """Reconstruct the result dict that the real bootstrap path would
+    have returned, by reading the existing marker.
+
+    `run_bootstrap`'s contract is to return a dict describing the run
+    outcome. When we skip via the marker, we still owe the caller that
+    shape — built from the marker contents plus a marker-path string.
+    """
+    marker_path = _marker_path_for_current_mode()
+    if marker_path is None or not marker_path.exists():
+        # Shouldn't reach here — _check_marker_and_skip just said True.
+        return {"mode": mode_detector.detect_mode(),
+                "version": _atelier_version(),
+                "marker": ""}
+    payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    result = {
+        "mode": payload.get("mode", mode_detector.detect_mode()),
+        "version": payload.get("version", _atelier_version()),
+        "marker": str(marker_path),
+    }
+    if "memex_version" in payload:
+        result["memex_version"] = payload["memex_version"]
+    return result
 
 
 def _refuse_half_installed_memex() -> None:
@@ -181,39 +307,49 @@ def _memex_scripts_context(plugin_root: Path):
     fresh Memex install and want to seed atelier stuff into it before
     anyone else touches it."
 
-    On exit, also drops every cached `_memex_*` submodule from
-    sys.modules — they were loaded against the shimmed `scripts` and
-    would otherwise hold stale references after the swap reverses.
+    On exit, drops every `scripts.*` cache entry that landed under the
+    shimmed package so a later Atelier `from scripts import X` re-imports
+    against Atelier's real package rather than the still-cached Memex
+    siblings. (We do NOT drop `_memex_*` modules — those are loaded by
+    `backend_memex._load_memex_module` via direct file-path import and
+    don't participate in the `scripts.*` swap. Bootstrap also doesn't
+    use `_load_memex_module` — it uses `import_module("scripts.X")`
+    after the swap — so there are no `_memex_*` entries to clean up
+    from this code path.)
     """
-    # Save state.
+    # Save state — snapshot must happen BEFORE the try so the restore
+    # in finally always has something coherent to roll back to.
     saved_scripts = sys.modules.get("scripts")
     saved_submods = {k: v for k, v in sys.modules.items()
                      if k.startswith("scripts.")}
     saved_syspath = list(sys.path)
-    # Build a fresh `scripts` package pointing at memex's scripts dir.
-    memex_scripts_init = plugin_root / "scripts" / "__init__.py"
-    spec = importlib.util.spec_from_file_location(
-        "scripts", memex_scripts_init,
-        submodule_search_locations=[str(plugin_root / "scripts")],
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError(
-            f"failed to build import spec for memex's scripts package at "
-            f"{memex_scripts_init}"
-        )
-    memex_scripts_pkg = importlib.util.module_from_spec(spec)
-    # Inject before exec_module so internal relative imports resolve to
-    # the half-loaded package (Python's documented loader contract).
-    sys.modules["scripts"] = memex_scripts_pkg
-    # Drop Atelier's already-loaded scripts.* submodules so memex's
-    # `from scripts import X` re-imports against the new package.
-    for k in list(sys.modules):
-        if k.startswith("scripts."):
-            del sys.modules[k]
-    # Put plugin_root at the head of sys.path so any `from scripts...`
-    # import in the loaded modules also resolves to memex.
-    sys.path.insert(0, str(plugin_root))
     try:
+        # Build a fresh `scripts` package pointing at memex's scripts
+        # dir. Any failure during spec-build / module-install / sys.path
+        # mutation past this point lands in the finally clause and
+        # restores the saved state.
+        memex_scripts_init = plugin_root / "scripts" / "__init__.py"
+        spec = importlib.util.spec_from_file_location(
+            "scripts", memex_scripts_init,
+            submodule_search_locations=[str(plugin_root / "scripts")],
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(
+                f"failed to build import spec for memex's scripts package at "
+                f"{memex_scripts_init}"
+            )
+        memex_scripts_pkg = importlib.util.module_from_spec(spec)
+        # Inject before exec_module so internal relative imports resolve
+        # to the half-loaded package (Python's documented loader contract).
+        sys.modules["scripts"] = memex_scripts_pkg
+        # Drop Atelier's already-loaded scripts.* submodules so memex's
+        # `from scripts import X` re-imports against the new package.
+        for k in list(sys.modules):
+            if k.startswith("scripts."):
+                del sys.modules[k]
+        # Put plugin_root at the head of sys.path so any `from scripts...`
+        # import in the loaded modules also resolves to memex.
+        sys.path.insert(0, str(plugin_root))
         spec.loader.exec_module(memex_scripts_pkg)
         yield memex_scripts_pkg
     finally:
@@ -466,7 +602,6 @@ def _write_marker(marker_root: Path, *, memex_version: str | None = None,
 
 
 if __name__ == "__main__":  # pragma: no cover
-    import sys
     result = run_bootstrap()
     print(json.dumps(result, indent=2))
     sys.exit(0)

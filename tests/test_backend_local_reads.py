@@ -134,7 +134,7 @@ def workspace(tmp_path, monkeypatch):
     return {"root": root, "db": str(db), **ids}
 
 
-# ── find_documents (filter-based reads, FTS5 deferred) ─────────────────────
+# ── find_documents (FTS5 + structured filters) ────────────────────────────
 
 def test_find_documents_filters_by_workspace_id(workspace):
     a = backend_local.find_documents(
@@ -182,6 +182,42 @@ def test_find_documents_limit_applied(workspace):
     assert len(r) == 2
     titles = [d["title"] for d in r]
     assert titles == ["Ops Design", "Billing Design"]
+
+
+def test_find_documents_fts5_matches_subdomain_only(workspace):
+    """Pin FTS5-distinctive behaviour: query a value that lives only in
+    `subdomain`, never in title or filename. A LIKE-on-title fallback
+    would miss this; FTS5 over (title, subdomain, filename) catches it.
+
+    The seed has `subdomain="ops"` on "Ops Design" (title also contains
+    'ops'), so use `billing` — title is "Billing Design" but the FTS5
+    column set includes subdomain so the match is non-trivial when paired
+    with a domain filter that excludes by title.
+
+    More direct: query a token that appears ONLY in subdomain — seed
+    `subdomain='auth'` on three docs whose titles include 'Auth' or
+    'ADR-001'. The ADR row has subdomain='auth' but title='ADR-001'.
+    A LIKE-on-title for 'auth' would NOT return ADR-001; FTS5 must.
+    """
+    r = backend_local.find_documents(query="auth")
+    titles = {d["title"] for d in r}
+    # ADR-001's title contains no "auth" — it must come back via the
+    # subdomain column. If find_documents regressed to LIKE-on-title,
+    # this row would be missing.
+    assert "ADR-001" in titles
+
+
+def test_find_documents_fts5_supports_prefix(workspace):
+    """FTS5 prefix syntax (`auth*`) is a column-9 capability LIKE
+    cannot replicate via a single param. Asserting it works pins the
+    backend to FTS5 (not LIKE).
+    """
+    r = backend_local.find_documents(query="auth*")
+    titles = {d["title"] for d in r}
+    # All three auth-subdomain rows must match the prefix.
+    assert "Auth Design" in titles
+    assert "Auth Redesign" in titles
+    assert "ADR-001" in titles
 
 
 # ── get_task ───────────────────────────────────────────────────────────────
@@ -248,6 +284,24 @@ def test_lookup_index_id_by_source_ref_finds_task(workspace):
     )
     found = backend_local.lookup_index_id_by_source_ref(
         source_ref="atelier:v1:tasks:7")
+    assert found == r["row_id"]
+
+
+def test_lookup_index_id_finds_meeting_by_source_ref(workspace):
+    """Source_ref lookup must also cover `meeting_minutes` — the third
+    table the function iterates. Without this test, a regression that
+    drops meeting_minutes from the loop would go unnoticed.
+    """
+    r = backend_local.write_meeting(
+        workspace_id=workspace["workspace_a"],
+        project_id=workspace["project_a1"],
+        title="Kickoff", date="2026-05-18",
+        summary="s", decisions="d", subdomain=None,
+        created_by="atelier-pm-1",
+        source_ref="atelier:meeting_minutes:7",
+    )
+    found = backend_local.lookup_index_id_by_source_ref(
+        source_ref="atelier:meeting_minutes:7")
     assert found == r["row_id"]
 
 

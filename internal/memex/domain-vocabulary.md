@@ -21,7 +21,7 @@ and are pinned by [`tests/test_domain_vocabulary.py`](../../tests/test_domain_vo
 | `SUBDOMAINS` (dict of lists) | **SOFT** — no `assert_valid_subdomain`; lookups accept any string | Atelier SQL only (`tasks.subdomain`, etc.) | Subdomain proliferation doesn't pollute Memex's namespace. A future audit can promote stable additions. |
 
 If you find yourself wanting an `assert_valid_subdomain` helper: don't.
-The soft-validation contract is deliberate per spec §6.4 line 396.
+The soft-validation contract is deliberate per spec §6.4 line 398.
 
 ## Current vocabulary (9 domains, spec §6.4)
 
@@ -113,3 +113,7 @@ constants Plan 2 will introduce:
   `DOMAINS`.
 - `project` and `adr` intentionally have no entry in `SUBDOMAINS` —
   they are atomic. Tests pin this.
+
+## Cross-plugin invariant (Plan 2)
+
+Plan 2's `_DOMAIN_TO_TABLE` map (in `scripts/backend_memex.py`) MUST share the same key-set invariant as `SUBDOMAINS`: every key is in `DOMAINS`. A sibling test `test_invariant_domain_to_table_keys_subset_of_domains` will land in Plan 2 to enforce this.

@@ -147,14 +147,10 @@ def _scripts_db_shim(plugin_root: Path):
     # any genuine dependency on them surfaces at the module's own import site.
     memex_paths: ModuleType | None = None
     memex_registry: ModuleType | None = None
-    try:
+    with contextlib.suppress(ImportError):
         memex_paths = _load_memex_module(plugin_root, "paths")
-    except ImportError:
-        pass
-    try:
+    with contextlib.suppress(ImportError):
         memex_registry = _load_memex_module(plugin_root, "registry")
-    except ImportError:
-        pass
 
     # Snapshot current sys.modules state for every key we are about to inject,
     # then inject.  Keys with None values (module failed to load) are skipped.

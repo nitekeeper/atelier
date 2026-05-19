@@ -1,10 +1,8 @@
 name: CI
 
-# Fast PR gate: run the full pytest suite on every PR and every push to main.
-# Lint (Ruff) and security (Bandit, pip-audit) are deliberately out of scope
-# for v1.1.0 — the codebase has not been linted in CI before and a strict
-# day-one gate would block PRs on incidental drift rather than catching new
-# bugs. Add a separate workflow once the team agrees on the lint baseline.
+# Fast PR gate: lint, security, and tests. All three must pass before a PR
+# can be merged (enforce via branch protection once the repo's lint baseline
+# settles — see pyproject.toml for the v1.1.0 minimal-ruleset starting point).
 
 on:
   pull_request:
@@ -15,6 +13,46 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint & format (Ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Ruff
+        run: pip install ruff
+
+      - name: Lint (ruff check)
+        run: ruff check .
+
+      - name: Format check (ruff format --check)
+        run: ruff format --check .
+
+  security:
+    name: Security (Bandit + pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Bandit and pip-audit
+        run: pip install bandit pip-audit
+
+      - name: Bandit (AST security scan)
+        run: bandit -c pyproject.toml -r scripts hooks internal
+
+      - name: pip-audit (dependency CVE scan)
+        run: pip-audit -r requirements.txt
+
   tests:
     name: Tests (pytest)
     runs-on: ubuntu-latest

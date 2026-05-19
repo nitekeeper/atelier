@@ -3,6 +3,7 @@
 Tests `backend_local.upsert_session` / `transition_phase` /
 `update_task_status` / `record_phase_bypass` against the v1.1.0 schema.
 """
+
 from __future__ import annotations
 import sqlite3
 from pathlib import Path
@@ -28,8 +29,7 @@ def _seed(db_path: str) -> dict:
     )
     ws_id = cur.lastrowid
     cur = conn.execute(
-        "INSERT INTO roles (name, description, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
         ("Product Manager", "PM", now, now),
     )
     role_id = cur.lastrowid
@@ -42,8 +42,7 @@ def _seed(db_path: str) -> dict:
         "INSERT INTO projects (workspace_id, slug, name, description, "
         "phase, created_by, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (ws_id, "auth", "Auth", "d", "design:open",
-         "atelier-pm-1", now, now),
+        (ws_id, "auth", "Auth", "d", "design:open", "atelier-pm-1", now, now),
     )
     proj_id = cur.lastrowid
     cur = conn.execute(
@@ -72,6 +71,7 @@ def workspace(tmp_path, monkeypatch):
 
 
 # ── upsert_session ─────────────────────────────────────────────────────────
+
 
 def test_upsert_session_inserts_when_new(workspace):
     s = backend_local.upsert_session(
@@ -105,6 +105,7 @@ def test_upsert_session_updates_when_existing(workspace):
 
 # ── transition_phase ───────────────────────────────────────────────────────
 
+
 def test_transition_phase_updates_projects_phase(workspace):
     """`transition_phase` updates `projects.phase` (NOT sessions.phase —
     the previous test name implied otherwise; corrected per C2 review).
@@ -133,11 +134,14 @@ def test_transition_phase_raises_when_project_missing(workspace):
     returning {} pre-fix."""
     with pytest.raises(ValueError):
         backend_local.transition_phase(
-            project_id=99999, to_phase="plan:open", agent_id="atelier-pm-1",
+            project_id=99999,
+            to_phase="plan:open",
+            agent_id="atelier-pm-1",
         )
 
 
 # ── update_task_status ─────────────────────────────────────────────────────
+
 
 def test_update_task_status_writes_status_and_timestamps(workspace):
     """Exercise both COALESCE branches: claimed_at on first 'in-progress'
@@ -145,7 +149,8 @@ def test_update_task_status_writes_status_and_timestamps(workspace):
     overwrite the timestamp (Imp-1 from QA)."""
     # First flip: pending → in-progress sets claimed_at.
     r1 = backend_local.update_task_status(
-        task_id=workspace["task_id"], status="in-progress",
+        task_id=workspace["task_id"],
+        status="in-progress",
     )
     assert r1["status"] == "in-progress"
     assert r1["claimed_at"] is not None
@@ -154,7 +159,8 @@ def test_update_task_status_writes_status_and_timestamps(workspace):
 
     # Second flip: in-progress → complete sets completed_at; claimed_at unchanged.
     r2 = backend_local.update_task_status(
-        task_id=workspace["task_id"], status="complete",
+        task_id=workspace["task_id"],
+        status="complete",
     )
     assert r2["status"] == "complete"
     assert r2["completed_at"] is not None
@@ -163,7 +169,8 @@ def test_update_task_status_writes_status_and_timestamps(workspace):
 
     # Idempotent re-complete: completed_at must NOT change.
     r3 = backend_local.update_task_status(
-        task_id=workspace["task_id"], status="complete",
+        task_id=workspace["task_id"],
+        status="complete",
     )
     assert r3["completed_at"] == first_completed_at
 
@@ -175,6 +182,7 @@ def test_update_task_status_raises_when_task_missing(workspace):
 
 
 # ── record_phase_bypass ────────────────────────────────────────────────────
+
 
 def test_record_phase_bypass_inserts_row(workspace):
     r = backend_local.record_phase_bypass(
@@ -188,9 +196,7 @@ def test_record_phase_bypass_inserts_row(workspace):
     assert r["reason"] == "override"
     conn = sqlite3.connect(workspace["db"])
     conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT * FROM phase_bypasses WHERE id = ?", (r["id"],)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM phase_bypasses WHERE id = ?", (r["id"],)).fetchone()
     conn.close()
     assert row is not None
     assert row["from_phase"] == "design:open"

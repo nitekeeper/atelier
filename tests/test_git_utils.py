@@ -1,4 +1,5 @@
 """Tests for scripts/git_utils.py."""
+
 import subprocess
 
 import pytest

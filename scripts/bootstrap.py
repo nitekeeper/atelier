@@ -23,6 +23,7 @@ Spec references:
   - §6.5 (role / agent seeding)
   - §11.2 (v1.1.0 schema)
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -58,6 +59,7 @@ def _require_memex_version(floor: tuple[int, int, int] = MIN_MEMEX_VERSION) -> s
     on `2.10.0 < 2.2.0` (Plan 1 F1 / F2 contract).
     """
     from scripts import backend_memex
+
     plugin_root = backend_memex._memex_plugin_root()
     manifest = plugin_root / ".claude-plugin" / "plugin.json"
     data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -204,6 +206,7 @@ def _marker_path_for_current_mode() -> Path | None:
     # Local mode — resolve the workspace root via backend_local.
     try:
         from scripts import backend_local
+
         return backend_local._workspace_root() / ".ai" / "atelier.bootstrap.json"
     except Exception:
         return None
@@ -220,9 +223,7 @@ def _load_marker_result() -> dict:
     marker_path = _marker_path_for_current_mode()
     if marker_path is None or not marker_path.exists():
         # Shouldn't reach here — _check_marker_and_skip just said True.
-        return {"mode": mode_detector.detect_mode(),
-                "version": _atelier_version(),
-                "marker": ""}
+        return {"mode": mode_detector.detect_mode(), "version": _atelier_version(), "marker": ""}
     payload = json.loads(marker_path.read_text(encoding="utf-8"))
     result = {
         "mode": payload.get("mode", mode_detector.detect_mode()),
@@ -320,8 +321,7 @@ def _memex_scripts_context(plugin_root: Path):
     # Save state — snapshot must happen BEFORE the try so the restore
     # in finally always has something coherent to roll back to.
     saved_scripts = sys.modules.get("scripts")
-    saved_submods = {k: v for k, v in sys.modules.items()
-                     if k.startswith("scripts.")}
+    saved_submods = {k: v for k, v in sys.modules.items() if k.startswith("scripts.")}
     saved_syspath = list(sys.path)
     try:
         # Build a fresh `scripts` package pointing at memex's scripts
@@ -330,13 +330,13 @@ def _memex_scripts_context(plugin_root: Path):
         # restores the saved state.
         memex_scripts_init = plugin_root / "scripts" / "__init__.py"
         spec = importlib.util.spec_from_file_location(
-            "scripts", memex_scripts_init,
+            "scripts",
+            memex_scripts_init,
             submodule_search_locations=[str(plugin_root / "scripts")],
         )
         if spec is None or spec.loader is None:
             raise ImportError(
-                f"failed to build import spec for memex's scripts package at "
-                f"{memex_scripts_init}"
+                f"failed to build import spec for memex's scripts package at {memex_scripts_init}"
             )
         memex_scripts_pkg = importlib.util.module_from_spec(spec)
         # Inject before exec_module so internal relative imports resolve
@@ -377,6 +377,7 @@ def _run_bootstrap_memex() -> dict:
          the user).
     """
     from scripts import backend_memex
+
     plugin_root = backend_memex._memex_plugin_root()
     memex_version = _require_memex_version()
 
@@ -422,9 +423,7 @@ def _run_bootstrap_memex() -> dict:
             memex_stores.create_store(
                 name="atelier",
                 path=atelier_db_path,
-                migrations_dir=str(
-                    atelier_plugin_root / "migrations" / "shared"
-                ),
+                migrations_dir=str(atelier_plugin_root / "migrations" / "shared"),
                 # schema_version defaults to "v1"; create_store applies
                 # migrations idempotently through its own `migrations`
                 # table.
@@ -455,16 +454,13 @@ def _seed_roles_memex(memex_roles, agents_db: str) -> dict[str, int]:
             role_map[r["name"]] = existing[r["name"]]
             continue
         try:
-            new = memex_roles.create_role(
-                agents_db, name=r["name"], description=r["description"]
-            )
+            new = memex_roles.create_role(agents_db, name=r["name"], description=r["description"])
             role_map[r["name"]] = new["id"]
             existing[r["name"]] = new["id"]
         except sqlite3.IntegrityError:
             # Race: another writer seeded the role between list + create.
             # Re-read and continue. Never blind — verify it's truly there.
-            refreshed = {x["name"]: x["id"]
-                         for x in memex_roles.list_roles(agents_db)}
+            refreshed = {x["name"]: x["id"] for x in memex_roles.list_roles(agents_db)}
             if r["name"] in refreshed:
                 role_map[r["name"]] = refreshed[r["name"]]
                 existing[r["name"]] = refreshed[r["name"]]
@@ -473,8 +469,7 @@ def _seed_roles_memex(memex_roles, agents_db: str) -> dict[str, int]:
     return role_map
 
 
-def _seed_agents_memex(memex_agents, agents_db: str,
-                       role_map: dict[str, int]) -> None:
+def _seed_agents_memex(memex_agents, agents_db: str, role_map: dict[str, int]) -> None:
     """Pre-check + create agents into Memex's `~/.memex/agents.db`.
 
     Skips entries whose `role_name` wasn't in the role_map — a malformed
@@ -493,8 +488,11 @@ def _seed_agents_memex(memex_agents, agents_db: str,
             continue
         try:
             memex_agents.create_agent(
-                agents_db, a["agent_id"], a["name"],
-                role_map[a["role_name"]], a["profile"],
+                agents_db,
+                a["agent_id"],
+                a["name"],
+                role_map[a["role_name"]],
+                a["profile"],
             )
         except sqlite3.IntegrityError:
             # Race: agent landed between get + create. Confirm presence
@@ -522,6 +520,7 @@ def _run_bootstrap_local() -> dict:
     the version check is intentional (spec §7).
     """
     from scripts import backend_local
+
     # Reuse backend_local's workspace_root resolver — it's the canonical
     # CWD → git_root resolver and avoids importing scripts.workspace
     # (which has tmux side-effects).
@@ -533,6 +532,7 @@ def _run_bootstrap_local() -> dict:
     # Apply migrations. The migrate runner skips files already in the
     # `migrations` table, so re-running on a populated DB is a no-op.
     from scripts.migrate import apply_migrations
+
     migrations_root = Path(__file__).resolve().parents[1] / "migrations"
     apply_migrations(str(db_path), migrations_root / "shared")
     apply_migrations(str(db_path), migrations_root / "local-only")
@@ -541,17 +541,17 @@ def _run_bootstrap_local() -> dict:
     # pre-checks before insert, so this is naturally idempotent.
     role_map: dict[str, int] = {}
     for r in seed_data.load_role_seed():
-        row = backend_local.find_or_create_role(
-            name=r["name"], description=r["description"]
-        )
+        row = backend_local.find_or_create_role(name=r["name"], description=r["description"])
         role_map[r["name"]] = row["id"]
 
     for a in seed_data.load_agent_seed():
         if a["role_name"] not in role_map:
             continue
         backend_local.find_or_create_agent(
-            agent_id=a["agent_id"], name=a["name"],
-            role_id=role_map[a["role_name"]], profile=a["profile"],
+            agent_id=a["agent_id"],
+            name=a["name"],
+            role_id=role_map[a["role_name"]],
+            profile=a["profile"],
         )
 
     marker = _write_marker(ai_dir, mode="local")
@@ -571,13 +571,15 @@ def _atelier_version() -> str:
     when the package isn't pip-installed (the common case in worktrees)."""
     try:
         import importlib.metadata as md
+
         return md.version("atelier")
     except Exception:
         return "1.1.0"
 
 
-def _write_marker(marker_root: Path, *, memex_version: str | None = None,
-                  mode: str = "memex") -> Path:
+def _write_marker(
+    marker_root: Path, *, memex_version: str | None = None, mode: str = "memex"
+) -> Path:
     """Write the bootstrap marker to `<marker_root>/atelier.bootstrap.json`.
 
     The marker is consulted by every Atelier command on startup — when it
@@ -590,8 +592,7 @@ def _write_marker(marker_root: Path, *, memex_version: str | None = None,
     payload: dict = {
         "mode": mode,
         "version": _atelier_version(),
-        "bootstrapped_at":
-            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "bootstrapped_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     if memex_version is not None:
         payload["memex_version"] = memex_version

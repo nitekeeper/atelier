@@ -23,6 +23,7 @@ v1.0.13 `type` column is gone in v1.1.0 (replaced by `domain` +
   re-maps it through TYPE_TO_DOMAIN so updates land on `domain` /
   `subdomain`.
 """
+
 from __future__ import annotations
 import re
 from datetime import datetime, timezone
@@ -58,6 +59,7 @@ def _workspace_root() -> Path:
     we don't need workspace tmux features.
     """
     from scripts.workspace import workspace_root
+
     return workspace_root()
 
 
@@ -71,9 +73,15 @@ def _translate_type(type_str: str) -> tuple[str, str | None]:
     return TYPE_TO_DOMAIN.get(type_str, ("project_doc", type_str))
 
 
-def create_document(db_path: str, project_id: int, type: str,
-                    title: str, filename: str, created_by: str,
-                    workspace_id: int | None = None) -> dict:
+def create_document(
+    db_path: str,
+    project_id: int,
+    type: str,
+    title: str,
+    filename: str,
+    created_by: str,
+    workspace_id: int | None = None,
+) -> dict:
     """Register a project document.
 
     Per spec §6.8, the indexed body MUST be the actual file content —
@@ -147,13 +155,16 @@ def get_document(db_path: str, doc_id: int) -> dict | None:
     one layer down per mode and read the row directly.
     """
     from scripts import mode_detector
+
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         rows = backend_memex._memex_core_query(
-            store="atelier", table="project_documents",
-            where={"id": doc_id})
+            store="atelier", table="project_documents", where={"id": doc_id}
+        )
     else:
         from scripts import backend_local
+
         c = backend_local._conn()
         try:
             r = c.execute(
@@ -195,14 +206,19 @@ def update_document(db_path: str, doc_id: int, **kwargs) -> dict | None:
         changes["subdomain"] = subdomain
     changes["updated_at"] = _now()
     from scripts import mode_detector
+
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         backend_memex._memex_core_update(
-            store="atelier", table="project_documents",
-            row_id=doc_id, changes=changes,
+            store="atelier",
+            table="project_documents",
+            row_id=doc_id,
+            changes=changes,
         )
     else:
         from scripts import backend_local
+
         c = backend_local._conn()
         try:
             sets = ", ".join(f"{k} = ?" for k in changes)
@@ -219,45 +235,50 @@ def update_document(db_path: str, doc_id: int, **kwargs) -> dict | None:
 def delete_document(db_path: str, doc_id: int) -> bool:
     """Delete the document row. Returns True iff a row was removed."""
     from scripts import mode_detector
+
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        backend_memex._memex_core_delete(
-            store="atelier", table="project_documents", row_id=doc_id)
+
+        backend_memex._memex_core_delete(store="atelier", table="project_documents", row_id=doc_id)
         return True
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
-        cur = c.execute(
-            "DELETE FROM project_documents WHERE id = ?", (doc_id,)
-        )
+        cur = c.execute("DELETE FROM project_documents WHERE id = ?", (doc_id,))
         c.commit()
         return cur.rowcount > 0
     finally:
         c.close()
 
 
-def list_documents(db_path: str, project_id: int | None = None,
-                   type: str | None = None) -> list[dict]:
+def list_documents(
+    db_path: str, project_id: int | None = None, type: str | None = None
+) -> list[dict]:
     """List project_documents rows, optionally filtered by `project_id`
     and/or legacy `type` (translated to `domain`).
 
     Sort order matches v1.0.13 (`ORDER BY title`).
     """
     from scripts import mode_detector
+
     domain_filter: str | None = None
     if type is not None:
         domain_filter, _ = _translate_type(type)
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         where: dict[str, object] = {}
         if project_id is not None:
             where["project_id"] = project_id
         if domain_filter is not None:
             where["domain"] = domain_filter
         rows = backend_memex._memex_core_query(
-            store="atelier", table="project_documents", where=where)
+            store="atelier", table="project_documents", where=where
+        )
     else:
         from scripts import backend_local
+
         conds: list[str] = []
         params: list[object] = []
         if project_id is not None:
@@ -277,8 +298,7 @@ def list_documents(db_path: str, project_id: int | None = None,
     return [_row_to_legacy_dict(r) for r in rows]
 
 
-def search_documents(db_path: str, query: str,
-                     project_id: int | None = None) -> list[dict]:
+def search_documents(db_path: str, query: str, project_id: int | None = None) -> list[dict]:
     """Full-text search over project_documents (FTS5 in Local mode,
     Memex Index search in Memex mode). Returns the v1.0.13-shaped dicts.
 
@@ -303,9 +323,19 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
 
     if cmd == "create":
-        print(json.dumps(create_document(db_path, project_id=int(sys.argv[2]),
-                                          type=sys.argv[3], title=sys.argv[4],
-                                          filename=sys.argv[5], created_by=sys.argv[6]), indent=2))
+        print(
+            json.dumps(
+                create_document(
+                    db_path,
+                    project_id=int(sys.argv[2]),
+                    type=sys.argv[3],
+                    title=sys.argv[4],
+                    filename=sys.argv[5],
+                    created_by=sys.argv[6],
+                ),
+                indent=2,
+            )
+        )
     elif cmd == "get":
         result = get_document(db_path, int(sys.argv[2]))
         print(json.dumps(result, indent=2) if result else "Not found")
@@ -325,10 +355,16 @@ if __name__ == "__main__":
         parser.add_argument("--project_id", type=int)
         parser.add_argument("--type")
         args = parser.parse_args(sys.argv[2:])
-        print(json.dumps(list_documents(db_path, project_id=args.project_id, type=args.type), indent=2))
+        print(
+            json.dumps(
+                list_documents(db_path, project_id=args.project_id, type=args.type), indent=2
+            )
+        )
     elif cmd == "search":
         parser = argparse.ArgumentParser()
         parser.add_argument("query")
         parser.add_argument("--project_id", type=int)
         args = parser.parse_args(sys.argv[2:])
-        print(json.dumps(search_documents(db_path, args.query, project_id=args.project_id), indent=2))
+        print(
+            json.dumps(search_documents(db_path, args.query, project_id=args.project_id), indent=2)
+        )

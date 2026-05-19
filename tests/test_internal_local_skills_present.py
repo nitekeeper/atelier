@@ -6,6 +6,7 @@ local-mode agents will grep for. These markers double as a guarantee that
 the recipe still names the canonical `backend_local.*` entry points and
 the `.ai/raw/` archive location (per spec §4/§7/§10.4 — NOT `.atelier/raw/`).
 """
+
 from pathlib import Path
 
 INTERNAL_LOCAL = Path(__file__).parent.parent / "internal" / "local"

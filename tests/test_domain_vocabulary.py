@@ -6,6 +6,7 @@ SUBDOMAINS is soft-validated (documentation only; lookups accept any
 string). TYPE_TO_DOMAIN translates v1.0.13's free-form
 `project_documents.type` column to v1.1.0's `(domain, subdomain)` pair.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -66,9 +67,7 @@ def test_canonical_domains_present(domain):
 def test_domains_is_frozenset_of_nine():
     """Frozenset enforces immutability; nine is the spec count."""
     assert isinstance(dv.DOMAINS, frozenset)
-    assert len(dv.DOMAINS) == 9, (
-        f"expected 9 domains per spec §6.4, got {len(dv.DOMAINS)}"
-    )
+    assert len(dv.DOMAINS) == 9, f"expected 9 domains per spec §6.4, got {len(dv.DOMAINS)}"
 
 
 def test_domains_are_strings():
@@ -95,9 +94,7 @@ def test_assert_valid_error_lists_valid_domains():
         dv.assert_valid("not_a_real_domain")
     msg = str(excinfo.value)
     for d in dv.DOMAINS:
-        assert repr(d) in msg, (
-            f"error message missing domain {d!r}: {msg}"
-        )
+        assert repr(d) in msg, f"error message missing domain {d!r}: {msg}"
 
 
 def test_assert_valid_rejects_empty_string():
@@ -140,9 +137,7 @@ def test_subdomains_is_dict_keyed_by_domain():
     assert hasattr(dv.SUBDOMAINS, "__getitem__")
     assert hasattr(dv.SUBDOMAINS, "items")
     for d in dv.SUBDOMAINS:
-        assert d in dv.DOMAINS, (
-            f"SUBDOMAINS references unknown domain {d!r}"
-        )
+        assert d in dv.DOMAINS, f"SUBDOMAINS references unknown domain {d!r}"
 
 
 def test_subdomains_is_immutable():
@@ -161,9 +156,7 @@ def test_subdomains_values_are_tuples():
 def test_subdomains_values_are_sorted():
     """Stylistic invariant: each subdomain tuple is sorted alphabetically."""
     for domain, subs in dv.SUBDOMAINS.items():
-        assert list(subs) == sorted(subs), (
-            f"{domain} subdomains not sorted: {subs}"
-        )
+        assert list(subs) == sorted(subs), f"{domain} subdomains not sorted: {subs}"
 
 
 def test_subdomains_cover_documented_domains():
@@ -231,9 +224,7 @@ def test_type_to_domain_returns_domain_subdomain_pairs():
             f"TYPE_TO_DOMAIN[{v1_type!r}] is not a 2-tuple"
         )
         domain, subdomain = mapped
-        assert domain in dv.DOMAINS, (
-            f"TYPE_TO_DOMAIN[{v1_type!r}] domain {domain!r} not in DOMAINS"
-        )
+        assert domain in dv.DOMAINS, f"TYPE_TO_DOMAIN[{v1_type!r}] domain {domain!r} not in DOMAINS"
         assert subdomain is None or isinstance(subdomain, str)
 
 
@@ -246,9 +237,7 @@ def test_type_to_domain_covers_known_v1_types(v1_type):
     """The mapping must handle v1.0.13's stable type values. Unknown
     values fall back to ('project_doc', <type>) at the call site, per
     spec §11.4."""
-    assert v1_type in dv.TYPE_TO_DOMAIN, (
-        f"v1 type {v1_type!r} missing from TYPE_TO_DOMAIN"
-    )
+    assert v1_type in dv.TYPE_TO_DOMAIN, f"v1 type {v1_type!r} missing from TYPE_TO_DOMAIN"
 
 
 @pytest.mark.parametrize(
@@ -312,21 +301,14 @@ def test_invariant_all_type_to_domain_first_elements_in_domains():
     """Every value in TYPE_TO_DOMAIN has its (domain, ...) first element
     in DOMAINS — guards against typo drift."""
     for v1_type, (domain, _sub) in dv.TYPE_TO_DOMAIN.items():
-        assert domain in dv.DOMAINS, (
-            f"TYPE_TO_DOMAIN[{v1_type!r}] domain {domain!r} not in DOMAINS"
-        )
+        assert domain in dv.DOMAINS, f"TYPE_TO_DOMAIN[{v1_type!r}] domain {domain!r} not in DOMAINS"
 
 
 # ── Doc ─────────────────────────────────────────────────────────────────
 
 
 def test_vocabulary_doc_exists():
-    f = (
-        Path(__file__).parent.parent
-        / "internal"
-        / "memex"
-        / "domain-vocabulary.md"
-    )
+    f = Path(__file__).parent.parent / "internal" / "memex" / "domain-vocabulary.md"
     assert f.exists(), f"missing {f}"
     text = f.read_text(encoding="utf-8")
     for d in (
@@ -347,12 +329,7 @@ def test_vocabulary_doc_mentions_addition_policy():
     """Engineer-facing doc must surface the hard-vs-soft validation
     policy and the addition workflow (spec amendment for domains,
     PR-comment for subdomains)."""
-    f = (
-        Path(__file__).parent.parent
-        / "internal"
-        / "memex"
-        / "domain-vocabulary.md"
-    )
+    f = Path(__file__).parent.parent / "internal" / "memex" / "domain-vocabulary.md"
     text = f.read_text(encoding="utf-8").lower()
     assert "addition policy" in text or "adding a domain" in text
     assert "subdomain" in text

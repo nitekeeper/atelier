@@ -44,7 +44,7 @@ def apply_migrations(db_path: str, migrations_dir: Path) -> None:
         conn.executescript(sql)
         conn.execute(
             "INSERT INTO migrations (filename, applied_at) VALUES (?, ?)",
-            (migration_file.name, datetime.now(timezone.utc).isoformat())
+            (migration_file.name, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
 
@@ -53,6 +53,7 @@ def apply_migrations(db_path: str, migrations_dir: Path) -> None:
 
 if __name__ == "__main__":
     import sys
+
     db_path = sys.argv[1] if len(sys.argv) > 1 else ".ai/memex.db"
     # Local-mode default: apply shared/ then local-only/.
     # Memex-mode bootstrap supplies only shared/ via memex:core:create-store.

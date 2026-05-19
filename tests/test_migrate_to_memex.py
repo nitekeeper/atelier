@@ -7,6 +7,7 @@ archive name. Re-running on an already-migrated workspace is a no-op.
 A mid-write failure leaves the workspace untouched so the next attempt
 can retry.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -41,6 +42,7 @@ def populated_local_project(tmp_path, monkeypatch):
     # Pin to Local mode so the seed writes go to .ai/atelier.db rather
     # than recursing into the (uninitialized) Memex backend.
     from scripts import mode_detector
+
     mode_detector._clear_cache()
     monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
 
@@ -51,17 +53,22 @@ def populated_local_project(tmp_path, monkeypatch):
     from scripts.meetings import create_meeting
 
     role = create_role(str(db), name="Product Manager", description="PM")
-    create_agent(str(db), id="atelier-pm-1", name="PM",
-                 role_id=role["id"], profile="pm")
-    create_project(str(db), name="myproj",
-                   description="auth", created_by="atelier-pm-1")
-    create_task(str(db), project_id=1, title="Fix bug",
-                description="500 error", created_by="atelier-pm-1")
-    create_meeting(str(db), root / ".ai" / "meetings",
-                   title="Kickoff", date="2026-05-16",
-                   summary="scope", decisions="oauth2",
-                   created_by="atelier-pm-1",
-                   project_id=1, workspace_id=1)
+    create_agent(str(db), id="atelier-pm-1", name="PM", role_id=role["id"], profile="pm")
+    create_project(str(db), name="myproj", description="auth", created_by="atelier-pm-1")
+    create_task(
+        str(db), project_id=1, title="Fix bug", description="500 error", created_by="atelier-pm-1"
+    )
+    create_meeting(
+        str(db),
+        root / ".ai" / "meetings",
+        title="Kickoff",
+        date="2026-05-16",
+        summary="scope",
+        decisions="oauth2",
+        created_by="atelier-pm-1",
+        project_id=1,
+        workspace_id=1,
+    )
     return root
 
 
@@ -70,28 +77,40 @@ def _stub_memex_writes(monkeypatch, captured=None):
     bootstrap precondition + force `lookup_index_id_by_source_ref` to
     return None so every row is treated as new."""
     if captured is None:
-        captured = {"docs": [], "tasks": [], "meetings": [], "sessions": [],
-                    "bypasses": []}
+        captured = {"docs": [], "tasks": [], "meetings": [], "sessions": [], "bypasses": []}
 
     def fake_write_document(**kwargs):
         captured["docs"].append(kwargs)
-        return {"status": "ingested", "index_id": f"doc-{len(captured['docs'])}",
-                "row_id": len(captured["docs"]),
-                "key": kwargs["title"], "domain": kwargs["domain"],
-                "relations": []}
+        return {
+            "status": "ingested",
+            "index_id": f"doc-{len(captured['docs'])}",
+            "row_id": len(captured["docs"]),
+            "key": kwargs["title"],
+            "domain": kwargs["domain"],
+            "relations": [],
+        }
 
     def fake_write_task(**kwargs):
         captured["tasks"].append(kwargs)
-        return {"status": "ingested", "index_id": f"tsk-{len(captured['tasks'])}",
-                "row_id": len(captured["tasks"]),
-                "key": kwargs["title"], "domain": "task", "relations": []}
+        return {
+            "status": "ingested",
+            "index_id": f"tsk-{len(captured['tasks'])}",
+            "row_id": len(captured["tasks"]),
+            "key": kwargs["title"],
+            "domain": "task",
+            "relations": [],
+        }
 
     def fake_write_meeting(**kwargs):
         captured["meetings"].append(kwargs)
-        return {"status": "ingested",
-                "index_id": f"mtg-{len(captured['meetings'])}",
-                "row_id": len(captured["meetings"]),
-                "key": kwargs["title"], "domain": "meeting", "relations": []}
+        return {
+            "status": "ingested",
+            "index_id": f"mtg-{len(captured['meetings'])}",
+            "row_id": len(captured["meetings"]),
+            "key": kwargs["title"],
+            "domain": "meeting",
+            "relations": [],
+        }
 
     def fake_upsert_session(**kwargs):
         captured["sessions"].append(kwargs)
@@ -101,20 +120,15 @@ def _stub_memex_writes(monkeypatch, captured=None):
         captured["bypasses"].append(kwargs)
         return {"id": len(captured["bypasses"]), **kwargs}
 
-    monkeypatch.setattr("scripts.backend_memex.write_document",
-                        fake_write_document)
-    monkeypatch.setattr("scripts.backend_memex.write_task",
-                        fake_write_task)
-    monkeypatch.setattr("scripts.backend_memex.write_meeting",
-                        fake_write_meeting)
-    monkeypatch.setattr("scripts.backend_memex.upsert_session",
-                        fake_upsert_session)
-    monkeypatch.setattr("scripts.backend_memex.record_phase_bypass",
-                        fake_record_phase_bypass)
-    monkeypatch.setattr("scripts.backend_memex.lookup_index_id_by_source_ref",
-                        lambda *, source_ref: None)
-    monkeypatch.setattr("scripts.backend_memex.require_memex_bootstrap",
-                        lambda: None)
+    monkeypatch.setattr("scripts.backend_memex.write_document", fake_write_document)
+    monkeypatch.setattr("scripts.backend_memex.write_task", fake_write_task)
+    monkeypatch.setattr("scripts.backend_memex.write_meeting", fake_write_meeting)
+    monkeypatch.setattr("scripts.backend_memex.upsert_session", fake_upsert_session)
+    monkeypatch.setattr("scripts.backend_memex.record_phase_bypass", fake_record_phase_bypass)
+    monkeypatch.setattr(
+        "scripts.backend_memex.lookup_index_id_by_source_ref", lambda *, source_ref: None
+    )
+    monkeypatch.setattr("scripts.backend_memex.require_memex_bootstrap", lambda: None)
     return captured
 
 
@@ -124,6 +138,7 @@ def test_migration_replays_all_rows(populated_local_project, monkeypatch):
     captured = _stub_memex_writes(monkeypatch)
 
     from scripts.migrate_to_memex import migrate_project
+
     summary = migrate_project(populated_local_project / ".ai" / "atelier.db")
 
     assert summary["status"] == "migrated"
@@ -137,40 +152,39 @@ def test_migration_replays_all_rows(populated_local_project, monkeypatch):
     assert len(captured["meetings"]) == 1
 
 
-def test_migration_renames_pre_migration_db(populated_local_project,
-                                            monkeypatch):
+def test_migration_renames_pre_migration_db(populated_local_project, monkeypatch):
     """A successful migration archives the original DB under a stable
     `atelier-pre-migration-<timestamp>.db` filename."""
     _stub_memex_writes(monkeypatch)
 
     from scripts.migrate_to_memex import migrate_project
+
     migrate_project(populated_local_project / ".ai" / "atelier.db")
 
     assert not (populated_local_project / ".ai" / "atelier.db").exists()
-    pre_migration_files = list((populated_local_project / ".ai").glob(
-        "atelier-pre-migration-*.db"))
+    pre_migration_files = list((populated_local_project / ".ai").glob("atelier-pre-migration-*.db"))
     assert len(pre_migration_files) == 1
 
 
-def test_migration_failure_leaves_no_marker(populated_local_project,
-                                            monkeypatch):
+def test_migration_failure_leaves_no_marker(populated_local_project, monkeypatch):
     """If any write fails, no .migrated marker is written and the local
     DB is NOT renamed — so the next Atelier command retries cleanly."""
     _stub_memex_writes(monkeypatch)
 
     def boom(**k):
         raise RuntimeError("simulated memex outage")
+
     monkeypatch.setattr("scripts.backend_memex.write_document", boom)
 
     from scripts.migrate_to_memex import migrate_project
+
     with pytest.raises(RuntimeError):
         migrate_project(populated_local_project / ".ai" / "atelier.db")
     assert (populated_local_project / ".ai" / "atelier.db").exists()
     assert not (populated_local_project / ".ai" / "atelier.migrated").exists()
 
 
-def test_migration_skipped_when_marker_exists(populated_local_project,
-                                              monkeypatch):
+def test_migration_skipped_when_marker_exists(populated_local_project, monkeypatch):
     """If the marker is already there, migrate_project returns 'skipped'
     immediately — no Memex contact, no rename."""
     _stub_memex_writes(monkeypatch)
@@ -178,6 +192,7 @@ def test_migration_skipped_when_marker_exists(populated_local_project,
     marker.write_text('{"migrated_at": "2026-01-01"}')
 
     from scripts.migrate_to_memex import migrate_project
+
     summary = migrate_project(populated_local_project / ".ai" / "atelier.db")
     assert summary["status"] == "skipped"
 
@@ -186,5 +201,6 @@ def test_decline_writes_local_only_marker(populated_local_project):
     """User declines migration → .local-only marker is written and
     subsequent commands won't re-prompt."""
     from scripts.migrate_to_memex import decline_migration
+
     decline_migration(populated_local_project / ".ai")
     assert (populated_local_project / ".ai" / "atelier.local-only").exists()

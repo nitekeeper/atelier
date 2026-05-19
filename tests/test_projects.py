@@ -9,6 +9,7 @@ root under `tmp_path` and `monkeypatch.chdir()` into it. The `db_path`
 positional kwarg is kept on the public API for signature parity but is
 ignored by the backend.
 """
+
 from __future__ import annotations
 from pathlib import Path
 
@@ -43,6 +44,7 @@ def db_path(tmp_path, monkeypatch):
     SQLite file we just stood up.
     """
     from scripts import mode_detector
+
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
     root = tmp_path / "myproj"
     root.mkdir()
@@ -58,15 +60,20 @@ def db_path(tmp_path, monkeypatch):
 @pytest.fixture
 def agent_id(db_path):
     role = create_role(db_path, name="pm", description="Project manager")
-    agent = create_agent(db_path, id="pm-1", name="PM", role_id=role["id"],
-                         profile="Experienced PM")
+    agent = create_agent(
+        db_path, id="pm-1", name="PM", role_id=role["id"], profile="Experienced PM"
+    )
     return agent["id"]
 
 
 def test_create_project(db_path, agent_id):
-    project = create_project(db_path, name="Auth Service",
-                             description="OAuth2 implementation",
-                             repo="github.com/org/auth", created_by=agent_id)
+    project = create_project(
+        db_path,
+        name="Auth Service",
+        description="OAuth2 implementation",
+        repo="github.com/org/auth",
+        created_by=agent_id,
+    )
     assert project["id"] == 1
     assert project["name"] == "Auth Service"
     # v1.1.0 schema default — was 'design:open' on legacy projects table too.
@@ -77,8 +84,7 @@ def test_create_project(db_path, agent_id):
 
 
 def test_get_project(db_path, agent_id):
-    create_project(db_path, name="Auth Service", description="OAuth2",
-                   created_by=agent_id)
+    create_project(db_path, name="Auth Service", description="OAuth2", created_by=agent_id)
     project = get_project(db_path, 1)
     assert project["name"] == "Auth Service"
 
@@ -88,33 +94,29 @@ def test_get_project_missing_returns_none(db_path):
 
 
 def test_update_project_phase(db_path, agent_id):
-    create_project(db_path, name="Auth Service", description="OAuth2",
-                   created_by=agent_id)
+    create_project(db_path, name="Auth Service", description="OAuth2", created_by=agent_id)
     updated = update_project(db_path, 1, phase="design:approved")
     assert updated["phase"] == "design:approved"
 
 
 def test_delete_project(db_path, agent_id):
-    create_project(db_path, name="Auth Service", description="OAuth2",
-                   created_by=agent_id)
+    create_project(db_path, name="Auth Service", description="OAuth2", created_by=agent_id)
     assert delete_project(db_path, 1) is True
     assert get_project(db_path, 1) is None
 
 
 def test_list_projects(db_path, agent_id):
-    create_project(db_path, name="Auth Service", description="OAuth2",
-                   created_by=agent_id)
-    create_project(db_path, name="Payment API",
-                   description="Stripe integration", created_by=agent_id)
+    create_project(db_path, name="Auth Service", description="OAuth2", created_by=agent_id)
+    create_project(
+        db_path, name="Payment API", description="Stripe integration", created_by=agent_id
+    )
     projects = list_projects(db_path)
     assert len(projects) == 2
 
 
 def test_list_projects_filter_by_phase(db_path, agent_id):
-    create_project(db_path, name="Auth Service", description="OAuth2",
-                   created_by=agent_id)
-    create_project(db_path, name="Payment API", description="Stripe",
-                   created_by=agent_id)
+    create_project(db_path, name="Auth Service", description="OAuth2", created_by=agent_id)
+    create_project(db_path, name="Payment API", description="Stripe", created_by=agent_id)
     update_project(db_path, 2, phase="plan:open")
     results = list_projects(db_path, phase="design:open")
     assert len(results) == 1
@@ -122,10 +124,12 @@ def test_list_projects_filter_by_phase(db_path, agent_id):
 
 
 def test_search_projects(db_path, agent_id):
-    create_project(db_path, name="Auth Service",
-                   description="OAuth2 implementation", created_by=agent_id)
-    create_project(db_path, name="Payment API",
-                   description="Stripe integration", created_by=agent_id)
+    create_project(
+        db_path, name="Auth Service", description="OAuth2 implementation", created_by=agent_id
+    )
+    create_project(
+        db_path, name="Payment API", description="Stripe integration", created_by=agent_id
+    )
     results = search_projects(db_path, query="OAuth")
     assert len(results) == 1
     assert results[0]["name"] == "Auth Service"
@@ -138,7 +142,12 @@ def test_slug_parity_with_backend_local():
     would generate. If this ever drifts the docstring lies.
     """
     from scripts import projects, backend_local
-    for name in ("Foo Bar", "Auth Service", "OAuth2 Implementation",
-                 "payment-api", "Multi  Spaces"):
-        assert projects._slug(name) == backend_local._slug(name), (
-            f"slug drift on {name!r}")
+
+    for name in (
+        "Foo Bar",
+        "Auth Service",
+        "OAuth2 Implementation",
+        "payment-api",
+        "Multi  Spaces",
+    ):
+        assert projects._slug(name) == backend_local._slug(name), f"slug drift on {name!r}"

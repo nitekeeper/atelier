@@ -3,6 +3,7 @@
 Trimmed copy of memex/scripts/stores.py. Only `create_store` is exercised
 by atelier bootstrap; the other CRUD helpers are omitted.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -21,8 +22,7 @@ def _migrations_table_sql() -> str:
     return (DB_DIR / "migrations_table.sql").read_text()
 
 
-def create_store(name: str, path: str, migrations_dir: str,
-                 schema_version: str = "v1") -> dict:
+def create_store(name: str, path: str, migrations_dir: str, schema_version: str = "v1") -> dict:
     require_bootstrap()
     if registry.get_store(name) is not None:
         raise ValueError(f"Store already registered: {name}")

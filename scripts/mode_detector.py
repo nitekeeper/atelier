@@ -7,6 +7,7 @@ Note: _cached is process-global without locking. Concurrent threads may
 each run detection once before the cache populates; the result is the
 same so the wasted work is benign.
 """
+
 from __future__ import annotations
 import json
 from pathlib import Path

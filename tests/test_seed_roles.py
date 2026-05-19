@@ -59,6 +59,7 @@ def test_seed_is_idempotent(db_path):
     # row count to len(ROLES) so the test fails if seed silently
     # short-circuits without inserting anything.
     from scripts.migrate import get_connection
+
     conn = get_connection(db_path)
     try:
         role_count = conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0]
@@ -72,6 +73,7 @@ def test_seed_is_idempotent(db_path):
 def test_seed_no_duplicate_role_names(db_path):
     seed(db_path)
     from scripts.migrate import get_connection
+
     conn = get_connection(db_path)
     rows = conn.execute(
         "SELECT name, COUNT(*) as cnt FROM roles GROUP BY name HAVING cnt > 1"
@@ -92,6 +94,7 @@ def test_seed_no_duplicate_role_names(db_path):
 def test_seed_pm_role_exists(db_path):
     seed(db_path)
     from scripts.migrate import get_connection
+
     conn = get_connection(db_path)
     row = conn.execute("SELECT * FROM roles WHERE name = 'Product Manager'").fetchone()
     conn.close()
@@ -101,6 +104,7 @@ def test_seed_pm_role_exists(db_path):
 def test_seed_systems_engineer_exists(db_path):
     seed(db_path)
     from scripts.migrate import get_connection
+
     conn = get_connection(db_path)
     row = conn.execute("SELECT * FROM agents WHERE id = 'systems-engineer-1'").fetchone()
     conn.close()
@@ -115,7 +119,9 @@ def test_all_profiles_have_required_sections(db_path):
         assert "Responsibilities:" in profile, f"Missing Responsibilities in {entry['role_name']}"
         assert "Works with:" in profile, f"Missing Works with in {entry['role_name']}"
         assert "Does not:" in profile, f"Missing Does not in {entry['role_name']}"
-        assert "Communication style:" in profile, f"Missing Communication style in {entry['role_name']}"
+        assert "Communication style:" in profile, (
+            f"Missing Communication style in {entry['role_name']}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +179,7 @@ def test_role_seed_matches_seed_roles_module():
     the other without behavior change. Pins both name and description bytes
     so a silent rewrite of either field would fail the test."""
     from scripts.seed_roles import ROLES as LEGACY_ROLES
+
     json_names = {r["name"] for r in load_role_seed()}
     legacy_names = {r["role_name"] for r in LEGACY_ROLES}
     assert json_names == legacy_names

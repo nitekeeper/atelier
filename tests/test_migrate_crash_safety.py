@@ -1,5 +1,6 @@
 """Verify migration is non-destructive on partial failure and that
 re-running after a fix completes cleanly."""
+
 from pathlib import Path
 import pytest
 
@@ -13,6 +14,7 @@ def project_with_data(tmp_path, monkeypatch):
     db = root / ".ai" / "atelier.db"
     db.parent.mkdir()
     from scripts.migrate import apply_migrations
+
     MIGRATIONS = Path(__file__).parent.parent / "migrations"
     apply_migrations(str(db), MIGRATIONS / "shared")
     apply_migrations(str(db), MIGRATIONS / "local-only")
@@ -21,20 +23,19 @@ def project_with_data(tmp_path, monkeypatch):
     from scripts.agents import create_agent
     from scripts.projects import create_project
     from scripts.tasks import create_task
+
     r = create_role(str(db), name="PM", description="PM")
-    create_agent(str(db), id="atelier-pm-1", name="PM",
-                 role_id=r["id"], profile="x")
+    create_agent(str(db), id="atelier-pm-1", name="PM", role_id=r["id"], profile="x")
     for i in range(5):
-        create_project(str(db), name=f"P{i}", description="d",
-                       created_by="atelier-pm-1")
+        create_project(str(db), name=f"P{i}", description="d", created_by="atelier-pm-1")
     for i in range(10):
-        create_task(str(db), project_id=1, title=f"T{i}",
-                    description="d", created_by="atelier-pm-1")
+        create_task(
+            str(db), project_id=1, title=f"T{i}", description="d", created_by="atelier-pm-1"
+        )
     return root
 
 
-def test_failure_during_task_replay_leaves_no_marker(
-        project_with_data, monkeypatch):
+def test_failure_during_task_replay_leaves_no_marker(project_with_data, monkeypatch):
     """Inject failure on the 3rd task write. No marker is written, the
     local DB is not renamed, and a re-run succeeds when the issue clears."""
     fail_after = {"count": 0, "limit": 3}
@@ -43,22 +44,27 @@ def test_failure_during_task_replay_leaves_no_marker(
         fail_after["count"] += 1
         if fail_after["count"] > fail_after["limit"]:
             raise RuntimeError("simulated memex outage")
-        return {"row_id": fail_after["count"], "index_id": "x",
-                "key": "k", "domain": "task", "relations": []}
+        return {
+            "row_id": fail_after["count"],
+            "index_id": "x",
+            "key": "k",
+            "domain": "task",
+            "relations": [],
+        }
 
-    monkeypatch.setattr("scripts.backend_memex.write_document",
-                        lambda **k: {"row_id": 1, "index_id": "x",
-                                     "key": "k", "domain": "d",
-                                     "relations": []})
+    monkeypatch.setattr(
+        "scripts.backend_memex.write_document",
+        lambda **k: {"row_id": 1, "index_id": "x", "key": "k", "domain": "d", "relations": []},
+    )
     monkeypatch.setattr("scripts.backend_memex.write_task", flaky_write_task)
-    monkeypatch.setattr("scripts.backend_memex.lookup_index_id_by_source_ref",
-                        lambda *, source_ref: None)
-    monkeypatch.setattr("scripts.backend_memex.require_memex_bootstrap",
-                        lambda: None)
-    monkeypatch.setattr("scripts.bootstrap.run_bootstrap",
-                        lambda: {"version": "1.1.0"})
+    monkeypatch.setattr(
+        "scripts.backend_memex.lookup_index_id_by_source_ref", lambda *, source_ref: None
+    )
+    monkeypatch.setattr("scripts.backend_memex.require_memex_bootstrap", lambda: None)
+    monkeypatch.setattr("scripts.bootstrap.run_bootstrap", lambda: {"version": "1.1.0"})
 
     from scripts.migrate_to_memex import migrate_project
+
     with pytest.raises(RuntimeError):
         migrate_project(project_with_data / ".ai" / "atelier.db")
 
@@ -90,24 +96,29 @@ def test_rerun_after_outage_is_idempotent(project_with_data, monkeypatch):
         "scripts.migrate_to_memex._index_id_for_atelier_row",
         fake_index_lookup,
     )
-    monkeypatch.setattr("scripts.backend_memex.write_document",
-                        lambda **k: {"row_id": 1, "index_id": "x",
-                                     "key": "k", "domain": "d",
-                                     "relations": []})
-    monkeypatch.setattr("scripts.backend_memex.write_task",
-                        lambda **k: {"row_id": 1, "index_id": "x",
-                                     "key": "k", "domain": "task",
-                                     "relations": []})
-    monkeypatch.setattr("scripts.backend_memex.write_meeting",
-                        lambda **k: {"row_id": 1, "index_id": "x",
-                                     "key": "k", "domain": "meeting",
-                                     "relations": []})
-    monkeypatch.setattr("scripts.backend_memex.require_memex_bootstrap",
-                        lambda: None)
-    monkeypatch.setattr("scripts.bootstrap.run_bootstrap",
-                        lambda: {"version": "1.1.0"})
+    monkeypatch.setattr(
+        "scripts.backend_memex.write_document",
+        lambda **k: {"row_id": 1, "index_id": "x", "key": "k", "domain": "d", "relations": []},
+    )
+    monkeypatch.setattr(
+        "scripts.backend_memex.write_task",
+        lambda **k: {"row_id": 1, "index_id": "x", "key": "k", "domain": "task", "relations": []},
+    )
+    monkeypatch.setattr(
+        "scripts.backend_memex.write_meeting",
+        lambda **k: {
+            "row_id": 1,
+            "index_id": "x",
+            "key": "k",
+            "domain": "meeting",
+            "relations": [],
+        },
+    )
+    monkeypatch.setattr("scripts.backend_memex.require_memex_bootstrap", lambda: None)
+    monkeypatch.setattr("scripts.bootstrap.run_bootstrap", lambda: {"version": "1.1.0"})
 
     from scripts.migrate_to_memex import migrate_project
+
     summary = migrate_project(project_with_data / ".ai" / "atelier.db")
     assert summary["status"] == "migrated"
     # Two tasks should have been skipped as already-present

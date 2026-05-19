@@ -12,6 +12,7 @@ Per-project markers:
   - `.ai/atelier.local-only` (JSON) — set when the user declines.
 Either marker suppresses re-prompting via `should_prompt`.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -27,8 +28,7 @@ from pathlib import Path
 def _now_compact() -> str:
     """UTC `YYYYMMDDTHHMMSS` — used in the archive filename so a
     naive lexical sort matches chronological order."""
-    return datetime.datetime.now(
-        datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
 
 
 def _now_iso() -> str:
@@ -77,6 +77,7 @@ def _index_id_for_atelier_row(source_ref: str) -> str | None:
     raise `DuplicateKeyError` on every previously-migrated row.
     """
     from scripts import backend_memex
+
     return backend_memex.lookup_index_id_by_source_ref(source_ref=source_ref)
 
 
@@ -107,8 +108,7 @@ def migrate_project(local_db: Path) -> dict:
     ai_dir = Path(local_db).parent
     marker = ai_dir / "atelier.migrated"
     if marker.exists():
-        return {"status": "skipped", "migrated": {},
-                "reason": "marker present"}
+        return {"status": "skipped", "migrated": {}, "reason": "marker present"}
 
     # Memex must be bootstrapped before we can route writes to it. The
     # helper lives on the `backend_memex` facade so tests can stub it
@@ -116,13 +116,26 @@ def migrate_project(local_db: Path) -> dict:
     # helper resolves Memex's `db.require_bootstrap()` and raises a
     # clean `RuntimeError` (with operator guidance) on failure.
     from scripts import backend_memex
+
     backend_memex.require_memex_bootstrap()
 
     c = _connect_local(local_db)
-    migrated = {"projects": 0, "tasks": 0, "meetings": 0,
-                "sessions": 0, "phase_bypasses": 0, "documents": 0}
-    already_present = {"projects": 0, "tasks": 0, "meetings": 0,
-                       "sessions": 0, "phase_bypasses": 0, "documents": 0}
+    migrated = {
+        "projects": 0,
+        "tasks": 0,
+        "meetings": 0,
+        "sessions": 0,
+        "phase_bypasses": 0,
+        "documents": 0,
+    }
+    already_present = {
+        "projects": 0,
+        "tasks": 0,
+        "meetings": 0,
+        "sessions": 0,
+        "phase_bypasses": 0,
+        "documents": 0,
+    }
     try:
         # Order matters: projects first so child rows can reference real IDs.
         _replay_projects(c, backend_memex, migrated, already_present)
@@ -137,15 +150,24 @@ def migrate_project(local_db: Path) -> dict:
     # All rows replayed successfully — rename local DB + write marker.
     archive_name = f"atelier-pre-migration-{_now_compact()}.db"
     shutil.move(str(local_db), str(ai_dir / archive_name))
-    marker.write_text(json.dumps({
-        "migrated_at": _now_iso(),
+    marker.write_text(
+        json.dumps(
+            {
+                "migrated_at": _now_iso(),
+                "migrated": migrated,
+                "already_present": already_present,
+                "archived_to": archive_name,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "status": "migrated",
         "migrated": migrated,
         "already_present": already_present,
         "archived_to": archive_name,
-    }, indent=2), encoding="utf-8")
-    return {"status": "migrated", "migrated": migrated,
-            "already_present": already_present,
-            "archived_to": archive_name}
+    }
 
 
 # ── per-table replay helpers ───────────────────────────────────────────────
@@ -155,8 +177,9 @@ def migrate_project(local_db: Path) -> dict:
 # reads as an outline of the migration order.
 
 
-def _replay_projects(c: sqlite3.Connection, backend_memex,
-                     migrated: dict, already_present: dict) -> None:
+def _replay_projects(
+    c: sqlite3.Connection, backend_memex, migrated: dict, already_present: dict
+) -> None:
     """Replay the `projects` table. Project rows are persisted as
     Memex documents under the `project` domain — the canonical
     representation matches `backend_memex.write_project`'s output."""
@@ -190,8 +213,9 @@ def _replay_projects(c: sqlite3.Connection, backend_memex,
         migrated["projects"] += 1
 
 
-def _replay_tasks(c: sqlite3.Connection, backend_memex,
-                  migrated: dict, already_present: dict) -> None:
+def _replay_tasks(
+    c: sqlite3.Connection, backend_memex, migrated: dict, already_present: dict
+) -> None:
     cols = _columns(c, "tasks")
     if "id" not in cols:
         return
@@ -213,8 +237,9 @@ def _replay_tasks(c: sqlite3.Connection, backend_memex,
         migrated["tasks"] += 1
 
 
-def _replay_meetings(c: sqlite3.Connection, backend_memex,
-                     migrated: dict, already_present: dict) -> None:
+def _replay_meetings(
+    c: sqlite3.Connection, backend_memex, migrated: dict, already_present: dict
+) -> None:
     cols = _columns(c, "meeting_minutes")
     if "id" not in cols:
         return
@@ -235,8 +260,7 @@ def _replay_meetings(c: sqlite3.Connection, backend_memex,
         migrated["meetings"] += 1
 
 
-def _replay_sessions(c: sqlite3.Connection, backend_memex,
-                     migrated: dict) -> None:
+def _replay_sessions(c: sqlite3.Connection, backend_memex, migrated: dict) -> None:
     """Sessions are operational state (Tier 1) — no `source_ref`
     idempotency hook because the Memex side has its own
     (project_id, agent_id, status='in-progress') upsert key."""
@@ -258,8 +282,7 @@ def _replay_sessions(c: sqlite3.Connection, backend_memex,
         migrated["sessions"] += 1
 
 
-def _replay_phase_bypasses(c: sqlite3.Connection, backend_memex,
-                           migrated: dict) -> None:
+def _replay_phase_bypasses(c: sqlite3.Connection, backend_memex, migrated: dict) -> None:
     """Phase bypasses are append-only audit rows; no idempotency hook
     because re-running migration is a programming error here (the local
     DB rename in the success path prevents it). We still tolerate a
@@ -279,9 +302,9 @@ def _replay_phase_bypasses(c: sqlite3.Connection, backend_memex,
         migrated["phase_bypasses"] += 1
 
 
-def _replay_project_documents(c: sqlite3.Connection, backend_memex,
-                              migrated: dict,
-                              already_present: dict) -> None:
+def _replay_project_documents(
+    c: sqlite3.Connection, backend_memex, migrated: dict, already_present: dict
+) -> None:
     """Replay `project_documents`. v1.1.0 splits the legacy `type` column
     into (`domain`, `subdomain`); we feed `domain` (defaulted to
     `project_doc`) into `backend_memex.write_document`.
@@ -304,11 +327,7 @@ def _replay_project_documents(c: sqlite3.Connection, backend_memex,
             continue
         domain = _get(r, "domain") or _get(r, "type") or "project_doc"
         filename = _get(r, "filename", "") or ""
-        body = (
-            f"# {r['title']}\n\n"
-            f"File: {filename}\n\n"
-            f"Domain: {domain}"
-        )
+        body = f"# {r['title']}\n\nFile: {filename}\n\nDomain: {domain}"
         metadata = {
             "project_id": _get(r, "project_id"),
             "filename": filename,
@@ -339,10 +358,16 @@ def decline_migration(ai_dir: Path) -> None:
     """
     ai_dir = Path(ai_dir)
     ai_dir.mkdir(parents=True, exist_ok=True)
-    (ai_dir / "atelier.local-only").write_text(json.dumps({
-        "declined_at": _now_iso(),
-        "note": "Delete this file to re-enable the migration prompt.",
-    }, indent=2), encoding="utf-8")
+    (ai_dir / "atelier.local-only").write_text(
+        json.dumps(
+            {
+                "declined_at": _now_iso(),
+                "note": "Delete this file to re-enable the migration prompt.",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def should_prompt(ai_dir: Path) -> bool:
@@ -370,8 +395,14 @@ def row_summary(local_db: Path) -> dict:
     c = _connect_local(local_db)
     summary: dict[str, int] = {}
     try:
-        for table in ("projects", "tasks", "meeting_minutes", "sessions",
-                      "phase_bypasses", "project_documents"):
+        for table in (
+            "projects",
+            "tasks",
+            "meeting_minutes",
+            "sessions",
+            "phase_bypasses",
+            "project_documents",
+        ):
             try:
                 row = c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
                 summary[table] = int(row[0]) if row else 0

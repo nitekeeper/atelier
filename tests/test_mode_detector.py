@@ -29,8 +29,10 @@ def test_returns_local_when_registry_present_but_plugin_unreachable(tmp_path):
     memex_home = tmp_path / ".memex"
     memex_home.mkdir()
     (memex_home / "registry.json").write_text("{}")
-    with patch("scripts.mode_detector._memex_home", return_value=memex_home), \
-         patch("scripts.mode_detector._memex_plugin_reachable", return_value=False):
+    with (
+        patch("scripts.mode_detector._memex_home", return_value=memex_home),
+        patch("scripts.mode_detector._memex_plugin_reachable", return_value=False),
+    ):
         assert mode_detector.detect_mode() == "local"
 
 
@@ -38,8 +40,10 @@ def test_returns_memex_when_both_present(tmp_path):
     memex_home = tmp_path / ".memex"
     memex_home.mkdir()
     (memex_home / "registry.json").write_text("{}")
-    with patch("scripts.mode_detector._memex_home", return_value=memex_home), \
-         patch("scripts.mode_detector._memex_plugin_reachable", return_value=True):
+    with (
+        patch("scripts.mode_detector._memex_home", return_value=memex_home),
+        patch("scripts.mode_detector._memex_plugin_reachable", return_value=True),
+    ):
         assert mode_detector.detect_mode() == "memex"
 
 
@@ -47,8 +51,10 @@ def test_result_is_cached(tmp_path):
     memex_home = tmp_path / ".memex"
     memex_home.mkdir()
     (memex_home / "registry.json").write_text("{}")
-    with patch("scripts.mode_detector._memex_home", return_value=memex_home), \
-         patch("scripts.mode_detector._memex_plugin_reachable", return_value=True) as m:
+    with (
+        patch("scripts.mode_detector._memex_home", return_value=memex_home),
+        patch("scripts.mode_detector._memex_plugin_reachable", return_value=True) as m,
+    ):
         mode_detector.detect_mode()
         mode_detector.detect_mode()
         mode_detector.detect_mode()
@@ -61,8 +67,10 @@ def test_clear_cache_recomputes(tmp_path):
     memex_home = tmp_path / ".memex"
     memex_home.mkdir()
     (memex_home / "registry.json").write_text("{}")
-    with patch("scripts.mode_detector._memex_home", return_value=memex_home), \
-         patch("scripts.mode_detector._memex_plugin_reachable", side_effect=[True, False]) as m:
+    with (
+        patch("scripts.mode_detector._memex_home", return_value=memex_home),
+        patch("scripts.mode_detector._memex_plugin_reachable", side_effect=[True, False]) as m,
+    ):
         first = mode_detector.detect_mode()
         mode_detector._clear_cache()
         second = mode_detector.detect_mode()
@@ -205,9 +213,9 @@ def test_plugin_reachable_false_when_pinned_root_missing(tmp_path):
     """Stale pin — Memex was uninstalled but config.json wasn't cleaned up."""
     memex_home = tmp_path / ".memex"
     memex_home.mkdir()
-    (memex_home / "config.json").write_text(json.dumps(
-        {"plugin_root": str(tmp_path / "deleted-cache-entry")}
-    ))
+    (memex_home / "config.json").write_text(
+        json.dumps({"plugin_root": str(tmp_path / "deleted-cache-entry")})
+    )
     with patch("scripts.mode_detector._memex_home", return_value=memex_home):
         assert mode_detector._memex_plugin_reachable() is False
 

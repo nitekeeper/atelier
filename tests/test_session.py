@@ -6,8 +6,12 @@ import pytest
 
 from scripts.migrate import apply_migrations
 from scripts.session import (
-    write_session, get_session, read_latest,
-    list_sessions, update_session, prune_sessions,
+    write_session,
+    get_session,
+    read_latest,
+    list_sessions,
+    update_session,
+    prune_sessions,
 )
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
@@ -33,8 +37,7 @@ def _seed_baseline(db: str) -> int:
     )
     ws_id = cur.lastrowid
     cur = conn.execute(
-        "INSERT INTO roles (name, description, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
         ("pm", "PM role", now, now),
     )
     role_id = cur.lastrowid
@@ -59,6 +62,7 @@ def db_path(tmp_path, monkeypatch):
     # Pin Local mode — the dev host has Memex installed, which would
     # otherwise route the facade through backend_memex (spec §7).
     from scripts import mode_detector
+
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
     db = root / ".ai" / "atelier.db"
     db.parent.mkdir()
@@ -73,15 +77,12 @@ def project_id(db_path):
     now = "2026-05-18T00:00:00Z"
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys=ON")
-    ws_id = conn.execute(
-        "SELECT id FROM workspaces LIMIT 1"
-    ).fetchone()[0]
+    ws_id = conn.execute("SELECT id FROM workspaces LIMIT 1").fetchone()[0]
     cur = conn.execute(
         "INSERT INTO projects (workspace_id, slug, name, description, "
         "phase, created_by, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (ws_id, "test-project", "TestProject", "Test", "design:open",
-         "pm-1", now, now),
+        (ws_id, "test-project", "TestProject", "Test", "design:open", "pm-1", now, now),
     )
     pid = cur.lastrowid
     conn.commit()
@@ -91,7 +92,11 @@ def project_id(db_path):
 
 def test_write_session_creates_row(db_path, project_id):
     session = write_session(
-        db_path, project_id, "pm-1", "design:open", "in-progress",
+        db_path,
+        project_id,
+        "pm-1",
+        "design:open",
+        "in-progress",
         pm_notes="Starting fresh",
     )
     assert session["id"] is not None
@@ -103,7 +108,11 @@ def test_write_session_creates_row(db_path, project_id):
 
 def test_write_session_stores_pre_diagnose_phase(db_path, project_id):
     session = write_session(
-        db_path, project_id, "pm-1", "diagnose:open", "in-progress",
+        db_path,
+        project_id,
+        "pm-1",
+        "diagnose:open",
+        "in-progress",
         pre_diagnose_phase="tdd:clean",
     )
     assert session["pre_diagnose_phase"] == "tdd:clean"
@@ -111,8 +120,9 @@ def test_write_session_stores_pre_diagnose_phase(db_path, project_id):
 
 def test_read_latest_returns_most_recent(db_path, project_id):
     write_session(db_path, project_id, "pm-1", "design:open", "complete")
-    write_session(db_path, project_id, "pm-1", "plan:open", "in-progress",
-                  accomplished="Design approved")
+    write_session(
+        db_path, project_id, "pm-1", "plan:open", "in-progress", accomplished="Design approved"
+    )
     session = read_latest(db_path, project_id)
     assert session["phase"] == "plan:open"
     assert session["accomplished"] == "Design approved"
@@ -132,16 +142,16 @@ def test_list_sessions_returns_most_recent_first(db_path, project_id):
 
 def test_list_sessions_respects_limit(db_path, project_id):
     for i in range(5):
-        write_session(db_path, project_id, "pm-1", "design:open", "complete",
-                      pm_notes=f"session {i}")
+        write_session(
+            db_path, project_id, "pm-1", "design:open", "complete", pm_notes=f"session {i}"
+        )
     sessions = list_sessions(db_path, project_id, limit=3)
     assert len(sessions) == 3
 
 
 def test_update_session_modifies_fields(db_path, project_id):
     session = write_session(db_path, project_id, "pm-1", "design:open", "in-progress")
-    updated = update_session(db_path, session["id"],
-                             status="complete", accomplished="Design done")
+    updated = update_session(db_path, session["id"], status="complete", accomplished="Design done")
     assert updated["status"] == "complete"
     assert updated["accomplished"] == "Design done"
 
@@ -155,8 +165,9 @@ def test_update_session_rejects_unknown_fields(db_path, project_id):
 
 def test_prune_sessions_keeps_n_most_recent(db_path, project_id):
     for i in range(5):
-        write_session(db_path, project_id, "pm-1", "design:open", "complete",
-                      pm_notes=f"session {i}")
+        write_session(
+            db_path, project_id, "pm-1", "design:open", "complete", pm_notes=f"session {i}"
+        )
     deleted = prune_sessions(db_path, project_id, keep=2)
     assert deleted == 3
     remaining = list_sessions(db_path, project_id)
@@ -185,8 +196,7 @@ def test_prune_sessions_memex_mode_routes_through_memex_module(monkeypatch):
     class _FakeStores:
         @staticmethod
         def delete(*, name, table, row_id):
-            delete_calls.append({"name": name, "table": table,
-                                 "row_id": row_id})
+            delete_calls.append({"name": name, "table": table, "row_id": row_id})
 
     module_calls = []
 
@@ -211,14 +221,12 @@ def test_prune_sessions_memex_mode_routes_through_memex_module(monkeypatch):
 
     monkeypatch.setattr(backend_memex, "_memex_core_query", fake_query)
 
-    deleted = session_module.prune_sessions("ignored.db",
-                                            project_id=7, keep=2)
+    deleted = session_module.prune_sessions("ignored.db", project_id=7, keep=2)
 
     # Memex stores module was requested by the correct dotted name
     assert "stores" in module_calls
     # Query was issued for the right table/store
-    assert query_calls == [{"store": "atelier", "table": "sessions",
-                            "where": {"project_id": 7}}]
+    assert query_calls == [{"store": "atelier", "table": "sessions", "where": {"project_id": 7}}]
     # The two oldest rows (ids 1 and 2 — kept rows are ids 4 and 3) were
     # deleted via the fake stores module
     assert deleted == 2

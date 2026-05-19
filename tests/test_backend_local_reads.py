@@ -4,6 +4,7 @@ Tests `backend_local.find_documents` / `get_task` / `list_tasks` /
 `lookup_index_id_by_source_ref` / `find_or_create_role` /
 `find_or_create_agent` against the v1.1.0 schema.
 """
+
 from __future__ import annotations
 import sqlite3
 from pathlib import Path
@@ -37,8 +38,7 @@ def _seed_with_docs_and_tasks(db_path: str) -> dict:
     ws_b = cur.lastrowid
     # PM role + agent (we use the seeded local roles/agents tables).
     cur = conn.execute(
-        "INSERT INTO roles (name, description, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
         ("Product Manager", "PM", now, now),
     )
     pm_role_id = cur.lastrowid
@@ -52,16 +52,14 @@ def _seed_with_docs_and_tasks(db_path: str) -> dict:
         "INSERT INTO projects (workspace_id, slug, name, description, "
         "phase, created_by, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (ws_a, "auth", "Auth", "d", "design:open",
-         "atelier-pm-1", now, now),
+        (ws_a, "auth", "Auth", "d", "design:open", "atelier-pm-1", now, now),
     )
     proj_a1 = cur.lastrowid
     cur = conn.execute(
         "INSERT INTO projects (workspace_id, slug, name, description, "
         "phase, created_by, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (ws_a, "billing", "Billing", "d", "design:open",
-         "atelier-pm-1", now, now),
+        (ws_a, "billing", "Billing", "d", "design:open", "atelier-pm-1", now, now),
     )
     proj_a2 = cur.lastrowid
     # One project in ws_b.
@@ -69,8 +67,7 @@ def _seed_with_docs_and_tasks(db_path: str) -> dict:
         "INSERT INTO projects (workspace_id, slug, name, description, "
         "phase, created_by, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (ws_b, "ops", "Ops", "d", "design:open",
-         "atelier-pm-1", now, now),
+        (ws_b, "ops", "Ops", "d", "design:open", "atelier-pm-1", now, now),
     )
     proj_b1 = cur.lastrowid
     # Mix of documents across workspaces / projects / domains / subdomains.
@@ -79,16 +76,27 @@ def _seed_with_docs_and_tasks(db_path: str) -> dict:
     # rows must come first.
     docs = [
         # (workspace_id, project_id, domain, subdomain, title, filename, created_at)
-        (ws_a, proj_a1, "design", "auth", "Auth Design", "design/auth.md",
-         "2026-05-18T00:00:01Z"),
-        (ws_a, proj_a1, "design", "auth", "Auth Redesign", "design/auth2.md",
-         "2026-05-18T00:00:02Z"),
-        (ws_a, proj_a1, "adr", "auth", "ADR-001", "adr/001.md",
-         "2026-05-18T00:00:03Z"),
-        (ws_a, proj_a2, "design", "billing", "Billing Design", "design/billing.md",
-         "2026-05-18T00:00:04Z"),
-        (ws_b, proj_b1, "design", "ops", "Ops Design", "design/ops.md",
-         "2026-05-18T00:00:05Z"),
+        (ws_a, proj_a1, "design", "auth", "Auth Design", "design/auth.md", "2026-05-18T00:00:01Z"),
+        (
+            ws_a,
+            proj_a1,
+            "design",
+            "auth",
+            "Auth Redesign",
+            "design/auth2.md",
+            "2026-05-18T00:00:02Z",
+        ),
+        (ws_a, proj_a1, "adr", "auth", "ADR-001", "adr/001.md", "2026-05-18T00:00:03Z"),
+        (
+            ws_a,
+            proj_a2,
+            "design",
+            "billing",
+            "Billing Design",
+            "design/billing.md",
+            "2026-05-18T00:00:04Z",
+        ),
+        (ws_b, proj_b1, "design", "ops", "Ops Design", "design/ops.md", "2026-05-18T00:00:05Z"),
     ]
     for ws, pr, dom, sub, tit, fn, created in docs:
         conn.execute(
@@ -113,8 +121,10 @@ def _seed_with_docs_and_tasks(db_path: str) -> dict:
     conn.commit()
     conn.close()
     return {
-        "workspace_a": ws_a, "workspace_b": ws_b,
-        "project_a1": proj_a1, "project_a2": proj_a2,
+        "workspace_a": ws_a,
+        "workspace_b": ws_b,
+        "project_a1": proj_a1,
+        "project_a2": proj_a2,
         "project_b1": proj_b1,
         "task_pending": task_pending,
     }
@@ -136,11 +146,10 @@ def workspace(tmp_path, monkeypatch):
 
 # ── find_documents (FTS5 + structured filters) ────────────────────────────
 
+
 def test_find_documents_filters_by_workspace_id(workspace):
-    a = backend_local.find_documents(
-        query="design", workspace_id=workspace["workspace_a"])
-    b = backend_local.find_documents(
-        query="design", workspace_id=workspace["workspace_b"])
+    a = backend_local.find_documents(query="design", workspace_id=workspace["workspace_a"])
+    b = backend_local.find_documents(query="design", workspace_id=workspace["workspace_b"])
     titles_a = {d["title"] for d in a}
     titles_b = {d["title"] for d in b}
     assert "Ops Design" not in titles_a
@@ -149,8 +158,7 @@ def test_find_documents_filters_by_workspace_id(workspace):
 
 
 def test_find_documents_filters_by_project_id(workspace):
-    r = backend_local.find_documents(
-        query="design", project_id=workspace["project_a1"])
+    r = backend_local.find_documents(query="design", project_id=workspace["project_a1"])
     titles = {d["title"] for d in r}
     assert "Auth Design" in titles
     assert "Billing Design" not in titles
@@ -222,6 +230,7 @@ def test_find_documents_fts5_supports_prefix(workspace):
 
 # ── get_task ───────────────────────────────────────────────────────────────
 
+
 def test_get_task_returns_row(workspace):
     r = backend_local.get_task(task_id=workspace["task_pending"])
     assert r is not None
@@ -235,11 +244,10 @@ def test_get_task_returns_none_when_missing(workspace):
 
 # ── list_tasks ─────────────────────────────────────────────────────────────
 
+
 def test_list_tasks_filters_by_status(workspace):
-    pending = backend_local.list_tasks(
-        project_id=workspace["project_a1"], status="pending")
-    complete = backend_local.list_tasks(
-        project_id=workspace["project_a1"], status="complete")
+    pending = backend_local.list_tasks(project_id=workspace["project_a1"], status="pending")
+    complete = backend_local.list_tasks(project_id=workspace["project_a1"], status="complete")
     all_tasks = backend_local.list_tasks(project_id=workspace["project_a1"])
     assert len(pending) == 1
     assert len(complete) == 1
@@ -249,11 +257,11 @@ def test_list_tasks_filters_by_status(workspace):
 
 # ── lookup_index_id_by_source_ref ──────────────────────────────────────────
 
+
 def test_lookup_index_id_by_source_ref_returns_none_on_miss(workspace):
     """Source_ref that has never been persisted returns None — Plan 4
     migrator interprets this as 'not yet migrated; insert + tag'."""
-    assert backend_local.lookup_index_id_by_source_ref(
-        source_ref="atelier:v1:tasks:9999") is None
+    assert backend_local.lookup_index_id_by_source_ref(source_ref="atelier:v1:tasks:9999") is None
     assert backend_local.lookup_index_id_by_source_ref(source_ref="") is None
 
 
@@ -263,13 +271,16 @@ def test_lookup_index_id_by_source_ref_finds_document(workspace):
     r = backend_local.write_document(
         workspace_id=workspace["workspace_a"],
         project_id=workspace["project_a1"],
-        domain="design", subdomain=None,
-        title="Migrated doc", body="legacy body",
+        domain="design",
+        subdomain=None,
+        title="Migrated doc",
+        body="legacy body",
         caller_agent_id="atelier-pm-1",
         source_ref="atelier:v1:project_documents:42",
     )
     found = backend_local.lookup_index_id_by_source_ref(
-        source_ref="atelier:v1:project_documents:42")
+        source_ref="atelier:v1:project_documents:42"
+    )
     assert found == r["row_id"]
 
 
@@ -278,12 +289,13 @@ def test_lookup_index_id_by_source_ref_finds_task(workspace):
     r = backend_local.write_task(
         workspace_id=workspace["workspace_a"],
         project_id=workspace["project_a1"],
-        title="Migrated task", description="d", subdomain="bug",
+        title="Migrated task",
+        description="d",
+        subdomain="bug",
         created_by="atelier-pm-1",
         source_ref="atelier:v1:tasks:7",
     )
-    found = backend_local.lookup_index_id_by_source_ref(
-        source_ref="atelier:v1:tasks:7")
+    found = backend_local.lookup_index_id_by_source_ref(source_ref="atelier:v1:tasks:7")
     assert found == r["row_id"]
 
 
@@ -295,23 +307,24 @@ def test_lookup_index_id_finds_meeting_by_source_ref(workspace):
     r = backend_local.write_meeting(
         workspace_id=workspace["workspace_a"],
         project_id=workspace["project_a1"],
-        title="Kickoff", date="2026-05-18",
-        summary="s", decisions="d", subdomain=None,
+        title="Kickoff",
+        date="2026-05-18",
+        summary="s",
+        decisions="d",
+        subdomain=None,
         created_by="atelier-pm-1",
         source_ref="atelier:meeting_minutes:7",
     )
-    found = backend_local.lookup_index_id_by_source_ref(
-        source_ref="atelier:meeting_minutes:7")
+    found = backend_local.lookup_index_id_by_source_ref(source_ref="atelier:meeting_minutes:7")
     assert found == r["row_id"]
 
 
 # ── find_or_create_role ────────────────────────────────────────────────────
 
+
 def test_find_or_create_role_idempotent(workspace):
-    first = backend_local.find_or_create_role(
-        name="Designer", description="UI/UX")
-    second = backend_local.find_or_create_role(
-        name="Designer", description="ignored on hit")
+    first = backend_local.find_or_create_role(name="Designer", description="UI/UX")
+    second = backend_local.find_or_create_role(name="Designer", description="ignored on hit")
     assert first["id"] == second["id"]
     assert second["description"] == "UI/UX"  # unchanged on hit
     # Nit-8: assert the no-second-write invariant — `created_at` (and the
@@ -321,24 +334,22 @@ def test_find_or_create_role_idempotent(workspace):
     assert second["updated_at"] == first["updated_at"]
     # Confirm no duplicate row.
     conn = sqlite3.connect(workspace["db"])
-    count = conn.execute(
-        "SELECT COUNT(*) FROM roles WHERE name = 'Designer'"
-    ).fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM roles WHERE name = 'Designer'").fetchone()[0]
     conn.close()
     assert count == 1
 
 
 # ── find_or_create_agent ───────────────────────────────────────────────────
 
+
 def test_find_or_create_agent_idempotent(workspace):
-    role = backend_local.find_or_create_role(
-        name="Engineer", description="Eng")
+    role = backend_local.find_or_create_role(name="Engineer", description="Eng")
     a = backend_local.find_or_create_agent(
-        agent_id="atelier-eng-1", name="Eng 1",
-        role_id=role["id"], profile="engineer")
+        agent_id="atelier-eng-1", name="Eng 1", role_id=role["id"], profile="engineer"
+    )
     b = backend_local.find_or_create_agent(
-        agent_id="atelier-eng-1", name="ignored",
-        role_id=role["id"], profile="ignored")
+        agent_id="atelier-eng-1", name="ignored", role_id=role["id"], profile="ignored"
+    )
     assert a["id"] == b["id"]
     assert b["name"] == "Eng 1"  # unchanged on hit
     # Nit-9: assert the no-second-write invariant — created_at/updated_at
@@ -346,14 +357,13 @@ def test_find_or_create_agent_idempotent(workspace):
     assert b["created_at"] == a["created_at"]
     assert b["updated_at"] == a["updated_at"]
     conn = sqlite3.connect(workspace["db"])
-    count = conn.execute(
-        "SELECT COUNT(*) FROM agents WHERE id = 'atelier-eng-1'"
-    ).fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM agents WHERE id = 'atelier-eng-1'").fetchone()[0]
     conn.close()
     assert count == 1
 
 
 # ── PRAGMA foreign_keys enforcement ────────────────────────────────────────
+
 
 def test_foreign_keys_enforced(workspace):
     """Imp-3 from QA: assert PRAGMA foreign_keys=ON is in effect on every
@@ -367,7 +377,9 @@ def test_foreign_keys_enforced(workspace):
         backend_local.write_document(
             workspace_id=workspace["workspace_a"],
             project_id=999999,  # no such project
-            domain="design", subdomain=None,
-            title="orphan", body="x",
+            domain="design",
+            subdomain=None,
+            title="orphan",
+            body="x",
             caller_agent_id="atelier-pm-1",
         )

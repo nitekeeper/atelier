@@ -17,6 +17,7 @@ The third test pins the `proceed-memex` branch and asserts that
 `bootstrap.run_bootstrap` is invoked lazily — only when there is no
 migration to do.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -43,17 +44,18 @@ def test_startup_in_local_mode_no_action(project_root, monkeypatch):
     bootstrap call — Atelier has nothing to ask the user about."""
     monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
     from scripts.atelier_entrypoint import startup_check
+
     r = startup_check()
     assert r["action"] == "proceed-local"
 
 
-def test_startup_in_memex_mode_with_local_db_returns_prompt_action(
-        project_root, monkeypatch):
+def test_startup_in_memex_mode_with_local_db_returns_prompt_action(project_root, monkeypatch):
     """Memex is installed AND a project-local DB exists with no marker —
     we owe the user a prompt before touching either store."""
     monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "memex")
     (project_root / ".ai" / "atelier.db").touch()
     from scripts.atelier_entrypoint import startup_check
+
     r = startup_check()
     assert r["action"] == "prompt-migration"
     assert "atelier.db" in r["local_db"]
@@ -67,8 +69,8 @@ def test_startup_in_memex_mode_no_local_db_proceeds(project_root, monkeypatch):
     migration check, the stub installed here would not intercept it.
     """
     monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "memex")
-    monkeypatch.setattr("scripts.bootstrap.run_bootstrap",
-                        lambda: {"version": "1.1.0"})
+    monkeypatch.setattr("scripts.bootstrap.run_bootstrap", lambda: {"version": "1.1.0"})
     from scripts.atelier_entrypoint import startup_check
+
     r = startup_check()
     assert r["action"] == "proceed-memex"

@@ -7,6 +7,7 @@ markdown file MUST stay in sync. The Memex Archivist also archives
 the body to ~/.memex/raw/ on Tier 2 writes — that's a separate
 content-addressable copy and is orthogonal to the workspace-local
 .ai/meetings/ file that humans browse and grep."""
+
 from __future__ import annotations
 import re
 from datetime import datetime, timezone
@@ -26,9 +27,9 @@ def _meeting_filename(date: str, title: str) -> str:
     return f"{date}-{_slugify(title)}.md"
 
 
-def _render_meeting_md(title: str, date: str, summary: str,
-                       decisions: str,
-                       participants: list[str] | None = None) -> str:
+def _render_meeting_md(
+    title: str, date: str, summary: str, decisions: str, participants: list[str] | None = None
+) -> str:
     """Canonical markdown shape for .ai/meetings/*.md — must match the
     pre-retrofit format produced by scripts/meetings.py:_write_md so
     existing files and tests don't drift."""
@@ -39,12 +40,19 @@ def _render_meeting_md(title: str, date: str, summary: str,
     return "\n".join(parts)
 
 
-def create_meeting(db_path: str, meetings_dir: Path, title: str, date: str,
-                   summary: str, decisions: str, created_by: str,
-                   project_id: int | None = None,
-                   subdomain: str | None = None,
-                   participants: list[str] | None = None,
-                   workspace_id: int | None = None) -> dict:
+def create_meeting(
+    db_path: str,
+    meetings_dir: Path,
+    title: str,
+    date: str,
+    summary: str,
+    decisions: str,
+    created_by: str,
+    project_id: int | None = None,
+    subdomain: str | None = None,
+    participants: list[str] | None = None,
+    workspace_id: int | None = None,
+) -> dict:
     """Write both the markdown file (meetings_dir/<date>-<slug>.md) AND
     the backend row. Order: file first so a backend failure leaves an
     orphan file (recoverable by re-running create) rather than an
@@ -70,28 +78,43 @@ def create_meeting(db_path: str, meetings_dir: Path, title: str, date: str,
     )
     if mode_detector.detect_mode() == "memex":
         result = backend.write_meeting(
-            workspace_id=workspace_id, project_id=project_id,
-            title=title, date=date, summary=summary, decisions=decisions,
-            subdomain=subdomain, created_by=created_by,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            title=title,
+            date=date,
+            summary=summary,
+            decisions=decisions,
+            subdomain=subdomain,
+            created_by=created_by,
         )
     else:
         # Direct backend_local call so we can pass skip_md=True (the
         # facade doesn't accept skip_md — the kwarg is a Local-only
         # implementation detail).
         from scripts import backend_local
+
         result = backend_local.write_meeting(
-            workspace_id=workspace_id, project_id=project_id,
-            title=title, date=date, summary=summary, decisions=decisions,
-            subdomain=subdomain, created_by=created_by,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            title=title,
+            date=date,
+            summary=summary,
+            decisions=decisions,
+            subdomain=subdomain,
+            created_by=created_by,
             skip_md=True,
         )
     now = _now()
     return {
-        "id": result["row_id"], "title": title, "date": date,
+        "id": result["row_id"],
+        "title": title,
+        "date": date,
         "filename": filename,
-        "summary": summary, "decisions": decisions,
+        "summary": summary,
+        "decisions": decisions,
         "created_by": created_by,
-        "created_at": now, "updated_at": now,
+        "created_at": now,
+        "updated_at": now,
         "index_id": result.get("index_id"),
     }
 
@@ -99,15 +122,20 @@ def create_meeting(db_path: str, meetings_dir: Path, title: str, date: str,
 def get_meeting(db_path: str, meeting_id: int) -> dict | None:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         rows = backend_memex._memex_core_query(
-            store="atelier", table="meeting_minutes",
-            where={"id": meeting_id})
+            store="atelier", table="meeting_minutes", where={"id": meeting_id}
+        )
     else:
         from scripts import backend_local
+
         c = backend_local._conn()
-        rows = [dict(r) for r in c.execute(
-            "SELECT * FROM meeting_minutes WHERE id = ?",
-            (meeting_id,)).fetchall()]
+        rows = [
+            dict(r)
+            for r in c.execute(
+                "SELECT * FROM meeting_minutes WHERE id = ?", (meeting_id,)
+            ).fetchall()
+        ]
         c.close()
     return rows[0] if rows else None
 
@@ -115,12 +143,12 @@ def get_meeting(db_path: str, meeting_id: int) -> dict | None:
 def list_meetings(db_path: str) -> list[dict]:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        return backend_memex._memex_core_query(
-            store="atelier", table="meeting_minutes")
+
+        return backend_memex._memex_core_query(store="atelier", table="meeting_minutes")
     from scripts import backend_local
+
     c = backend_local._conn()
-    rows = [dict(r) for r in c.execute(
-        "SELECT * FROM meeting_minutes").fetchall()]
+    rows = [dict(r) for r in c.execute("SELECT * FROM meeting_minutes").fetchall()]
     c.close()
     return rows
 
@@ -128,14 +156,19 @@ def list_meetings(db_path: str) -> list[dict]:
 def add_participant(db_path: str, meeting_id: int, agent_id: str) -> dict:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         return backend_memex._memex_core_insert(
-            store="atelier", table="meeting_participants",
-            row={"meeting_id": meeting_id, "agent_id": agent_id})
+            store="atelier",
+            table="meeting_participants",
+            row={"meeting_id": meeting_id, "agent_id": agent_id},
+        )
     from scripts import backend_local
+
     c = backend_local._conn()
     cur = c.execute(
-        "INSERT INTO meeting_participants (meeting_id, agent_id) "
-        "VALUES (?, ?) RETURNING *", (meeting_id, agent_id))
+        "INSERT INTO meeting_participants (meeting_id, agent_id) VALUES (?, ?) RETURNING *",
+        (meeting_id, agent_id),
+    )
     row = cur.fetchone()
     c.commit()
     c.close()
@@ -145,6 +178,7 @@ def add_participant(db_path: str, meeting_id: int, agent_id: str) -> dict:
 def remove_participant(db_path: str, meeting_id: int, agent_id: str) -> None:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         backend_memex._ensure_memex_importable()
         # No row_id-based delete here (composite primary key). Use the
         # dedicated execute helper from backend_memex — `stores.query()`
@@ -156,10 +190,12 @@ def remove_participant(db_path: str, meeting_id: int, agent_id: str) -> None:
         )
         return
     from scripts import backend_local
+
     c = backend_local._conn()
     c.execute(
         "DELETE FROM meeting_participants WHERE meeting_id = ? AND agent_id = ?",
-        (meeting_id, agent_id))
+        (meeting_id, agent_id),
+    )
     c.commit()
     c.close()
 
@@ -167,8 +203,10 @@ def remove_participant(db_path: str, meeting_id: int, agent_id: str) -> None:
 def get_participants(db_path: str, meeting_id: int) -> list[dict]:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         backend_memex._ensure_memex_importable()
         from scripts import stores as memex_stores  # type: ignore
+
         # Cross-table JOIN — fall back to raw SQL via SELECT-only query().
         return memex_stores.query(
             "atelier",
@@ -177,11 +215,16 @@ def get_participants(db_path: str, meeting_id: int) -> list[dict]:
             (meeting_id,),
         )
     from scripts import backend_local
+
     c = backend_local._conn()
-    rows = [dict(r) for r in c.execute(
-        "SELECT a.* FROM agents a JOIN meeting_participants mp "
-        "ON a.id = mp.agent_id WHERE mp.meeting_id = ?",
-        (meeting_id,)).fetchall()]
+    rows = [
+        dict(r)
+        for r in c.execute(
+            "SELECT a.* FROM agents a JOIN meeting_participants mp "
+            "ON a.id = mp.agent_id WHERE mp.meeting_id = ?",
+            (meeting_id,),
+        ).fetchall()
+    ]
     c.close()
     return rows
 
@@ -196,17 +239,19 @@ def update_meeting(db_path: str, meeting_id: int, **kwargs) -> dict | None:
     updates["updated_at"] = _now()
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         return backend_memex._memex_core_update(
-            store="atelier", table="meeting_minutes",
-            row_id=meeting_id, changes=updates)
+            store="atelier", table="meeting_minutes", row_id=meeting_id, changes=updates
+        )
     from scripts import backend_local
+
     c = backend_local._conn()
     sets = ", ".join(f"{k} = ?" for k in updates)
-    c.execute(f"UPDATE meeting_minutes SET {sets} WHERE id = ?",
-              tuple(updates.values()) + (meeting_id,))
+    c.execute(
+        f"UPDATE meeting_minutes SET {sets} WHERE id = ?", tuple(updates.values()) + (meeting_id,)
+    )
     c.commit()
-    row = c.execute("SELECT * FROM meeting_minutes WHERE id = ?",
-                    (meeting_id,)).fetchone()
+    row = c.execute("SELECT * FROM meeting_minutes WHERE id = ?", (meeting_id,)).fetchone()
     c.close()
     return dict(row) if row else None
 
@@ -221,8 +266,10 @@ def delete_meeting(db_path: str, meetings_dir: Path, meeting_id: int) -> bool:
         return False
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         backend_memex._ensure_memex_importable()
         from scripts import stores as memex_stores  # type: ignore
+
         # Two-step (participants DELETE, then meeting DELETE) is NOT
         # wrapped in a transaction here because Memex Core's API splits
         # writes across two helpers: `_memex_core_execute` (raw SQL,
@@ -239,15 +286,13 @@ def delete_meeting(db_path: str, meetings_dir: Path, meeting_id: int) -> bool:
             sql="DELETE FROM meeting_participants WHERE meeting_id = ?",
             params=(meeting_id,),
         )
-        memex_stores.delete(name="atelier", table="meeting_minutes",
-                            row_id=meeting_id)
+        memex_stores.delete(name="atelier", table="meeting_minutes", row_id=meeting_id)
     else:
         from scripts import backend_local
+
         c = backend_local._conn()
-        c.execute("DELETE FROM meeting_participants WHERE meeting_id = ?",
-                  (meeting_id,))
-        c.execute("DELETE FROM meeting_minutes WHERE id = ?",
-                  (meeting_id,))
+        c.execute("DELETE FROM meeting_participants WHERE meeting_id = ?", (meeting_id,))
+        c.execute("DELETE FROM meeting_minutes WHERE id = ?", (meeting_id,))
         c.commit()
         c.close()
     # backend_local stores `filename` as workspace-relative
@@ -268,8 +313,10 @@ def search_meetings(db_path: str, query: str) -> list[dict]:
     pattern = f"%{query}%"
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         backend_memex._ensure_memex_importable()
         from scripts import stores as memex_stores  # type: ignore
+
         return memex_stores.query(
             "atelier",
             "SELECT * FROM meeting_minutes "
@@ -278,12 +325,17 @@ def search_meetings(db_path: str, query: str) -> list[dict]:
             (pattern, pattern, pattern),
         )
     from scripts import backend_local
+
     c = backend_local._conn()
-    rows = [dict(r) for r in c.execute(
-        "SELECT * FROM meeting_minutes "
-        "WHERE title LIKE ? OR summary LIKE ? OR decisions LIKE ? "
-        "ORDER BY date DESC",
-        (pattern, pattern, pattern)).fetchall()]
+    rows = [
+        dict(r)
+        for r in c.execute(
+            "SELECT * FROM meeting_minutes "
+            "WHERE title LIKE ? OR summary LIKE ? OR decisions LIKE ? "
+            "ORDER BY date DESC",
+            (pattern, pattern, pattern),
+        ).fetchall()
+    ]
     c.close()
     return rows
 
@@ -312,11 +364,17 @@ if __name__ == "__main__":
         # them through yet. Low priority — most callers use the Python
         # API directly via skill files.
         args = parser.parse_args(sys.argv[2:])
-        result = create_meeting(db_path, Path(args.meetings_dir), title=args.title,
-                                date=args.date, summary=args.summary,
-                                decisions=args.decisions, created_by=args.created_by,
-                                workspace_id=args.workspace_id,
-                                project_id=args.project_id)
+        result = create_meeting(
+            db_path,
+            Path(args.meetings_dir),
+            title=args.title,
+            date=args.date,
+            summary=args.summary,
+            decisions=args.decisions,
+            created_by=args.created_by,
+            workspace_id=args.workspace_id,
+            project_id=args.project_id,
+        )
         print(json.dumps(result, indent=2))
     elif cmd == "get":
         result = get_meeting(db_path, int(sys.argv[2]))
@@ -336,7 +394,11 @@ if __name__ == "__main__":
         parser.add_argument("meeting_id", type=int)
         parser.add_argument("--meetings-dir", default=".ai/meetings")
         args = parser.parse_args(sys.argv[2:])
-        print("Deleted" if delete_meeting(db_path, Path(args.meetings_dir), args.meeting_id) else "Not found")
+        print(
+            "Deleted"
+            if delete_meeting(db_path, Path(args.meetings_dir), args.meeting_id)
+            else "Not found"
+        )
     elif cmd == "list":
         print(json.dumps(list_meetings(db_path), indent=2))
     elif cmd == "search":

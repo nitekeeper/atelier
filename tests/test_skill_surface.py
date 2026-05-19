@@ -1,6 +1,7 @@
 """Lock in the contract that Atelier exposes EXACTLY 5 user-facing skills
 to Claude Code (v1.1.0 surface — adds `migrate` to the v1.0.13 set of 4)
 and that every internal procedure stays under internal/."""
+
 import json
 from pathlib import Path
 
@@ -10,8 +11,7 @@ INTERNAL = REPO / "internal"
 
 
 def test_exactly_five_user_skills():
-    skill_dirs = [p for p in SKILLS.iterdir()
-                  if p.is_dir() and (p / "SKILL.md").exists()]
+    skill_dirs = [p for p in SKILLS.iterdir() if p.is_dir() and (p / "SKILL.md").exists()]
     names = sorted(p.name for p in skill_dirs)
     assert names == ["ingest", "load", "migrate", "run", "save"], names
 
@@ -26,17 +26,18 @@ def test_plugin_manifest_lists_no_extra_skills():
     if isinstance(declared, list):
         for s in declared:
             name = s if isinstance(s, str) else s.get("name", "")
-            assert any(name.endswith(n)
-                       for n in ("load", "save", "ingest", "run", "migrate")), \
+            assert any(name.endswith(n) for n in ("load", "save", "ingest", "run", "migrate")), (
                 f"manifest declares unknown skill: {name}"
+            )
 
 
 def test_no_internal_skill_has_user_invocable_true():
     """Every internal SKILL.md must NOT have `user-invocable: true`."""
     for path in INTERNAL.rglob("SKILL.md"):
         text = path.read_text(encoding="utf-8")
-        assert "user-invocable: true" not in text, \
+        assert "user-invocable: true" not in text, (
             f"{path.relative_to(REPO)} declares user-invocable: true"
+        )
 
 
 def test_internal_procedures_have_description_only_no_name_field():

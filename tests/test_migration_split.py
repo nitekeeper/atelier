@@ -10,6 +10,7 @@ This module locks the contract from spec §11.1 / §11.2:
     mode can boot without a `~/.memex/agents.db` to defer to.
   * No v1.0.13 migration files survive (`001_initial_schema.sql` … `005_soft_walls.sql`).
 """
+
 import hashlib
 import re
 import sqlite3
@@ -45,12 +46,13 @@ def test_v1_migrations_deleted():
         "005_soft_walls.sql",
     )
     for legacy in legacy_files:
-        assert not (MIGRATIONS / legacy).exists(), \
-            f"v1.0.13 migration {legacy} must be deleted"
-        assert not (MIGRATIONS / "shared" / legacy).exists(), \
+        assert not (MIGRATIONS / legacy).exists(), f"v1.0.13 migration {legacy} must be deleted"
+        assert not (MIGRATIONS / "shared" / legacy).exists(), (
             f"v1.0.13 migration {legacy} must not be moved into shared/"
-        assert not (MIGRATIONS / "local-only" / legacy).exists(), \
+        )
+        assert not (MIGRATIONS / "local-only" / legacy).exists(), (
             f"v1.0.13 migration {legacy} must not be moved into local-only/"
+        )
 
 
 def test_shared_holds_v110_schema_and_followups():
@@ -62,13 +64,15 @@ def test_shared_holds_v110_schema_and_followups():
     files = sorted((MIGRATIONS / "shared").glob("*.sql"))
     names = [f.name for f in files]
     assert "001_v110_schema.sql" in names, "base schema file missing"
-    assert names[0] == "001_v110_schema.sql", \
+    assert names[0] == "001_v110_schema.sql", (
         f"shared/ first file must be 001_v110_schema.sql, got {names[0]}"
+    )
     # All shared files use the 001-049 numeric prefix band.
     for name in names:
         prefix = name.split("_", 1)[0]
-        assert prefix.isdigit() and 1 <= int(prefix) <= 49, \
+        assert prefix.isdigit() and 1 <= int(prefix) <= 49, (
             f"shared/ file {name} outside the 001-049 band"
+        )
 
 
 def test_apply_shared_only_creates_no_roles_or_agents(tmp_path):
@@ -78,8 +82,7 @@ def test_apply_shared_only_creates_no_roles_or_agents(tmp_path):
     db = tmp_path / "test.db"
     apply_migrations(str(db), MIGRATIONS / "shared")
     with sqlite3.connect(str(db)) as con:
-        tables = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "roles" not in tables
     assert "agents" not in tables
 
@@ -99,8 +102,9 @@ def test_memex_mode_bootstrap_shared_only(tmp_path):
     db = tmp_path / "atelier.db"
     apply_migrations(str(db), MIGRATIONS / "shared")
     con = sqlite3.connect(str(db))
-    tables = {r[0] for r in con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    tables = {
+        r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
     assert "roles" not in tables
     assert "agents" not in tables
     # All 12 v1.1.0 tables in shared/ — pinned per QA Nit-3.
@@ -129,8 +133,9 @@ def test_local_mode_bootstrap_shared_plus_local(tmp_path):
     apply_migrations(str(db), MIGRATIONS / "shared")
     apply_migrations(str(db), MIGRATIONS / "local-only")
     con = sqlite3.connect(str(db))
-    tables = {r[0] for r in con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    tables = {
+        r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
     assert "roles" in tables
     assert "agents" in tables
     assert "projects" in tables
@@ -143,8 +148,7 @@ def test_apply_migrations_is_idempotent(tmp_path):
     con = sqlite3.connect(str(db))
     applied = con.execute("SELECT COUNT(*) FROM migrations").fetchone()[0]
     expected = len(list((MIGRATIONS / "shared").glob("*.sql")))
-    assert applied == expected, \
-        f"expected {expected} shared migration rows, got {applied}"
+    assert applied == expected, f"expected {expected} shared migration rows, got {applied}"
 
 
 def test_idempotency_of_shared_plus_local(tmp_path):
@@ -157,10 +161,10 @@ def test_idempotency_of_shared_plus_local(tmp_path):
     apply_migrations(str(db), MIGRATIONS / "local-only")  # re-apply
     with sqlite3.connect(str(db)) as con:
         count = con.execute("SELECT COUNT(*) FROM migrations").fetchone()[0]
-    expected = (len(list((MIGRATIONS / "shared").glob("*.sql")))
-                + len(list((MIGRATIONS / "local-only").glob("*.sql"))))
-    assert count == expected, \
-        f"expected {expected} migration rows, got {count}"
+    expected = len(list((MIGRATIONS / "shared").glob("*.sql"))) + len(
+        list((MIGRATIONS / "local-only").glob("*.sql"))
+    )
+    assert count == expected, f"expected {expected} migration rows, got {count}"
 
 
 def test_index_id_columns_present_in_shared_schema(tmp_path):
@@ -170,8 +174,7 @@ def test_index_id_columns_present_in_shared_schema(tmp_path):
     apply_migrations(str(db), MIGRATIONS / "shared")
     con = sqlite3.connect(str(db))
     for table in ("projects", "project_documents", "meeting_minutes", "tasks"):
-        cols = [r[1] for r in con.execute(
-            f"PRAGMA table_info({table})").fetchall()]
+        cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()]
         assert "index_id" in cols, f"{table} missing index_id column"
 
 
@@ -180,9 +183,12 @@ def test_index_id_indexes_present_in_shared_schema(tmp_path):
     db = tmp_path / "atelier.db"
     apply_migrations(str(db), MIGRATIONS / "shared")
     with sqlite3.connect(str(db)) as con:
-        names = {row[0] for row in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%index_id%'"
-        )}
+        names = {
+            row[0]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%index_id%'"
+            )
+        }
     expected = {
         "idx_projects_index_id",
         "idx_docs_index_id",
@@ -209,11 +215,13 @@ def test_phase_seed_sha256_pinned():
     explicit hash bump. Per QA Nit-2 — guards against silent drift of
     the inlined seed block."""
     text = (MIGRATIONS / "shared" / "001_v110_schema.sql").read_text(encoding="utf-8")
-    block = "\n".join(re.findall(
-        r"INSERT OR IGNORE INTO (?:phases|phase_transitions|skill_gates).*?;",
-        text,
-        re.DOTALL,
-    ))
+    block = "\n".join(
+        re.findall(
+            r"INSERT OR IGNORE INTO (?:phases|phase_transitions|skill_gates).*?;",
+            text,
+            re.DOTALL,
+        )
+    )
     actual = hashlib.sha256(block.encode("utf-8")).hexdigest()
     expected = "48bd3ce5791f2c231df171c4e389a9436fa53706fdfaf39b6b89683b9c6a1043"
     assert actual == expected, (
@@ -233,6 +241,7 @@ def test_foreign_keys_enforced_in_get_connection(tmp_path):
     Business-logic callers should route through `scripts/backend.py`,
     not import this helper directly."""
     from scripts.migrate import get_connection
+
     db = tmp_path / "atelier.db"
     apply_migrations(str(db), MIGRATIONS / "shared")
     apply_migrations(str(db), MIGRATIONS / "local-only")
@@ -267,8 +276,7 @@ def test_migrate_cli_applies_both_dirs(tmp_path):
     )
     assert "Migrations applied" in result.stdout
     with sqlite3.connect(str(db)) as con:
-        tables = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         applied = {r[0] for r in con.execute("SELECT filename FROM migrations")}
     # shared/ landed: workspaces table is present.
     assert "workspaces" in tables, "CLI did not apply shared/"

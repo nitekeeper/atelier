@@ -31,6 +31,7 @@ the same lookup also serves Plan 4's legacy reader once it lands.
 Unknown strings collapse to 0 ("no priority") rather than raising — the
 priority surface is advisory; a typo shouldn't crash a task create.
 """
+
 from __future__ import annotations
 import logging
 from datetime import datetime, timezone
@@ -76,12 +77,19 @@ def _now() -> str:
 
 # ── Writes ─────────────────────────────────────────────────────────────────
 
-def create_task(db_path: str, project_id: int, title: str,
-                created_by: str, description: str | None = None,
-                priority=0, notes: str | None = None,
-                assigned_to: str | None = None,
-                workspace_id: int = 1,
-                subdomain: str | None = None) -> dict:
+
+def create_task(
+    db_path: str,
+    project_id: int,
+    title: str,
+    created_by: str,
+    description: str | None = None,
+    priority=0,
+    notes: str | None = None,
+    assigned_to: str | None = None,
+    workspace_id: int = 1,
+    subdomain: str | None = None,
+) -> dict:
     """Create a task. `priority` accepts INT (preferred) or the legacy
     TEXT form ('critical'|'high'|'medium'|'low'); both are coerced to
     the v1.1.0 INTEGER column before the write.
@@ -95,9 +103,12 @@ def create_task(db_path: str, project_id: int, title: str,
     workspace can override.
     """
     result = backend.write_task(
-        workspace_id=workspace_id, project_id=project_id,
-        title=title, description=description or "",
-        subdomain=subdomain, created_by=created_by,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        title=title,
+        description=description or "",
+        subdomain=subdomain,
+        created_by=created_by,
         assigned_to=assigned_to,
         priority=_coerce_priority(priority),
         notes=notes,
@@ -113,16 +124,22 @@ def create_task(db_path: str, project_id: int, title: str,
         # see a row that wasn't actually re-fetched.
         _log.warning(
             "create_task: re-fetch missed for row_id=%s; synthesising row "
-            "from write inputs (Memex-mode id semantics)", result["row_id"],
+            "from write inputs (Memex-mode id semantics)",
+            result["row_id"],
         )
         now = _now()
         return {
-            "id": result["row_id"], "project_id": project_id, "title": title,
-            "description": description, "created_by": created_by,
+            "id": result["row_id"],
+            "project_id": project_id,
+            "title": title,
+            "description": description,
+            "created_by": created_by,
             "assigned_to": assigned_to,
             "priority": _coerce_priority(priority),
-            "notes": notes, "status": "pending",
-            "created_at": now, "updated_at": now,
+            "notes": notes,
+            "status": "pending",
+            "created_at": now,
+            "updated_at": now,
             "index_id": result.get("index_id"),
         }
     return task
@@ -146,7 +163,8 @@ def update_task(db_path: str, task_id: int, **kwargs) -> dict:
     # side-effects land via the canonical path.
     if set(updates.keys()) <= {"status", "notes"} and "status" in updates:
         return backend.update_task_status(
-            task_id=task_id, status=updates["status"],
+            task_id=task_id,
+            status=updates["status"],
             notes=updates.get("notes"),
         )
 
@@ -157,14 +175,19 @@ def update_task(db_path: str, task_id: int, **kwargs) -> dict:
     # _memex_core_update (Memex) / backend_local._conn() (Local).
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         changes = dict(updates)
         changes["updated_at"] = _now()
         backend_memex._memex_core_update(
-            store="atelier", table="tasks", row_id=task_id, changes=changes,
+            store="atelier",
+            table="tasks",
+            row_id=task_id,
+            changes=changes,
         )
         return get_task(db_path, task_id)
 
     from scripts import backend_local
+
     updates["updated_at"] = _now()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     c = backend_local._conn()
@@ -189,11 +212,15 @@ def delete_task(db_path: str, task_id: int) -> bool:
     # file path, bypassing sys.modules.
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         backend_memex._memex_module("stores").delete(
-            "atelier", "tasks", task_id,
+            "atelier",
+            "tasks",
+            task_id,
         )
         return True
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         cur = c.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
@@ -214,23 +241,23 @@ def assign_task(db_path: str, task_id: int, agent_id: str) -> dict:
     """
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         return backend_memex._memex_core_update(
-            store="atelier", table="tasks", row_id=task_id,
-            changes={"assigned_to": agent_id, "status": "assigned",
-                     "updated_at": _now()},
+            store="atelier",
+            table="tasks",
+            row_id=task_id,
+            changes={"assigned_to": agent_id, "status": "assigned", "updated_at": _now()},
         )
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         c.execute(
-            "UPDATE tasks SET assigned_to = ?, status = 'assigned', "
-            "updated_at = ? WHERE id = ?",
+            "UPDATE tasks SET assigned_to = ?, status = 'assigned', updated_at = ? WHERE id = ?",
             (agent_id, _now(), task_id),
         )
         c.commit()
-        row = c.execute(
-            "SELECT * FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else {}
@@ -251,10 +278,11 @@ def claim_task(db_path: str, task_id: int, agent_id: str) -> dict:
     return update_task_status(db_path, task_id, status="in-progress")
 
 
-def update_task_status(db_path: str, task_id: int, status: str,
-                       notes: str | None = None) -> dict:
+def update_task_status(db_path: str, task_id: int, status: str, notes: str | None = None) -> dict:
     return backend.update_task_status(
-        task_id=task_id, status=status, notes=notes,
+        task_id=task_id,
+        status=status,
+        notes=notes,
     )
 
 
@@ -264,13 +292,17 @@ def complete_task(db_path: str, task_id: int) -> dict:
 
 # ── Reads ──────────────────────────────────────────────────────────────────
 
+
 def get_task(db_path: str, task_id: int) -> dict | None:
     return backend.get_task(task_id=task_id)
 
 
-def list_tasks(db_path: str, status: str | None = None,
-               assigned_to: str | None = None,
-               project_id: int | None = None) -> list[dict]:
+def list_tasks(
+    db_path: str,
+    status: str | None = None,
+    assigned_to: str | None = None,
+    project_id: int | None = None,
+) -> list[dict]:
     """List tasks, optionally filtered.
 
     `backend.list_tasks` requires `project_id` (spec §4.3) so the
@@ -300,6 +332,7 @@ def list_tasks(db_path: str, status: str | None = None,
             "search lands in v1.2)."
         )
     from scripts import backend_local
+
     conditions, params = [], []
     if status:
         conditions.append("status = ?")
@@ -319,9 +352,9 @@ def list_tasks(db_path: str, status: str | None = None,
     return [dict(r) for r in rows]
 
 
-def search_tasks(db_path: str, query: str,
-                 status: str | None = None,
-                 assigned_to: str | None = None) -> list[dict]:
+def search_tasks(
+    db_path: str, query: str, status: str | None = None, assigned_to: str | None = None
+) -> list[dict]:
     """LIKE-search across title / description / notes.
 
     No backend surface yet (FTS5 covers `project_documents` only — Plan 2
@@ -335,6 +368,7 @@ def search_tasks(db_path: str, query: str,
             "(Memex-side task FTS lands with the v1.2 task domain)."
         )
     from scripts import backend_local
+
     pattern = f"%{query}%"
     conditions = ["(title LIKE ? OR description LIKE ? OR notes LIKE ?)"]
     params = [pattern, pattern, pattern]
@@ -348,8 +382,7 @@ def search_tasks(db_path: str, query: str,
     c = backend_local._conn()
     try:
         rows = c.execute(
-            f"SELECT * FROM tasks {where} "
-            f"ORDER BY priority DESC, created_at",
+            f"SELECT * FROM tasks {where} ORDER BY priority DESC, created_at",
             params,
         ).fetchall()
     finally:
@@ -376,9 +409,19 @@ if __name__ == "__main__":
         # ints ("0".."4") without ceremony.
         parser.add_argument("--priority", type=str, default="0")
         args = parser.parse_args(sys.argv[2:])
-        print(json.dumps(create_task(db_path, project_id=args.project_id, title=args.title,
-                                      created_by=args.created_by, description=args.description,
-                                      priority=args.priority), indent=2))
+        print(
+            json.dumps(
+                create_task(
+                    db_path,
+                    project_id=args.project_id,
+                    title=args.title,
+                    created_by=args.created_by,
+                    description=args.description,
+                    priority=args.priority,
+                ),
+                indent=2,
+            )
+        )
     elif cmd == "get":
         result = get_task(db_path, int(sys.argv[2]))
         print(json.dumps(result, indent=2) if result else "Not found")
@@ -404,15 +447,26 @@ if __name__ == "__main__":
         parser.add_argument("--assigned_to")
         parser.add_argument("--project_id", type=int)
         args = parser.parse_args(sys.argv[2:])
-        print(json.dumps(list_tasks(db_path, status=args.status,
-                                     assigned_to=args.assigned_to,
-                                     project_id=args.project_id), indent=2))
+        print(
+            json.dumps(
+                list_tasks(
+                    db_path,
+                    status=args.status,
+                    assigned_to=args.assigned_to,
+                    project_id=args.project_id,
+                ),
+                indent=2,
+            )
+        )
     elif cmd == "search":
         parser = argparse.ArgumentParser()
         parser.add_argument("query")
         parser.add_argument("--status")
         parser.add_argument("--assigned_to")
         args = parser.parse_args(sys.argv[2:])
-        print(json.dumps(search_tasks(db_path, args.query,
-                                       status=args.status,
-                                       assigned_to=args.assigned_to), indent=2))
+        print(
+            json.dumps(
+                search_tasks(db_path, args.query, status=args.status, assigned_to=args.assigned_to),
+                indent=2,
+            )
+        )

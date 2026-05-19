@@ -1,5 +1,6 @@
 """The /atelier:migrate skill is the 5th user-facing surface (v1.1.0).
 This test pins its presence + frontmatter so accidental removal fails CI."""
+
 from pathlib import Path
 import re
 

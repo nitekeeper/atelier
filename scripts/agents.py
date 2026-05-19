@@ -23,6 +23,7 @@ Memex-mode dispatch uses `backend_memex._memex_module(...)` rather than
 would otherwise resolve the latter back to THIS module (namespace
 collision resolved in Wave 1 T8-10 via importlib.util).
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -39,24 +40,26 @@ def _now() -> str:
 
 def _memex_agents_pkg():
     from scripts import backend_memex
+
     return backend_memex._memex_module("agents")
 
 
 def _memex_stores():
     from scripts import backend_memex
+
     return backend_memex._memex_module("stores")
 
 
 def _memex_db_path() -> str:
     from scripts import backend_memex
+
     return backend_memex._agents_db_path()
 
 
 # ── Public CRUD surface ──────────────────────────────────────────────────
 
 
-def create_agent(db_path: str, id: str, name: str, role_id: int,
-                 profile: str) -> dict:
+def create_agent(db_path: str, id: str, name: str, role_id: int, profile: str) -> dict:
     """Create an `agents` row (or return the existing row if `id` is
     taken). Idempotent — routes through `backend.find_or_create_agent`,
     which returns the existing row unchanged when `id` is already
@@ -68,7 +71,10 @@ def create_agent(db_path: str, id: str, name: str, role_id: int,
     .ai/atelier.db), Memex mode resolves `~/.memex/agents.db`.
     """
     return backend.find_or_create_agent(
-        agent_id=id, name=name, role_id=role_id, profile=profile,
+        agent_id=id,
+        name=name,
+        role_id=role_id,
+        profile=profile,
     )
 
 
@@ -77,11 +83,10 @@ def get_agent(db_path: str, agent_id: str) -> dict | None:
         pkg = _memex_agents_pkg()
         return pkg.get_agent(_memex_db_path(), agent_id)
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
-        row = c.execute(
-            "SELECT * FROM agents WHERE id = ?", (agent_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else None
@@ -97,6 +102,7 @@ def update_agent(db_path: str, agent_id: str, **kwargs) -> dict | None:
         return pkg.update_agent(_memex_db_path(), agent_id, **fields)
     fields["updated_at"] = _now()
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         set_clause = ", ".join(f"{k} = ?" for k in fields)
@@ -116,9 +122,9 @@ def delete_agent(db_path: str, agent_id: str) -> bool:
         if hasattr(pkg, "delete_agent"):
             return pkg.delete_agent(_memex_db_path(), agent_id)
         # Fallback for older Memex versions: drop straight to stores.
-        return bool(_memex_stores().delete(
-            name="agents", table="agents", row_id=agent_id))
+        return bool(_memex_stores().delete(name="agents", table="agents", row_id=agent_id))
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         cur = c.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
@@ -140,6 +146,7 @@ def list_agents(db_path: str, role_id: int | None = None) -> list[dict]:
             return all_agents
         return [a for a in all_agents if a.get("role_id") == role_id]
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         if role_id is not None:
@@ -148,15 +155,13 @@ def list_agents(db_path: str, role_id: int | None = None) -> list[dict]:
                 (role_id,),
             ).fetchall()
         else:
-            rows = c.execute(
-                "SELECT * FROM agents ORDER BY name").fetchall()
+            rows = c.execute("SELECT * FROM agents ORDER BY name").fetchall()
     finally:
         c.close()
     return [dict(r) for r in rows]
 
 
-def search_agents(db_path: str, query: str,
-                  role_id: int | None = None) -> list[dict]:
+def search_agents(db_path: str, query: str, role_id: int | None = None) -> list[dict]:
     """Substring search on `name` + `profile`, optionally filtered by
     `role_id`. Memex mode reaches through `stores.query` because LIKE
     is not expressible via the equality-only `stores.query` where-dict."""
@@ -172,11 +177,11 @@ def search_agents(db_path: str, query: str,
             )
         return stores.query(
             "agents",
-            "SELECT * FROM agents WHERE name LIKE ? OR profile LIKE ? "
-            "ORDER BY name",
+            "SELECT * FROM agents WHERE name LIKE ? OR profile LIKE ? ORDER BY name",
             (pattern, pattern),
         )
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         if role_id is not None:
@@ -187,8 +192,7 @@ def search_agents(db_path: str, query: str,
             ).fetchall()
         else:
             rows = c.execute(
-                "SELECT * FROM agents WHERE name LIKE ? OR profile LIKE ? "
-                "ORDER BY name",
+                "SELECT * FROM agents WHERE name LIKE ? OR profile LIKE ? ORDER BY name",
                 (pattern, pattern),
             ).fetchall()
     finally:
@@ -208,8 +212,18 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
 
     if cmd == "create":
-        print(json.dumps(create_agent(db_path, id=sys.argv[2], name=sys.argv[3],
-                                       role_id=int(sys.argv[4]), profile=sys.argv[5]), indent=2))
+        print(
+            json.dumps(
+                create_agent(
+                    db_path,
+                    id=sys.argv[2],
+                    name=sys.argv[3],
+                    role_id=int(sys.argv[4]),
+                    profile=sys.argv[5],
+                ),
+                indent=2,
+            )
+        )
     elif cmd == "get":
         result = get_agent(db_path, sys.argv[2])
         print(json.dumps(result, indent=2) if result else "Not found")

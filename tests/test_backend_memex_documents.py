@@ -6,6 +6,7 @@ the librarian_output dict deterministically (no LLM dispatch), route to
 the correct target table, handle embedding failures per memex v2.4.1
 contract, and retry on DuplicateKeyError per spec §6.4.
 """
+
 import json as _json
 import sys
 import types
@@ -40,14 +41,18 @@ def fake_memex_registry(fake_memex_home):
     registry reads — none today (all `_memex_module` calls are stubbed
     per test). Kept as a focused fixture per QA N15 so future tests
     pull only the bytes they need."""
-    (fake_memex_home / "registry.json").write_text(_json.dumps({
-        "atelier": {
-            "name": "atelier",
-            "path": (fake_memex_home / "atelier.db").as_posix(),
-            "schema_version": "v1",
-            "registered_at": _datetime.now(_tz.utc).isoformat(),
-        },
-    }))
+    (fake_memex_home / "registry.json").write_text(
+        _json.dumps(
+            {
+                "atelier": {
+                    "name": "atelier",
+                    "path": (fake_memex_home / "atelier.db").as_posix(),
+                    "schema_version": "v1",
+                    "registered_at": _datetime.now(_tz.utc).isoformat(),
+                },
+            }
+        )
+    )
     return fake_memex_home
 
 
@@ -60,8 +65,7 @@ def fake_memex(fake_memex_home):
     return fake_memex_home
 
 
-def test_load_memex_module_resolves_agents_librarian_without_collision(
-        tmp_path, monkeypatch):
+def test_load_memex_module_resolves_agents_librarian_without_collision(tmp_path, monkeypatch):
     """C1/I4: stand up a fake Memex plugin tree with the same shape as
     the real install (`scripts/agents/librarian.py` AS A PACKAGE) and
     verify production resolves it via `_memex_module("agents.librarian")`
@@ -77,24 +81,26 @@ def test_load_memex_module_resolves_agents_librarian_without_collision(
     plugin = tmp_path / "memex_plugin"
     (plugin / ".claude-plugin").mkdir(parents=True)
     (plugin / ".claude-plugin" / "plugin.json").write_text(
-        _json.dumps({"name": "memex", "version": "test"}))
+        _json.dumps({"name": "memex", "version": "test"})
+    )
     scripts_dir = plugin / "scripts" / "agents"
     scripts_dir.mkdir(parents=True)
     (plugin / "scripts" / "__init__.py").write_text("")
     (scripts_dir / "__init__.py").write_text("")
     (scripts_dir / "librarian.py").write_text(
-        "MARKER = 'fake-memex-librarian'\n"
-        "class DuplicateKeyError(Exception):\n"
-        "    pass\n"
+        "MARKER = 'fake-memex-librarian'\nclass DuplicateKeyError(Exception):\n    pass\n"
     )
 
     monkeypatch.setattr(backend_memex, "_memex_plugin_root", lambda: plugin)
     # Bust the lru_cache so this test's fake-plugin path doesn't pollute
     # adjacent tests (and isn't itself polluted by them).
     backend_memex._load_memex_module.cache_clear()
-    monkeypatch.setattr(backend_memex._load_memex_module, "cache_clear",
-                        backend_memex._load_memex_module.cache_clear,
-                        raising=False)
+    monkeypatch.setattr(
+        backend_memex._load_memex_module,
+        "cache_clear",
+        backend_memex._load_memex_module.cache_clear,
+        raising=False,
+    )
 
     mod = backend_memex._memex_module("agents.librarian")
     assert mod.MARKER == "fake-memex-librarian"
@@ -106,8 +112,7 @@ def test_load_memex_module_resolves_agents_librarian_without_collision(
     backend_memex._load_memex_module.cache_clear()
 
 
-def test_load_memex_module_scripts_db_shim_is_scoped_to_exec(
-        tmp_path, monkeypatch):
+def test_load_memex_module_scripts_db_shim_is_scoped_to_exec(tmp_path, monkeypatch):
     """T26 round-1 regression: when Memex's bundled scripts do
     `from scripts.db import get_connection` at module exec time, the
     loader must install `sys.modules['scripts.db']` for the duration
@@ -133,7 +138,8 @@ def test_load_memex_module_scripts_db_shim_is_scoped_to_exec(
     plugin = tmp_path / "memex_plugin"
     (plugin / ".claude-plugin").mkdir(parents=True)
     (plugin / ".claude-plugin" / "plugin.json").write_text(
-        _json.dumps({"name": "memex", "version": "test"}))
+        _json.dumps({"name": "memex", "version": "test"})
+    )
     scripts_dir = plugin / "scripts"
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "__init__.py").write_text("")
@@ -146,9 +152,7 @@ def test_load_memex_module_scripts_db_shim_is_scoped_to_exec(
     # A module whose top-level `from scripts.db import get_connection`
     # is the failure mode the shim must fix.
     (scripts_dir / "needs_db.py").write_text(
-        "from scripts.db import get_connection\n"
-        "MARKER = 'needs-db'\n"
-        "BOUND = get_connection\n"
+        "from scripts.db import get_connection\nMARKER = 'needs-db'\nBOUND = get_connection\n"
     )
 
     monkeypatch.setattr(backend_memex, "_memex_plugin_root", lambda: plugin)
@@ -179,8 +183,7 @@ def test_load_memex_module_scripts_db_shim_is_scoped_to_exec(
         f"_memex_module call (pre={pre_present}, post={post_present})"
     )
     assert post_value is pre_value, (
-        "shim leaked: 'scripts.db' identity changed across the "
-        "_memex_module call"
+        "shim leaked: 'scripts.db' identity changed across the _memex_module call"
     )
 
 
@@ -189,45 +192,50 @@ def test_write_document_validates_domain(fake_memex):
     with pytest.raises(ValueError, match="unknown domain"):
         backend_memex.write_document(
             domain="blog_post",  # not in DOMAINS
-            title="x", body="x", metadata={}, caller_agent_id="atelier-pm-1",
+            title="x",
+            body="x",
+            metadata={},
+            caller_agent_id="atelier-pm-1",
         )
 
 
-def test_write_document_builds_librarian_output_and_writes(fake_memex,
-                                                            monkeypatch):
+def test_write_document_builds_librarian_output_and_writes(fake_memex, monkeypatch):
     captured = {}
 
     def fake_validate(d):
         captured["validated"] = d
         return d
 
-    def fake_write_entry(*, payload, librarian_output, target_store,
-                         target_table, caller_agent_id, embedding):
+    def fake_write_entry(
+        *, payload, librarian_output, target_store, target_table, caller_agent_id, embedding
+    ):
         captured["payload"] = payload
         captured["librarian_output"] = librarian_output
         captured["target_store"] = target_store
         captured["target_table"] = target_table
         captured["caller_agent_id"] = caller_agent_id
-        return {"status": "ingested",
-                "index_id": librarian_output["index_id"],
-                "key": librarian_output["key"],
-                "domain": librarian_output["domain"],
-                "row_id": 42, "relations": []}
+        return {
+            "status": "ingested",
+            "index_id": librarian_output["index_id"],
+            "key": librarian_output["key"],
+            "domain": librarian_output["domain"],
+            "row_id": 42,
+            "relations": [],
+        }
 
     monkeypatch.setattr(backend_memex, "_memex_validate_output", fake_validate)
     monkeypatch.setattr(backend_memex, "_memex_write_entry", fake_write_entry)
-    monkeypatch.setattr(backend_memex, "_memex_embed",
-                        lambda text: b"\x00" * 16)
+    monkeypatch.setattr(backend_memex, "_memex_embed", lambda text: b"\x00" * 16)
     # Stub key-construction helpers so tests don't need a live atelier.db.
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: "myproj" if pid else None)
-    monkeypatch.setattr(backend_memex, "_next_seq",
-                        lambda *a, **k: 1)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
+    monkeypatch.setattr(
+        backend_memex, "_resolve_project_slug", lambda pid: "myproj" if pid else None
+    )
+    monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
 
     result = backend_memex.write_document(
-        domain="project_doc", title="Auth Design",
+        domain="project_doc",
+        title="Auth Design",
         body="OAuth2 flow with refresh tokens.",
         metadata={"project_id": 1, "filename": "DESIGN.md"},
         caller_agent_id="atelier-product-manager-1",
@@ -246,29 +254,36 @@ def test_write_document_builds_librarian_output_and_writes(fake_memex,
     assert captured["librarian_output"]["metadata"]["project_id"] == 1
 
 
-def test_write_document_folds_source_url_into_metadata(fake_memex,
-                                                         monkeypatch):
+def test_write_document_folds_source_url_into_metadata(fake_memex, monkeypatch):
     """I2: `source_url` reaches `write_document` from the facade and
     MUST land in `metadata["source_url"]` so it persists to
     `~/.memex/index.db.documents.metadata` and contributes to the FTS5
     searchable blob via `_metadata_narrative`."""
     captured = {}
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
-    monkeypatch.setattr(backend_memex, "_memex_write_entry",
-        lambda **k: (captured.update(k), {"status": "ingested",
-                                          "index_id": k["librarian_output"]["index_id"],
-                                          "key": k["librarian_output"]["key"],
-                                          "domain": k["librarian_output"]["domain"],
-                                          "row_id": 1, "relations": []})[1])
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_write_entry",
+        lambda **k: (
+            captured.update(k),
+            {
+                "status": "ingested",
+                "index_id": k["librarian_output"]["index_id"],
+                "key": k["librarian_output"]["key"],
+                "domain": k["librarian_output"]["domain"],
+                "row_id": 1,
+                "relations": [],
+            },
+        )[1],
+    )
     monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: None)
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: None)
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
 
     backend_memex.write_document(
-        domain="adr", title="Use OAuth2",
+        domain="adr",
+        title="Use OAuth2",
         body="OAuth2 chosen over SAML.",
         metadata={"project_id": 1},
         caller_agent_id="atelier-pm-1",
@@ -281,27 +296,38 @@ def test_write_document_folds_source_url_into_metadata(fake_memex,
     assert "https://example.com/adr-007" in captured["librarian_output"]["searchable"]
 
 
-def test_write_task_targets_tasks_table_with_task_domain(fake_memex,
-                                                          monkeypatch):
+def test_write_task_targets_tasks_table_with_task_domain(fake_memex, monkeypatch):
     captured = {}
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
-    monkeypatch.setattr(backend_memex, "_memex_write_entry",
-        lambda **k: (captured.update(k), {"status": "ingested",
-                                          "index_id": k["librarian_output"]["index_id"],
-                                          "key": k["librarian_output"]["key"],
-                                          "domain": "task",
-                                          "row_id": 1, "relations": []})[1])
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_write_entry",
+        lambda **k: (
+            captured.update(k),
+            {
+                "status": "ingested",
+                "index_id": k["librarian_output"]["index_id"],
+                "key": k["librarian_output"]["key"],
+                "domain": "task",
+                "row_id": 1,
+                "relations": [],
+            },
+        )[1],
+    )
     monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: "myproj" if pid else None)
+    monkeypatch.setattr(
+        backend_memex, "_resolve_project_slug", lambda pid: "myproj" if pid else None
+    )
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
 
     backend_memex.write_task(
-        title="Fix auth bug", description="OAuth returns 500",
-        project_id=1, created_by="atelier-engineer-1",
-        priority=5, notes="repro: hit /oauth/callback twice",
+        title="Fix auth bug",
+        description="OAuth returns 500",
+        project_id=1,
+        created_by="atelier-engineer-1",
+        priority=5,
+        notes="repro: hit /oauth/callback twice",
     )
     assert captured["target_table"] == "tasks"
     assert captured["librarian_output"]["domain"] == "task"
@@ -317,22 +343,30 @@ def test_write_project_targets_projects_table(fake_memex, monkeypatch):
     title-as-name, description-as-body."""
     captured = {}
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
-    monkeypatch.setattr(backend_memex, "_memex_write_entry",
-        lambda **k: (captured.update(k), {"status": "ingested",
-                                          "index_id": k["librarian_output"]["index_id"],
-                                          "key": k["librarian_output"]["key"],
-                                          "domain": "project",
-                                          "row_id": 1, "relations": []})[1])
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_write_entry",
+        lambda **k: (
+            captured.update(k),
+            {
+                "status": "ingested",
+                "index_id": k["librarian_output"]["index_id"],
+                "key": k["librarian_output"]["key"],
+                "domain": "project",
+                "row_id": 1,
+                "relations": [],
+            },
+        )[1],
+    )
     monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: None)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
-    monkeypatch.setattr(backend_memex, "_next_seq",
-                        lambda *a, **k: 1)
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: None)
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
+    monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
 
     backend_memex.write_project(
-        workspace_id=1, slug="auth-svc", name="Auth Service",
+        workspace_id=1,
+        slug="auth-svc",
+        name="Auth Service",
         description="OAuth2 + refresh tokens.",
         created_by="atelier-product-manager-1",
     )
@@ -345,22 +379,31 @@ def test_write_project_targets_projects_table(fake_memex, monkeypatch):
 def test_write_meeting_targets_meeting_minutes(fake_memex, monkeypatch):
     captured = {}
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
-    monkeypatch.setattr(backend_memex, "_memex_write_entry",
-        lambda **k: (captured.update(k), {"status": "ingested",
-                                          "index_id": k["librarian_output"]["index_id"],
-                                          "key": k["librarian_output"]["key"],
-                                          "domain": "meeting",
-                                          "row_id": 1, "relations": []})[1])
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_write_entry",
+        lambda **k: (
+            captured.update(k),
+            {
+                "status": "ingested",
+                "index_id": k["librarian_output"]["index_id"],
+                "key": k["librarian_output"]["key"],
+                "domain": "meeting",
+                "row_id": 1,
+                "relations": [],
+            },
+        )[1],
+    )
     monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: None)
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: None)
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
 
     backend_memex.write_meeting(
-        title="Kickoff", date="2026-05-16",
-        summary="Discussed scope.", decisions="Use OAuth2.",
+        title="Kickoff",
+        date="2026-05-16",
+        summary="Discussed scope.",
+        decisions="Use OAuth2.",
         created_by="atelier-product-manager-1",
     )
     assert captured["target_table"] == "meeting_minutes"
@@ -374,6 +417,7 @@ def test_embedding_unavailable_is_swallowed_and_logged(fake_memex, monkeypatch):
     v2.4.1 contract). Untyped exceptions must propagate — see
     test_embedding_generic_exception_propagates below. Also asserts that
     the audit log call forwards `index_id` and `input_chars` (Nit N9)."""
+
     # The production code resolves `embeddings` via `_memex_module`.
     # Inject a fake into the module-load hook so `_is_embedding_unavailable`
     # picks up the class without consulting the real Memex install.
@@ -395,6 +439,7 @@ def test_embedding_unavailable_is_swallowed_and_logged(fake_memex, monkeypatch):
         if name == "embeddings":
             return fake_embeddings
         return real_memex_module(name)
+
     monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
 
     captured_embedding = {}
@@ -404,37 +449,45 @@ def test_embedding_unavailable_is_swallowed_and_logged(fake_memex, monkeypatch):
     def boom(text):
         captured_searchable["text"] = text
         raise _FakeEmbeddingUnavailable(
-            reason="not_configured", provider="openai",
+            reason="not_configured",
+            provider="openai",
             detail="OPENAI_API_KEY unset",
         )
 
     def fake_log_skip(exc, *, caller_agent_id, index_id, input_chars):
-        log_skip_calls.append({
-            "reason": exc.reason, "caller_agent_id": caller_agent_id,
-            "index_id": index_id, "input_chars": input_chars,
-        })
+        log_skip_calls.append(
+            {
+                "reason": exc.reason,
+                "caller_agent_id": caller_agent_id,
+                "index_id": index_id,
+                "input_chars": input_chars,
+            }
+        )
 
     def fake_write_entry(**kwargs):
         captured_embedding["embedding"] = kwargs["embedding"]
         captured_embedding["index_id"] = kwargs["librarian_output"]["index_id"]
-        return {"status": "ingested",
-                "index_id": kwargs["librarian_output"]["index_id"],
-                "key": kwargs["librarian_output"]["key"],
-                "domain": kwargs["librarian_output"]["domain"],
-                "row_id": 1, "relations": []}
+        return {
+            "status": "ingested",
+            "index_id": kwargs["librarian_output"]["index_id"],
+            "key": kwargs["librarian_output"]["key"],
+            "domain": kwargs["librarian_output"]["domain"],
+            "row_id": 1,
+            "relations": [],
+        }
 
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
     monkeypatch.setattr(backend_memex, "_memex_embed", boom)
     monkeypatch.setattr(backend_memex, "_memex_log_embedding_skip", fake_log_skip)
     monkeypatch.setattr(backend_memex, "_memex_write_entry", fake_write_entry)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: None)
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: None)
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
 
     backend_memex.write_task(
-        title="x", description="y", project_id=1,
+        title="x",
+        description="y",
+        project_id=1,
         created_by="atelier-product-manager-1",
     )
     assert captured_embedding["embedding"] is None
@@ -452,8 +505,10 @@ def test_embedding_generic_exception_propagates(fake_memex, monkeypatch):
     a degraded-mode signal. A generic exception means a real bug; it
     must not be silently treated as 'no embedding today.' Also asserts
     `_memex_log_embedding_skip` is NOT invoked on this path (Nit N10)."""
+
     class _FakeEmbeddingUnavailable(Exception):
         pass
+
     fake_embeddings = types.ModuleType("embeddings")
     fake_embeddings.EmbeddingUnavailable = _FakeEmbeddingUnavailable
     fake_embeddings.encode = lambda text: b""
@@ -465,26 +520,28 @@ def test_embedding_generic_exception_propagates(fake_memex, monkeypatch):
         if name == "embeddings":
             return fake_embeddings
         return real_memex_module(name)
+
     monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
 
     def boom(text):
         raise RuntimeError("unexpected DB-side failure")
 
     from unittest.mock import MagicMock
+
     mock_log = MagicMock()
 
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
     monkeypatch.setattr(backend_memex, "_memex_embed", boom)
     monkeypatch.setattr(backend_memex, "_memex_log_embedding_skip", mock_log)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: None)
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: None)
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
 
     with pytest.raises(RuntimeError, match="unexpected DB-side failure"):
         backend_memex.write_task(
-            title="x", description="y", project_id=1,
+            title="x",
+            description="y",
+            project_id=1,
             created_by="atelier-product-manager-1",
         )
     # Nit N10: a non-EmbeddingUnavailable exception must NOT invoke
@@ -526,21 +583,26 @@ def test_duplicate_key_triggers_single_retry(fake_memex, monkeypatch):
         if name == "agents.librarian":
             return fake_librarian
         return real_memex_module(name)
+
     monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
 
     call_count = {"n": 0}
+
     def fake_write_entry(**kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
-            raise DuplicateKeyError(kwargs["librarian_output"]["key"],
-                                    "existing-idx")
-        return {"status": "ingested",
-                "index_id": kwargs["librarian_output"]["index_id"],
-                "key": kwargs["librarian_output"]["key"],
-                "domain": kwargs["librarian_output"]["domain"],
-                "row_id": 7, "relations": []}
+            raise DuplicateKeyError(kwargs["librarian_output"]["key"], "existing-idx")
+        return {
+            "status": "ingested",
+            "index_id": kwargs["librarian_output"]["index_id"],
+            "key": kwargs["librarian_output"]["key"],
+            "domain": kwargs["librarian_output"]["domain"],
+            "row_id": 7,
+            "relations": [],
+        }
 
     seq_calls = {"n": 0}
+
     def fake_next_seq(*a, **k):
         seq_calls["n"] += 1
         return seq_calls["n"]  # 1, then 2 on retry
@@ -548,14 +610,14 @@ def test_duplicate_key_triggers_single_retry(fake_memex, monkeypatch):
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
     monkeypatch.setattr(backend_memex, "_memex_write_entry", fake_write_entry)
     monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: "myproj")
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: "myproj")
     monkeypatch.setattr(backend_memex, "_next_seq", fake_next_seq)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
 
     result = backend_memex.write_task(
-        title="Fix bug", description="x", project_id=1,
+        title="Fix bug",
+        description="x",
+        project_id=1,
         created_by="atelier-product-manager-1",
     )
     assert call_count["n"] == 2  # retried exactly once
@@ -582,9 +644,11 @@ def test_duplicate_key_retry_only_once(fake_memex, monkeypatch):
         if name == "agents.librarian":
             return fake_librarian
         return real_memex_module(name)
+
     monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
 
     call_count = {"n": 0}
+
     def fake_write_entry(**kwargs):
         call_count["n"] += 1
         # Both attempts collide.
@@ -593,15 +657,15 @@ def test_duplicate_key_retry_only_once(fake_memex, monkeypatch):
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
     monkeypatch.setattr(backend_memex, "_memex_write_entry", fake_write_entry)
     monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: "myproj")
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: "myproj")
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
 
     with pytest.raises(DuplicateKeyError):
         backend_memex.write_task(
-            title="Fix bug", description="x", project_id=1,
+            title="Fix bug",
+            description="x",
+            project_id=1,
             created_by="atelier-pm-1",
         )
     # Exactly two attempts — the initial write + ONE retry. If we ever
@@ -613,21 +677,30 @@ def test_canonical_key_format(fake_memex, monkeypatch):
     """Verify spec §6.7 key shape: workspace/project/domain/date-title-seq."""
     captured = {}
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
-    monkeypatch.setattr(backend_memex, "_memex_write_entry",
-        lambda **k: (captured.update(k), {"status": "ingested",
-                                          "index_id": "x",
-                                          "key": k["librarian_output"]["key"],
-                                          "domain": "task",
-                                          "row_id": 1, "relations": []})[1])
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_write_entry",
+        lambda **k: (
+            captured.update(k),
+            {
+                "status": "ingested",
+                "index_id": "x",
+                "key": k["librarian_output"]["key"],
+                "domain": "task",
+                "row_id": 1,
+                "relations": [],
+            },
+        )[1],
+    )
     monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: "auth-svc")
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: "auth-svc")
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 3)
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-                        lambda md, r: list(r or []))
+    monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
 
     backend_memex.write_task(
-        title="Fix OAuth Race", description="x", project_id=1,
+        title="Fix OAuth Race",
+        description="x",
+        project_id=1,
         created_by="atelier-engineer-1",
     )
     key = captured["librarian_output"]["key"]
@@ -639,40 +712,54 @@ def test_canonical_key_format(fake_memex, monkeypatch):
     assert parts[3].endswith("-fix-oauth-race-3")
 
 
-def test_auto_part_of_relation_when_project_id_in_metadata(fake_memex,
-                                                             monkeypatch):
+def test_auto_part_of_relation_when_project_id_in_metadata(fake_memex, monkeypatch):
     """Per spec §6.9, atelier writes should auto-populate `part_of`
     edges from the new document to the owning project's document."""
     captured = {}
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
-    monkeypatch.setattr(backend_memex, "_memex_write_entry",
-        lambda **k: (captured.update(k), {"status": "ingested",
-                                          "index_id": "x",
-                                          "key": k["librarian_output"]["key"],
-                                          "domain": "task",
-                                          "row_id": 1,
-                                          "relations": k["librarian_output"]["relations"]})[1])
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_write_entry",
+        lambda **k: (
+            captured.update(k),
+            {
+                "status": "ingested",
+                "index_id": "x",
+                "key": k["librarian_output"]["key"],
+                "domain": "task",
+                "row_id": 1,
+                "relations": k["librarian_output"]["relations"],
+            },
+        )[1],
+    )
     monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: "p")
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: "p")
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
     # Simulate one project document found for project_id=1.
-    monkeypatch.setattr(backend_memex, "_auto_relations",
-        lambda md, r: list(r or []) + [
-            {"rel_type": "part_of", "to_index_id": "proj-idx-1"},
-        ] if (md or {}).get("project_id") else list(r or []))
+    monkeypatch.setattr(
+        backend_memex,
+        "_auto_relations",
+        lambda md, r: (
+            list(r or [])
+            + [
+                {"rel_type": "part_of", "to_index_id": "proj-idx-1"},
+            ]
+            if (md or {}).get("project_id")
+            else list(r or [])
+        ),
+    )
 
     backend_memex.write_task(
-        title="t", description="d", project_id=1,
+        title="t",
+        description="d",
+        project_id=1,
         created_by="atelier-engineer-1",
     )
     rels = captured["librarian_output"]["relations"]
-    assert any(r["rel_type"] == "part_of" and r["to_index_id"] == "proj-idx-1"
-               for r in rels)
+    assert any(r["rel_type"] == "part_of" and r["to_index_id"] == "proj-idx-1" for r in rels)
 
 
-def test_auto_relations_runs_real_logic_and_emits_part_of_edge(fake_memex,
-                                                                monkeypatch):
+def test_auto_relations_runs_real_logic_and_emits_part_of_edge(fake_memex, monkeypatch):
     """I6: exercise the real `_auto_relations` production logic (NOT a
     stub). Seed `index.documents` with a `project` row whose
     metadata.project_id matches the new write, then call write_task and
@@ -697,37 +784,49 @@ def test_auto_relations_runs_real_logic_and_emits_part_of_edge(fake_memex,
         if name == "stores":
             return fake_stores
         return real_memex_module(name)
+
     monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
 
     captured = {}
     monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
-    monkeypatch.setattr(backend_memex, "_memex_write_entry",
-        lambda **k: (captured.update(k), {"status": "ingested",
-                                          "index_id": "x",
-                                          "key": k["librarian_output"]["key"],
-                                          "domain": "task",
-                                          "row_id": 1,
-                                          "relations": k["librarian_output"]["relations"]})[1])
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_write_entry",
+        lambda **k: (
+            captured.update(k),
+            {
+                "status": "ingested",
+                "index_id": "x",
+                "key": k["librarian_output"]["key"],
+                "domain": "task",
+                "row_id": 1,
+                "relations": k["librarian_output"]["relations"],
+            },
+        )[1],
+    )
     monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
-    monkeypatch.setattr(backend_memex, "_resolve_project_slug",
-                        lambda pid: "p")
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: "p")
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
     # Intentionally DO NOT stub _auto_relations — that's the function
     # under test on this path.
 
     backend_memex.write_task(
-        title="t", description="d", project_id=42,
+        title="t",
+        description="d",
+        project_id=42,
         created_by="atelier-engineer-1",
     )
     rels = captured["librarian_output"]["relations"]
     # The auto-edge points at the seeded project document.
-    assert any(r["rel_type"] == "part_of"
-               and r["to_index_id"] == "proj-doc-uuid-1"
-               for r in rels), rels
+    assert any(
+        r["rel_type"] == "part_of" and r["to_index_id"] == "proj-doc-uuid-1" for r in rels
+    ), rels
     # And the SQL we ran really did query index.documents for the
     # project domain with project_id=42 — i.e. we exercised the real
     # `_auto_relations`, not a leftover stub.
-    matching = [q for q in queries_seen
-                if q[0] == "index" and "domain" in q[1]
-                and "project" in q[2] and 42 in q[2]]
+    matching = [
+        q
+        for q in queries_seen
+        if q[0] == "index" and "domain" in q[1] and "project" in q[2] and 42 in q[2]
+    ]
     assert matching, f"no SELECT against index.documents seen: {queries_seen}"

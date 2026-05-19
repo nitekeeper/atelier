@@ -17,6 +17,7 @@ This module is built in three logical sections matching Plan 2 tasks 1-3:
      lookup_index_id_by_source_ref / find_or_create_role / find_or_create_agent
      and the raw _memex_core_execute primitive for composite-key DELETE.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -54,9 +55,7 @@ def _memex_plugin_root() -> Path:
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        raise RuntimeError(
-            f"Memex config.json at {config_path} is unreadable: {exc}."
-        ) from exc
+        raise RuntimeError(f"Memex config.json at {config_path} is unreadable: {exc}.") from exc
     plugin_root_str = data.get("plugin_root")
     if not plugin_root_str:
         raise RuntimeError(
@@ -73,13 +72,10 @@ def _memex_plugin_root() -> Path:
     try:
         manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        raise RuntimeError(
-            f"Memex plugin manifest at {manifest} is unreadable: {exc}."
-        ) from exc
+        raise RuntimeError(f"Memex plugin manifest at {manifest} is unreadable: {exc}.") from exc
     if manifest_data.get("name") != "memex":
         raise RuntimeError(
-            f"Plugin at {plugin_root} is not memex "
-            f"(name={manifest_data.get('name')!r})."
+            f"Plugin at {plugin_root} is not memex (name={manifest_data.get('name')!r})."
         )
     return plugin_root
 
@@ -204,8 +200,7 @@ def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
             mod_name = f"_memex_{dotted.replace('.', '_')}"
             spec = importlib.util.spec_from_file_location(mod_name, path)
             if spec is None or spec.loader is None:  # pragma: no cover
-                raise ImportError(
-                    f"failed to build import spec for {path}")
+                raise ImportError(f"failed to build import spec for {path}")
             module = importlib.util.module_from_spec(spec)
             # Register under the synthetic name BEFORE exec_module so
             # any internal relative imports the package may attempt can
@@ -220,8 +215,7 @@ def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
                 with _scripts_db_shim(plugin_root):
                     spec.loader.exec_module(module)
             return module
-    raise ImportError(
-        f"memex module {dotted!r} not found under {plugin_root / 'scripts'}")
+    raise ImportError(f"memex module {dotted!r} not found under {plugin_root / 'scripts'}")
 
 
 def _memex_module(dotted: str) -> ModuleType:
@@ -256,9 +250,7 @@ def require_memex_bootstrap() -> None:
         # Fallback for pre-v2.5.0 Memex: probe the registry file directly.
         registry = Path.home() / ".memex" / "registry.json"
         if not registry.exists():
-            raise RuntimeError(
-                f"Memex registry not found at {registry}."
-            )
+            raise RuntimeError(f"Memex registry not found at {registry}.")
     except Exception as exc:
         raise RuntimeError(
             f"Memex is not initialized: {exc}. "
@@ -275,10 +267,15 @@ def _memex_validate_output(librarian_output: dict) -> dict:
     return librarian.validate_output(librarian_output)
 
 
-def _memex_write_entry(*, payload: dict, librarian_output: dict,
-                       target_store: str, target_table: str,
-                       caller_agent_id: str,
-                       embedding: bytes | None) -> dict:
+def _memex_write_entry(
+    *,
+    payload: dict,
+    librarian_output: dict,
+    target_store: str,
+    target_table: str,
+    caller_agent_id: str,
+    embedding: bytes | None,
+) -> dict:
     """Delegate to Memex's librarian.write_entry."""
     librarian = _memex_module("agents.librarian")
     return librarian.write_entry(
@@ -299,8 +296,9 @@ def _memex_embed(text: str) -> bytes | None:
     return embeddings.encode(text)
 
 
-def _memex_log_embedding_skip(exc, *, caller_agent_id: str,
-                              index_id: str, input_chars: int) -> None:
+def _memex_log_embedding_skip(
+    exc, *, caller_agent_id: str, index_id: str, input_chars: int
+) -> None:
     """Forward to Memex's structured audit log per v2.4.1 contract."""
     embeddings = _memex_module("embeddings")
     embeddings.log_skip(
@@ -342,8 +340,9 @@ def _metadata_narrative(metadata: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _build_key(*, workspace_slug: str, project_slug: str | None,
-               domain: str, created_at_iso: str, title: str) -> str:
+def _build_key(
+    *, workspace_slug: str, project_slug: str | None, domain: str, created_at_iso: str, title: str
+) -> str:
     """Canonical key per spec §6.7:
     `<workspace_slug>/<project_slug>/<domain>/<date>-<title_slug>-<seq>`.
 
@@ -355,20 +354,16 @@ def _build_key(*, workspace_slug: str, project_slug: str | None,
     title_slug = _slug(title, max_length=48)
     project_part = project_slug or "(no-project)"
     seq = _next_seq(workspace_slug, project_part, domain, date_str, title_slug)
-    return (
-        f"{workspace_slug}/{project_part}/{domain}/"
-        f"{date_str}-{title_slug}-{seq}"
-    )
+    return f"{workspace_slug}/{project_part}/{domain}/{date_str}-{title_slug}-{seq}"
 
 
-def _next_seq(workspace_slug: str, project_slug: str, domain: str,
-              date_str: str, title_slug: str) -> int:
+def _next_seq(
+    workspace_slug: str, project_slug: str, domain: str, date_str: str, title_slug: str
+) -> int:
     """Smallest unused integer ≥ 1 for the (workspace/project/domain/date/title)
     prefix. Runs a `key LIKE prefix%` scan over `index.documents`."""
     memex_stores = _memex_module("stores")
-    prefix = (
-        f"{workspace_slug}/{project_slug}/{domain}/{date_str}-{title_slug}-"
-    )
+    prefix = f"{workspace_slug}/{project_slug}/{domain}/{date_str}-{title_slug}-"
     existing = memex_stores.query(
         "index",
         "SELECT key FROM documents WHERE key LIKE ?",
@@ -376,7 +371,7 @@ def _next_seq(workspace_slug: str, project_slug: str, domain: str,
     )
     used: set[int] = set()
     for row in existing:
-        suffix = row["key"][len(prefix):]
+        suffix = row["key"][len(prefix) :]
         try:
             used.add(int(suffix))
         except ValueError:
@@ -387,8 +382,7 @@ def _next_seq(workspace_slug: str, project_slug: str, domain: str,
     return n
 
 
-def _try_embed(text: str, *, caller_agent_id: str,
-               index_id: str) -> bytes | None:
+def _try_embed(text: str, *, caller_agent_id: str, index_id: str) -> bytes | None:
     """Best-effort embedding.
 
     Narrows to embeddings.EmbeddingUnavailable per memex v2.4.1 — any
@@ -484,17 +478,23 @@ def _auto_relations(metadata: dict, explicit: list[dict]) -> list[dict]:
         for row in rows:
             edge = ("part_of", row["index_id"])
             if edge not in seen:
-                relations.append({"rel_type": "part_of",
-                                  "to_index_id": row["index_id"]})
+                relations.append({"rel_type": "part_of", "to_index_id": row["index_id"]})
                 seen.add(edge)
     return relations
 
 
-def _atelier_write(*, target_table: str, domain: str, title: str,
-                   body: str, payload: dict, metadata: dict,
-                   relations: list[dict] | None,
-                   caller_agent_id: str,
-                   project_slug_override: str | None = None) -> dict:
+def _atelier_write(
+    *,
+    target_table: str,
+    domain: str,
+    title: str,
+    body: str,
+    payload: dict,
+    metadata: dict,
+    relations: list[dict] | None,
+    caller_agent_id: str,
+    project_slug_override: str | None = None,
+) -> dict:
     """Tier 2 atelier write — synchronous, no LLM dispatch.
 
     Builds librarian_output deterministically, validates via Memex, and
@@ -517,8 +517,7 @@ def _atelier_write(*, target_table: str, domain: str, title: str,
     if project_slug_override is not None:
         project_slug = project_slug_override
     else:
-        project_slug = _resolve_project_slug(
-            (metadata or {}).get("project_id"))
+        project_slug = _resolve_project_slug((metadata or {}).get("project_id"))
     key = _build_key(
         workspace_slug=_WORKSPACE_SLUG,
         project_slug=project_slug,
@@ -526,22 +525,29 @@ def _atelier_write(*, target_table: str, domain: str, title: str,
         created_at_iso=created_at,
         title=title,
     )
-    searchable = "\n\n".join(filter(None, [
-        title,
-        body or "",
-        _metadata_narrative(metadata or {}),
-    ]))
+    searchable = "\n\n".join(
+        filter(
+            None,
+            [
+                title,
+                body or "",
+                _metadata_narrative(metadata or {}),
+            ],
+        )
+    )
     final_relations = _auto_relations(metadata or {}, relations or [])
 
     def _attempt(this_key: str) -> dict:
-        output = _memex_validate_output({
-            "index_id":   str(uuid.uuid4()),
-            "key":        this_key,
-            "domain":     domain,
-            "searchable": searchable,
-            "metadata":   metadata or {},
-            "relations":  final_relations,
-        })
+        output = _memex_validate_output(
+            {
+                "index_id": str(uuid.uuid4()),
+                "key": this_key,
+                "domain": domain,
+                "searchable": searchable,
+                "metadata": metadata or {},
+                "relations": final_relations,
+            }
+        )
         embedding = _try_embed(
             output["searchable"],
             caller_agent_id=caller_agent_id,
@@ -615,22 +621,28 @@ def _is_duplicate_key_error(exc: BaseException) -> bool:
 # `postmortem`, `log`) land in `project_documents`. The 9 domains here
 # must match `scripts.domain_vocabulary.DOMAINS` (Plan 1 Task 6 / F7).
 _DOMAIN_TO_TABLE = {
-    "project":     "projects",
-    "task":        "tasks",
-    "meeting":     "meeting_minutes",
+    "project": "projects",
+    "task": "tasks",
+    "meeting": "meeting_minutes",
     "project_doc": "project_documents",
-    "adr":         "project_documents",
-    "design":      "project_documents",
-    "research":    "project_documents",
-    "postmortem":  "project_documents",
-    "log":         "project_documents",
+    "adr": "project_documents",
+    "design": "project_documents",
+    "research": "project_documents",
+    "postmortem": "project_documents",
+    "log": "project_documents",
 }
 
 
-def write_document(*, domain: str, title: str, body: str,
-                   metadata: dict, caller_agent_id: str,
-                   source_url: str | None = None,
-                   relations: list[dict] | None = None) -> dict:
+def write_document(
+    *,
+    domain: str,
+    title: str,
+    body: str,
+    metadata: dict,
+    caller_agent_id: str,
+    source_url: str | None = None,
+    relations: list[dict] | None = None,
+) -> dict:
     """Persist a project document via Memex Tier 2.
 
     Validates `domain` against `scripts.domain_vocabulary.DOMAINS` BEFORE
@@ -659,19 +671,30 @@ def write_document(*, domain: str, title: str, body: str,
         "updated_at": now,
     }
     return _atelier_write(
-        target_table=target_table, domain=domain,
-        title=title, body=body, payload=payload,
-        metadata=metadata, relations=relations,
+        target_table=target_table,
+        domain=domain,
+        title=title,
+        body=body,
+        payload=payload,
+        metadata=metadata,
+        relations=relations,
         caller_agent_id=caller_agent_id,
     )
 
 
-def write_task(*, title: str, description: str, project_id: int,
-               created_by: str, assigned_to: str | None = None,
-               priority: int = 0, notes: str | None = None,
-               source_ref: str | None = None,
-               metadata: dict | None = None,
-               relations: list[dict] | None = None) -> dict:
+def write_task(
+    *,
+    title: str,
+    description: str,
+    project_id: int,
+    created_by: str,
+    assigned_to: str | None = None,
+    priority: int = 0,
+    notes: str | None = None,
+    source_ref: str | None = None,
+    metadata: dict | None = None,
+    relations: list[dict] | None = None,
+) -> dict:
     """`source_ref` is an optional stable origin tag (e.g.
     `"atelier:tasks:42"`); Plan 4's `migrate_to_memex.py` passes it
     positionally so a rerun can locate the row via
@@ -691,10 +714,16 @@ def write_task(*, title: str, description: str, project_id: int,
     body = "\n".join(body_lines)
     now = _now()
     payload = {
-        "title": title, "description": description, "project_id": project_id,
-        "created_by": created_by, "assigned_to": assigned_to,
-        "priority": priority, "notes": notes, "status": "pending",
-        "created_at": now, "updated_at": now,
+        "title": title,
+        "description": description,
+        "project_id": project_id,
+        "created_by": created_by,
+        "assigned_to": assigned_to,
+        "priority": priority,
+        "notes": notes,
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
     }
     # `notes` is searchable narrative — include it in metadata so
     # _metadata_narrative folds it into the FTS5 blob.
@@ -710,19 +739,29 @@ def write_task(*, title: str, description: str, project_id: int,
         # caller overrides land on top of the internal defaults.
         merged.update(metadata)
     return _atelier_write(
-        target_table="tasks", domain="task",
-        title=title, body=body, payload=payload,
-        metadata=merged, relations=relations,
+        target_table="tasks",
+        domain="task",
+        title=title,
+        body=body,
+        payload=payload,
+        metadata=merged,
+        relations=relations,
         caller_agent_id=created_by,
     )
 
 
-def write_meeting(*, title: str, date: str, summary: str,
-                  decisions: str, created_by: str,
-                  project_id: int | None = None,
-                  source_ref: str | None = None,
-                  metadata: dict | None = None,
-                  relations: list[dict] | None = None) -> dict:
+def write_meeting(
+    *,
+    title: str,
+    date: str,
+    summary: str,
+    decisions: str,
+    created_by: str,
+    project_id: int | None = None,
+    source_ref: str | None = None,
+    metadata: dict | None = None,
+    relations: list[dict] | None = None,
+) -> dict:
     """`source_ref` is an optional stable origin tag — same contract as
     `write_task`. Plan 4 line 306 passes it positionally during
     migration replay.
@@ -732,20 +771,19 @@ def write_meeting(*, title: str, date: str, summary: str,
     survives into the Memex Index even though `meeting_minutes` has no
     `subdomain` column.
     """
-    body = (f"# {title}\n\nDate: {date}\n\n"
-            f"## Summary\n\n{summary}\n\n"
-            f"## Decisions\n\n{decisions}\n")
+    body = f"# {title}\n\nDate: {date}\n\n## Summary\n\n{summary}\n\n## Decisions\n\n{decisions}\n"
     now = _now()
     payload = {
-        "title": title, "date": date,
+        "title": title,
+        "date": date,
         "filename": f"{date}-{_slug(title)}.md",
-        "summary": summary, "decisions": decisions,
+        "summary": summary,
+        "decisions": decisions,
         "created_by": created_by,
-        "created_at": now, "updated_at": now,
+        "created_at": now,
+        "updated_at": now,
     }
-    merged: dict = {"date": date,
-                    "summary": summary or "",
-                    "decisions": decisions or ""}
+    merged: dict = {"date": date, "summary": summary or "", "decisions": decisions or ""}
     if project_id is not None:
         merged["project_id"] = project_id
     if source_ref:
@@ -753,16 +791,26 @@ def write_meeting(*, title: str, date: str, summary: str,
     if metadata:
         merged.update(metadata)
     return _atelier_write(
-        target_table="meeting_minutes", domain="meeting",
-        title=title, body=body, payload=payload,
-        metadata=merged, relations=relations,
+        target_table="meeting_minutes",
+        domain="meeting",
+        title=title,
+        body=body,
+        payload=payload,
+        metadata=merged,
+        relations=relations,
         caller_agent_id=created_by,
     )
 
 
-def write_project(*, workspace_id: int, slug: str, name: str,
-                  description: str, created_by: str,
-                  relations: list[dict] | None = None) -> dict:
+def write_project(
+    *,
+    workspace_id: int,
+    slug: str,
+    name: str,
+    description: str,
+    created_by: str,
+    relations: list[dict] | None = None,
+) -> dict:
     """Create a new project — distinct facade method per user decision +
     spec §4.3. Mirrors `write_document` but pins `domain="project"` and
     targets `projects`. `slug` is the canonical project identifier used
@@ -789,9 +837,13 @@ def write_project(*, workspace_id: int, slug: str, name: str,
         "description": description or "",
     }
     return _atelier_write(
-        target_table="projects", domain="project",
-        title=name, body=description or "", payload=payload,
-        metadata=metadata, relations=relations,
+        target_table="projects",
+        domain="project",
+        title=name,
+        body=description or "",
+        payload=payload,
+        metadata=metadata,
+        relations=relations,
         caller_agent_id=created_by,
         project_slug_override=slug,
     )
@@ -822,8 +874,7 @@ def _memex_core_insert(*, store: str, table: str, row: dict) -> dict:
     return memex_stores.insert(store, table, row)
 
 
-def _memex_core_update(*, store: str, table: str, row_id: int,
-                      changes: dict) -> dict:
+def _memex_core_update(*, store: str, table: str, row_id: int, changes: dict) -> dict:
     """Apply `changes` to the row with `id = row_id` in `<store>.<table>`
     via Memex Core; returns the updated row dict (or `{}` if Core
     returned None, which means the row vanished mid-update)."""
@@ -838,8 +889,7 @@ def _memex_core_delete(*, store: str, table: str, row_id: int) -> None:
     memex_stores.delete(store, table, row_id)
 
 
-def _memex_core_query(*, store: str, table: str,
-                     where: dict | None = None) -> list[dict]:
+def _memex_core_query(*, store: str, table: str, where: dict | None = None) -> list[dict]:
     """Read-side helper. Builds a simple equality WHERE clause; column
     names are pinned to safe identifiers by callers (no user-controlled
     column names reach here). Defensive: passes `table` through
@@ -857,13 +907,17 @@ def _memex_core_query(*, store: str, table: str,
 # ── Operational state writes ───────────────────────────────────────────────
 
 
-def upsert_session(*, project_id: int, agent_id: str,
-                   phase: str | None = None,
-                   current_tasks: str | None = None,
-                   accomplished: str | None = None,
-                   next_action: str | None = None,
-                   status: str = "in-progress",
-                   pm_notes: str | None = None) -> dict:
+def upsert_session(
+    *,
+    project_id: int,
+    agent_id: str,
+    phase: str | None = None,
+    current_tasks: str | None = None,
+    accomplished: str | None = None,
+    next_action: str | None = None,
+    status: str = "in-progress",
+    pm_notes: str | None = None,
+) -> dict:
     """Idempotent session row for (project_id, agent_id).
 
     Looks up the open-status row for the (project_id, agent_id) pair; if
@@ -876,29 +930,32 @@ def upsert_session(*, project_id: int, agent_id: str,
     created_at, updated_at). created_at/updated_at are filled by the
     table's DEFAULT clauses; we don't override.
     """
-    existing = _memex_core_query(store="atelier", table="sessions",
-                                 where={"project_id": project_id,
-                                        "agent_id": agent_id,
-                                        "status": "in-progress"})
+    existing = _memex_core_query(
+        store="atelier",
+        table="sessions",
+        where={"project_id": project_id, "agent_id": agent_id, "status": "in-progress"},
+    )
     payload = {
-        "phase": phase, "current_tasks": current_tasks,
-        "accomplished": accomplished, "next_action": next_action,
-        "status": status, "pm_notes": pm_notes,
+        "phase": phase,
+        "current_tasks": current_tasks,
+        "accomplished": accomplished,
+        "next_action": next_action,
+        "status": status,
+        "pm_notes": pm_notes,
     }
     # Drop unset fields so callers can do incremental updates.
     payload = {k: v for k, v in payload.items() if v is not None}
     if existing:
-        return _memex_core_update(store="atelier", table="sessions",
-                                  row_id=existing[0]["id"],
-                                  changes=payload)
+        return _memex_core_update(
+            store="atelier", table="sessions", row_id=existing[0]["id"], changes=payload
+        )
     payload.update({"project_id": project_id, "agent_id": agent_id})
-    return _memex_core_insert(store="atelier", table="sessions",
-                              row=payload)
+    return _memex_core_insert(store="atelier", table="sessions", row=payload)
 
 
-def transition_phase(*, project_id: int, to_phase: str,
-                     agent_id: str,
-                     bypass_reason: str | None = None) -> dict:
+def transition_phase(
+    *, project_id: int, to_phase: str, agent_id: str, bypass_reason: str | None = None
+) -> dict:
     """Advance projects.phase.
 
     `bypass_reason` is accepted for facade-signature parity with
@@ -910,17 +967,15 @@ def transition_phase(*, project_id: int, to_phase: str,
     coherent trail (bypass-logged-but-not-transitioned is a soft state
     we can detect; transitioned-but-not-logged would drop the bypass
     record silently)."""
-    rows = _memex_core_query(store="atelier", table="projects",
-                             where={"id": project_id})
+    rows = _memex_core_query(store="atelier", table="projects", where={"id": project_id})
     if not rows:
         raise ValueError(f"project_id {project_id} not found")
-    return _memex_core_update(store="atelier", table="projects",
-                              row_id=project_id,
-                              changes={"phase": to_phase})
+    return _memex_core_update(
+        store="atelier", table="projects", row_id=project_id, changes={"phase": to_phase}
+    )
 
 
-def update_task_status(*, task_id: int, status: str,
-                       notes: str | None = None) -> dict:
+def update_task_status(*, task_id: int, status: str, notes: str | None = None) -> dict:
     """Set tasks.status; optionally append notes. Future enhancement
     (Plan 3) will write status-derived timestamps (claimed_at,
     completed_at) when those columns are reachable through the
@@ -928,18 +983,18 @@ def update_task_status(*, task_id: int, status: str,
     changes: dict = {"status": status}
     if notes:
         changes["notes"] = notes
-    return _memex_core_update(store="atelier", table="tasks",
-                              row_id=task_id, changes=changes)
+    return _memex_core_update(store="atelier", table="tasks", row_id=task_id, changes=changes)
 
 
-def record_phase_bypass(*, project_id: int, from_phase: str,
-                        to_phase: str, reason: str,
-                        agent_id: str) -> dict:
+def record_phase_bypass(
+    *, project_id: int, from_phase: str, to_phase: str, reason: str, agent_id: str
+) -> dict:
     """Log a soft-wall bypass to atelier.db.phase_bypasses. Surfaced by
     internal/dev-handoff retros so the team can audit how often soft
     walls were crossed and whether the policy needs tightening."""
     return _memex_core_insert(
-        store="atelier", table="phase_bypasses",
+        store="atelier",
+        table="phase_bypasses",
         row={
             "project_id": project_id,
             "from_phase": from_phase,
@@ -965,11 +1020,15 @@ def record_phase_bypass(*, project_id: int, from_phase: str,
 # ── Reads ──────────────────────────────────────────────────────────────────
 
 
-def _memex_search(*, query: str, project_id: int | None = None,
-                  domain: str | None = None,
-                  workspace_id: int | None = None,
-                  subdomain: str | None = None,
-                  limit: int = 10) -> list[dict]:
+def _memex_search(
+    *,
+    query: str,
+    project_id: int | None = None,
+    domain: str | None = None,
+    workspace_id: int | None = None,
+    subdomain: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
     """Run an FTS5-only Memex Index search by calling the Reference
     Librarian's `execute_query_plan` directly. We skip the subagent step
     (`ask_prepare` builds an LLM prompt we'd never dispatch), so the
@@ -984,9 +1043,7 @@ def _memex_search(*, query: str, project_id: int | None = None,
     after pruning, then truncate.
     """
     memex_ref = _memex_module("agents.reference_librarian")
-    needs_post_filter = (project_id is not None
-                         or workspace_id is not None
-                         or subdomain is not None)
+    needs_post_filter = project_id is not None or workspace_id is not None or subdomain is not None
     plan: dict = {
         "fts_query": query,
         "vector_query": None,
@@ -1023,31 +1080,38 @@ def _memex_search(*, query: str, project_id: int | None = None,
     return results
 
 
-def find_documents(*, query: str, workspace_id: int | None = None,
-                   project_id: int | None = None,
-                   domain: str | None = None,
-                   subdomain: str | None = None,
-                   limit: int = 10) -> list[dict]:
+def find_documents(
+    *,
+    query: str,
+    workspace_id: int | None = None,
+    project_id: int | None = None,
+    domain: str | None = None,
+    subdomain: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
     """FTS5 search over the Memex index. `workspace_id`, `project_id`,
     and `subdomain` are honored via post-filtering against the
     JSON-encoded `metadata` field on each row, since Memex's
     `execute_query_plan` only natively understands `domain` / `store`
     filters today. `domain` rides the native plan filter.
     """
-    return _memex_search(query=query, project_id=project_id,
-                         domain=domain, workspace_id=workspace_id,
-                         subdomain=subdomain, limit=limit)
+    return _memex_search(
+        query=query,
+        project_id=project_id,
+        domain=domain,
+        workspace_id=workspace_id,
+        subdomain=subdomain,
+        limit=limit,
+    )
 
 
 def get_task(*, task_id: int) -> dict | None:
     """Read a single task row by id. Returns None on miss."""
-    rows = _memex_core_query(store="atelier", table="tasks",
-                             where={"id": task_id})
+    rows = _memex_core_query(store="atelier", table="tasks", where={"id": task_id})
     return rows[0] if rows else None
 
 
-def list_tasks(*, project_id: int,
-               status: str | None = None) -> list[dict]:
+def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
     """List tasks for a project, optionally filtered by status."""
     where: dict = {"project_id": project_id}
     if status:
@@ -1070,8 +1134,7 @@ def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:
     memex_stores = _memex_module("stores")
     rows = memex_stores.query(
         "index",
-        "SELECT index_id FROM documents "
-        "WHERE json_extract(metadata, '$.source_ref') = ? LIMIT 1",
+        "SELECT index_id FROM documents WHERE json_extract(metadata, '$.source_ref') = ? LIMIT 1",
         (source_ref,),
     )
     return rows[0]["index_id"] if rows else None
@@ -1106,12 +1169,10 @@ def find_or_create_role(*, name: str, description: str) -> dict:
     for r in memex_roles.list_roles(db_path):
         if r["name"] == name:
             return r
-    return memex_roles.create_role(db_path, name=name,
-                                    description=description)
+    return memex_roles.create_role(db_path, name=name, description=description)
 
 
-def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
-                         profile: str) -> dict:
+def find_or_create_agent(*, agent_id: str, name: str, role_id: int, profile: str) -> dict:
     """Return the agent row with this `agent_id`, creating it if absent.
 
     Idempotent — symmetric to `find_or_create_role`. Memex's
@@ -1124,12 +1185,10 @@ def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
     existing = agents_pkg.get_agent(db_path, agent_id)
     if existing is not None:
         return existing
-    return agents_pkg.create_agent(db_path, agent_id, name, role_id,
-                                    profile)
+    return agents_pkg.create_agent(db_path, agent_id, name, role_id, profile)
 
 
-def _memex_core_execute(*, store: str, sql: str,
-                        params: tuple = ()) -> int:
+def _memex_core_execute(*, store: str, sql: str, params: tuple = ()) -> int:
     """Composite-key / non-equality DELETE / UPDATE primitive.
 
     `memex_stores.query()` is SELECT-only (no commit);

@@ -26,6 +26,7 @@ branch). Importing it at module load would (a) defeat the test stub
 on `scripts.bootstrap.run_bootstrap` and (b) drag the half-installed
 Memex check into the `prompt-migration` path, which doesn't need it.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -88,5 +89,6 @@ def startup_check() -> dict:
     # Memex mode, nothing to migrate — bootstrap (lazy import keeps
     # the test stub on `scripts.bootstrap.run_bootstrap` effective).
     from scripts import bootstrap
+
     bootstrap_state = bootstrap.run_bootstrap()
     return {"action": "proceed-memex", "bootstrap": bootstrap_state}

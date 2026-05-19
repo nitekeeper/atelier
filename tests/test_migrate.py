@@ -16,6 +16,7 @@ Layout pinned here:
 * `migrations/local-only/050_local_roles_agents.sql` — Local-mode-only
   `roles` + `agents` tables (Memex mode defers to `~/.memex/agents.db`).
 """
+
 from contextlib import closing
 from pathlib import Path
 
@@ -37,9 +38,7 @@ def test_shared_contains_v110_base_schema():
     the 002-049 band — this test pins only the base slot."""
     files = sorted(SHARED.glob("*.sql"))
     names = [f.name for f in files]
-    assert "001_v110_schema.sql" in names, (
-        f"shared/ must contain 001_v110_schema.sql; got {names}"
-    )
+    assert "001_v110_schema.sql" in names, f"shared/ must contain 001_v110_schema.sql; got {names}"
     assert names[0] == "001_v110_schema.sql", (
         f"shared/ first-by-name file must be 001_v110_schema.sql; got {names[0]}"
     )
@@ -73,19 +72,31 @@ def test_apply_shared_then_local_creates_all_tables(tmp_path):
     apply_migrations(db_path, SHARED)
     apply_migrations(db_path, LOCAL_ONLY)
     with closing(get_connection(db_path)) as conn:
-        tables = {row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name NOT LIKE 'sqlite_%' "
-            "AND name NOT LIKE 'project_documents_fts%'"
-        ).fetchall()}
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' "
+                "AND name NOT LIKE 'project_documents_fts%'"
+            ).fetchall()
+        }
     expected = {
         # shared/ tables
-        "workspaces", "projects", "project_documents", "tasks",
-        "meeting_minutes", "meeting_participants", "sessions",
-        "phases", "phase_transitions", "skill_gates", "phase_bypasses",
+        "workspaces",
+        "projects",
+        "project_documents",
+        "tasks",
+        "meeting_minutes",
+        "meeting_participants",
+        "sessions",
+        "phases",
+        "phase_transitions",
+        "skill_gates",
+        "phase_bypasses",
         "migrations",  # bookkeeping
         # local-only/ tables
-        "roles", "agents",
+        "roles",
+        "agents",
     }
     assert expected == tables, (
         f"tables mismatch — extra: {tables - expected}, missing: {expected - tables}"
@@ -102,9 +113,7 @@ def test_migration_recorded_with_v110_filenames(tmp_path):
     apply_migrations(db_path, SHARED)
     apply_migrations(db_path, LOCAL_ONLY)
     with closing(get_connection(db_path)) as conn:
-        filenames = {row[0] for row in conn.execute(
-            "SELECT filename FROM migrations"
-        ).fetchall()}
+        filenames = {row[0] for row in conn.execute("SELECT filename FROM migrations").fetchall()}
     assert "001_v110_schema.sql" in filenames
     assert "050_local_roles_agents.sql" in filenames
 
@@ -117,10 +126,7 @@ def test_apply_shared_then_local_is_idempotent(tmp_path):
     apply_migrations(db_path, LOCAL_ONLY)
     apply_migrations(db_path, SHARED)  # second run — must not raise
     apply_migrations(db_path, LOCAL_ONLY)  # second run — must not raise
-    expected = (
-        len(list(SHARED.glob("*.sql")))
-        + len(list(LOCAL_ONLY.glob("*.sql")))
-    )
+    expected = len(list(SHARED.glob("*.sql"))) + len(list(LOCAL_ONLY.glob("*.sql")))
     with closing(get_connection(db_path)) as conn:
         count = conn.execute("SELECT COUNT(*) FROM migrations").fetchone()[0]
     assert count == expected, f"expected {expected} migration rows, got {count}"
@@ -138,14 +144,10 @@ def test_phase_bypasses_v110_columns(tmp_path):
     db_path = str(tmp_path / "test.db")
     apply_migrations(db_path, SHARED)
     with closing(get_connection(db_path)) as conn:
-        cols = {r[1] for r in conn.execute(
-            "PRAGMA table_info(phase_bypasses)"
-        ).fetchall()}
-    expected = {"id", "project_id", "from_phase", "to_phase", "reason",
-                "agent_id", "created_at"}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(phase_bypasses)").fetchall()}
+    expected = {"id", "project_id", "from_phase", "to_phase", "reason", "agent_id", "created_at"}
     assert expected == cols, (
-        f"phase_bypasses column mismatch — "
-        f"extra: {cols - expected}, missing: {expected - cols}"
+        f"phase_bypasses column mismatch — extra: {cols - expected}, missing: {expected - cols}"
     )
 
 
@@ -158,14 +160,12 @@ def test_phase_bypasses_required_nonnull_columns(tmp_path):
     db_path = str(tmp_path / "test.db")
     apply_migrations(db_path, SHARED)
     with closing(get_connection(db_path)) as conn:
-        notnull_cols = {r[1] for r in conn.execute(
-            "PRAGMA table_info(phase_bypasses)"
-        ).fetchall() if r[3] == 1}  # column 3 is `notnull` in PRAGMA output
-    expected_notnull = {"project_id", "from_phase", "to_phase",
-                        "reason", "agent_id", "created_at"}
+        notnull_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(phase_bypasses)").fetchall() if r[3] == 1
+        }  # column 3 is `notnull` in PRAGMA output
+    expected_notnull = {"project_id", "from_phase", "to_phase", "reason", "agent_id", "created_at"}
     assert expected_notnull <= notnull_cols, (
-        f"phase_bypasses NOT NULL constraint missing on: "
-        f"{expected_notnull - notnull_cols}"
+        f"phase_bypasses NOT NULL constraint missing on: {expected_notnull - notnull_cols}"
     )
 
 

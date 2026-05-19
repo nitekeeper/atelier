@@ -13,6 +13,7 @@ The six deferred methods (`find_or_create_workspace`,
 to confirm they still raise NotImplementedError — spec §4.3 keeps them on
 the surface but Plan 2 defers their implementation to v1.2.0.
 """
+
 from __future__ import annotations
 
 from unittest.mock import create_autospec, patch
@@ -36,14 +37,22 @@ def test_facade_routes_to_memex_when_mode_is_memex():
     N6: spot-check the forwarded kwargs (domain / title / caller_agent_id)
     so this doesn't degenerate into an "any call counts" smoke test.
     """
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch("scripts.backend_memex.write_document",
-               return_value={"row_id": 1, "index_id": "i-1"}) as memex_call, \
-         patch("scripts.backend_local.write_document") as local_call:
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch(
+            "scripts.backend_memex.write_document", return_value={"row_id": 1, "index_id": "i-1"}
+        ) as memex_call,
+        patch("scripts.backend_local.write_document") as local_call,
+    ):
         result = backend.write_document(
-            workspace_id=1, project_id=2, domain="design",
-            subdomain="auth", title="Auth Design", body="OAuth2 plan",
-            metadata={"k": "v"}, caller_agent_id="atelier-pm-1",
+            workspace_id=1,
+            project_id=2,
+            domain="design",
+            subdomain="auth",
+            title="Auth Design",
+            body="OAuth2 plan",
+            metadata={"k": "v"},
+            caller_agent_id="atelier-pm-1",
         )
     assert result == {"row_id": 1, "index_id": "i-1"}
     memex_call.assert_called_once()
@@ -64,14 +73,22 @@ def test_facade_routes_to_local_when_mode_is_local():
     N6: spot-check forwarded kwargs — Local is a pure pass-through so
     workspace_id / subdomain / domain all arrive unchanged.
     """
-    with patch.object(mode_detector, "detect_mode", return_value="local"), \
-         patch("scripts.backend_local.write_document",
-               return_value={"row_id": 7, "index_id": None}) as local_call, \
-         patch("scripts.backend_memex.write_document") as memex_call:
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch(
+            "scripts.backend_local.write_document", return_value={"row_id": 7, "index_id": None}
+        ) as local_call,
+        patch("scripts.backend_memex.write_document") as memex_call,
+    ):
         result = backend.write_document(
-            workspace_id=1, project_id=2, domain="design",
-            subdomain="auth", title="Auth Design", body="OAuth2 plan",
-            metadata={"k": "v"}, caller_agent_id="atelier-pm-1",
+            workspace_id=1,
+            project_id=2,
+            domain="design",
+            subdomain="auth",
+            title="Auth Design",
+            body="OAuth2 plan",
+            metadata={"k": "v"},
+            caller_agent_id="atelier-pm-1",
         )
     assert result == {"row_id": 7, "index_id": None}
     local_call.assert_called_once()
@@ -92,14 +109,21 @@ def test_facade_assert_valid_domain_before_dispatch():
     swallows the diagnostic (or rewrites it to "invalid input") fails
     this test loudly rather than silently passing.
     """
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch("scripts.backend_memex.write_document") as memex_call, \
-         patch("scripts.backend_local.write_document") as local_call:
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.write_document") as memex_call,
+        patch("scripts.backend_local.write_document") as local_call,
+    ):
         with pytest.raises(ValueError, match="garbage"):
             backend.write_document(
-                workspace_id=1, project_id=2, domain="garbage",
-                subdomain=None, title="t", body="b",
-                metadata={}, caller_agent_id="a",
+                workspace_id=1,
+                project_id=2,
+                domain="garbage",
+                subdomain=None,
+                title="t",
+                body="b",
+                metadata={},
+                caller_agent_id="a",
             )
     memex_call.assert_not_called()
     local_call.assert_not_called()
@@ -114,19 +138,19 @@ def _patch_all_local(**overrides):
     without firing real SQLite I/O. `overrides` lets callers swap a specific
     method to return a richer value when they need it."""
     defaults = {
-        "write_project":   lambda **k: {"id": 1, "marker": "write_project"},
-        "write_document":  lambda **k: {"id": 1, "marker": "write_document"},
-        "write_task":      lambda **k: {"id": 1, "marker": "write_task"},
-        "write_meeting":   lambda **k: {"id": 1, "marker": "write_meeting"},
-        "upsert_session":  lambda **k: {"id": 1, "marker": "upsert_session"},
+        "write_project": lambda **k: {"id": 1, "marker": "write_project"},
+        "write_document": lambda **k: {"id": 1, "marker": "write_document"},
+        "write_task": lambda **k: {"id": 1, "marker": "write_task"},
+        "write_meeting": lambda **k: {"id": 1, "marker": "write_meeting"},
+        "upsert_session": lambda **k: {"id": 1, "marker": "upsert_session"},
         "transition_phase": lambda **k: {"id": 1, "marker": "transition_phase"},
         "update_task_status": lambda **k: {"id": 1, "marker": "update_task_status"},
         "record_phase_bypass": lambda **k: {"id": 1, "marker": "record_phase_bypass"},
-        "find_documents":  lambda **k: [{"marker": "find_documents"}],
-        "get_task":        lambda **k: {"marker": "get_task"},
-        "list_tasks":      lambda **k: [{"marker": "list_tasks"}],
+        "find_documents": lambda **k: [{"marker": "find_documents"}],
+        "get_task": lambda **k: {"marker": "get_task"},
+        "list_tasks": lambda **k: [{"marker": "list_tasks"}],
         "lookup_index_id_by_source_ref": lambda **k: "lookup-id",
-        "find_or_create_role":  lambda **k: {"marker": "find_or_create_role"},
+        "find_or_create_role": lambda **k: {"marker": "find_or_create_role"},
         "find_or_create_agent": lambda **k: {"marker": "find_or_create_agent"},
     }
     defaults.update(overrides)
@@ -139,42 +163,79 @@ def test_every_implemented_method_dispatches_to_local():
     (proven via a unique marker per method). Acts as the comprehensive
     "no method left as a stub" guard."""
     patches = _patch_all_local()
-    with patch.object(mode_detector, "detect_mode", return_value="local"), \
-         patch.multiple("scripts.backend_local", **patches):
-        assert backend.write_project(
-            workspace_id=1, slug="p", name="P",
-            description="d", created_by="a")["marker"] == "write_project"
-        assert backend.write_document(
-            workspace_id=1, project_id=1, domain="design", subdomain=None,
-            title="t", body="b", metadata={},
-            caller_agent_id="a")["marker"] == "write_document"
-        assert backend.write_task(
-            workspace_id=1, project_id=1, title="t", description="d",
-            subdomain=None, created_by="a")["marker"] == "write_task"
-        assert backend.write_meeting(
-            workspace_id=1, project_id=1, title="t",
-            date="2026-05-18", summary="s", decisions="d",
-            subdomain=None, created_by="a")["marker"] == "write_meeting"
-        assert backend.upsert_session(
-            project_id=1, agent_id="a")["marker"] == "upsert_session"
-        assert backend.transition_phase(
-            project_id=1, to_phase="plan:open",
-            agent_id="a")["marker"] == "transition_phase"
-        assert backend.update_task_status(
-            task_id=1, status="done")["marker"] == "update_task_status"
-        assert backend.record_phase_bypass(
-            project_id=1, from_phase="x", to_phase="y",
-            reason="r", agent_id="a")["marker"] == "record_phase_bypass"
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch.multiple("scripts.backend_local", **patches),
+    ):
+        assert (
+            backend.write_project(
+                workspace_id=1, slug="p", name="P", description="d", created_by="a"
+            )["marker"]
+            == "write_project"
+        )
+        assert (
+            backend.write_document(
+                workspace_id=1,
+                project_id=1,
+                domain="design",
+                subdomain=None,
+                title="t",
+                body="b",
+                metadata={},
+                caller_agent_id="a",
+            )["marker"]
+            == "write_document"
+        )
+        assert (
+            backend.write_task(
+                workspace_id=1,
+                project_id=1,
+                title="t",
+                description="d",
+                subdomain=None,
+                created_by="a",
+            )["marker"]
+            == "write_task"
+        )
+        assert (
+            backend.write_meeting(
+                workspace_id=1,
+                project_id=1,
+                title="t",
+                date="2026-05-18",
+                summary="s",
+                decisions="d",
+                subdomain=None,
+                created_by="a",
+            )["marker"]
+            == "write_meeting"
+        )
+        assert backend.upsert_session(project_id=1, agent_id="a")["marker"] == "upsert_session"
+        assert (
+            backend.transition_phase(project_id=1, to_phase="plan:open", agent_id="a")["marker"]
+            == "transition_phase"
+        )
+        assert (
+            backend.update_task_status(task_id=1, status="done")["marker"] == "update_task_status"
+        )
+        assert (
+            backend.record_phase_bypass(
+                project_id=1, from_phase="x", to_phase="y", reason="r", agent_id="a"
+            )["marker"]
+            == "record_phase_bypass"
+        )
         assert backend.find_documents(query="q")[0]["marker"] == "find_documents"
         assert backend.get_task(task_id=1)["marker"] == "get_task"
         assert backend.list_tasks(project_id=1)[0]["marker"] == "list_tasks"
-        assert backend.lookup_index_id_by_source_ref(
-            source_ref="atelier:tasks:1") == "lookup-id"
-        assert backend.find_or_create_role(
-            name="PM", description="d")["marker"] == "find_or_create_role"
-        assert backend.find_or_create_agent(
-            agent_id="x", name="X", role_id=1,
-            profile="p")["marker"] == "find_or_create_agent"
+        assert backend.lookup_index_id_by_source_ref(source_ref="atelier:tasks:1") == "lookup-id"
+        assert (
+            backend.find_or_create_role(name="PM", description="d")["marker"]
+            == "find_or_create_role"
+        )
+        assert (
+            backend.find_or_create_agent(agent_id="x", name="X", role_id=1, profile="p")["marker"]
+            == "find_or_create_agent"
+        )
 
 
 def _patch_all_memex(**overrides):
@@ -183,19 +244,19 @@ def _patch_all_memex(**overrides):
     unique markers so the dispatch check holds — the adapter folds extra
     kwargs into metadata but the underlying call still lands here."""
     defaults = {
-        "write_project":   lambda **k: {"id": 1, "marker": "write_project"},
-        "write_document":  lambda **k: {"id": 1, "marker": "write_document"},
-        "write_task":      lambda **k: {"id": 1, "marker": "write_task"},
-        "write_meeting":   lambda **k: {"id": 1, "marker": "write_meeting"},
-        "upsert_session":  lambda **k: {"id": 1, "marker": "upsert_session"},
+        "write_project": lambda **k: {"id": 1, "marker": "write_project"},
+        "write_document": lambda **k: {"id": 1, "marker": "write_document"},
+        "write_task": lambda **k: {"id": 1, "marker": "write_task"},
+        "write_meeting": lambda **k: {"id": 1, "marker": "write_meeting"},
+        "upsert_session": lambda **k: {"id": 1, "marker": "upsert_session"},
         "transition_phase": lambda **k: {"id": 1, "marker": "transition_phase"},
         "update_task_status": lambda **k: {"id": 1, "marker": "update_task_status"},
         "record_phase_bypass": lambda **k: {"id": 1, "marker": "record_phase_bypass"},
-        "find_documents":  lambda **k: [{"marker": "find_documents"}],
-        "get_task":        lambda **k: {"marker": "get_task"},
-        "list_tasks":      lambda **k: [{"marker": "list_tasks"}],
+        "find_documents": lambda **k: [{"marker": "find_documents"}],
+        "get_task": lambda **k: {"marker": "get_task"},
+        "list_tasks": lambda **k: [{"marker": "list_tasks"}],
         "lookup_index_id_by_source_ref": lambda **k: "lookup-id",
-        "find_or_create_role":  lambda **k: {"marker": "find_or_create_role"},
+        "find_or_create_role": lambda **k: {"marker": "find_or_create_role"},
         "find_or_create_agent": lambda **k: {"marker": "find_or_create_agent"},
     }
     defaults.update(overrides)
@@ -211,42 +272,79 @@ def test_every_implemented_method_dispatches_to_memex():
     find_or_create_role, find_or_create_agent — so a future refactor
     that flips the dispatch table fails loudly per-method."""
     patches = _patch_all_memex()
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch.multiple("scripts.backend_memex", **patches):
-        assert backend.write_project(
-            workspace_id=1, slug="p", name="P",
-            description="d", created_by="a")["marker"] == "write_project"
-        assert backend.write_document(
-            workspace_id=1, project_id=1, domain="design", subdomain=None,
-            title="t", body="b", metadata={},
-            caller_agent_id="a")["marker"] == "write_document"
-        assert backend.write_task(
-            workspace_id=1, project_id=1, title="t", description="d",
-            subdomain=None, created_by="a")["marker"] == "write_task"
-        assert backend.write_meeting(
-            workspace_id=1, project_id=1, title="t",
-            date="2026-05-18", summary="s", decisions="d",
-            subdomain=None, created_by="a")["marker"] == "write_meeting"
-        assert backend.upsert_session(
-            project_id=1, agent_id="a")["marker"] == "upsert_session"
-        assert backend.transition_phase(
-            project_id=1, to_phase="plan:open",
-            agent_id="a")["marker"] == "transition_phase"
-        assert backend.update_task_status(
-            task_id=1, status="done")["marker"] == "update_task_status"
-        assert backend.record_phase_bypass(
-            project_id=1, from_phase="x", to_phase="y",
-            reason="r", agent_id="a")["marker"] == "record_phase_bypass"
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch.multiple("scripts.backend_memex", **patches),
+    ):
+        assert (
+            backend.write_project(
+                workspace_id=1, slug="p", name="P", description="d", created_by="a"
+            )["marker"]
+            == "write_project"
+        )
+        assert (
+            backend.write_document(
+                workspace_id=1,
+                project_id=1,
+                domain="design",
+                subdomain=None,
+                title="t",
+                body="b",
+                metadata={},
+                caller_agent_id="a",
+            )["marker"]
+            == "write_document"
+        )
+        assert (
+            backend.write_task(
+                workspace_id=1,
+                project_id=1,
+                title="t",
+                description="d",
+                subdomain=None,
+                created_by="a",
+            )["marker"]
+            == "write_task"
+        )
+        assert (
+            backend.write_meeting(
+                workspace_id=1,
+                project_id=1,
+                title="t",
+                date="2026-05-18",
+                summary="s",
+                decisions="d",
+                subdomain=None,
+                created_by="a",
+            )["marker"]
+            == "write_meeting"
+        )
+        assert backend.upsert_session(project_id=1, agent_id="a")["marker"] == "upsert_session"
+        assert (
+            backend.transition_phase(project_id=1, to_phase="plan:open", agent_id="a")["marker"]
+            == "transition_phase"
+        )
+        assert (
+            backend.update_task_status(task_id=1, status="done")["marker"] == "update_task_status"
+        )
+        assert (
+            backend.record_phase_bypass(
+                project_id=1, from_phase="x", to_phase="y", reason="r", agent_id="a"
+            )["marker"]
+            == "record_phase_bypass"
+        )
         assert backend.find_documents(query="q")[0]["marker"] == "find_documents"
         assert backend.get_task(task_id=1)["marker"] == "get_task"
         assert backend.list_tasks(project_id=1)[0]["marker"] == "list_tasks"
-        assert backend.lookup_index_id_by_source_ref(
-            source_ref="atelier:tasks:1") == "lookup-id"
-        assert backend.find_or_create_role(
-            name="PM", description="d")["marker"] == "find_or_create_role"
-        assert backend.find_or_create_agent(
-            agent_id="x", name="X", role_id=1,
-            profile="p")["marker"] == "find_or_create_agent"
+        assert backend.lookup_index_id_by_source_ref(source_ref="atelier:tasks:1") == "lookup-id"
+        assert (
+            backend.find_or_create_role(name="PM", description="d")["marker"]
+            == "find_or_create_role"
+        )
+        assert (
+            backend.find_or_create_agent(agent_id="x", name="X", role_id=1, profile="p")["marker"]
+            == "find_or_create_agent"
+        )
 
 
 # ── Memex-mode signature adapter ───────────────────────────────────────────
@@ -272,11 +370,16 @@ def test_facade_folds_wide_kwargs_into_metadata_for_memex():
         captured.update(kwargs)
         return {"row_id": 1, "index_id": "i-1"}
 
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch("scripts.backend_memex.write_document", new=fake_write_document):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.write_document", new=fake_write_document),
+    ):
         backend.write_document(
-            workspace_id=42, project_id=7, domain="adr",
-            subdomain="security", title="ADR-007",
+            workspace_id=42,
+            project_id=7,
+            domain="adr",
+            subdomain="security",
+            title="ADR-007",
             body="Use OAuth2 over SAML.",
             metadata={"existing": "value"},
             caller_agent_id="atelier-pm-1",
@@ -312,12 +415,19 @@ def test_facade_omits_subdomain_from_metadata_when_none():
         captured.update(kwargs)
         return {"row_id": 1, "index_id": "i-1"}
 
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch("scripts.backend_memex.write_document", new=fake_write_document):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.write_document", new=fake_write_document),
+    ):
         backend.write_document(
-            workspace_id=1, project_id=1, domain="design",
-            subdomain=None, title="t", body="b",
-            metadata={}, caller_agent_id="a",
+            workspace_id=1,
+            project_id=1,
+            domain="design",
+            subdomain=None,
+            title="t",
+            body="b",
+            metadata={},
+            caller_agent_id="a",
         )
 
     assert "subdomain" not in captured["metadata"]
@@ -333,11 +443,17 @@ def test_facade_metadata_setdefault_lets_caller_win():
         captured.update(kwargs)
         return {"row_id": 1, "index_id": "i-1"}
 
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch("scripts.backend_memex.write_document", new=fake_write_document):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.write_document", new=fake_write_document),
+    ):
         backend.write_document(
-            workspace_id=42, project_id=7, domain="design",
-            subdomain=None, title="t", body="b",
+            workspace_id=42,
+            project_id=7,
+            domain="design",
+            subdomain=None,
+            title="t",
+            body="b",
             metadata={"workspace_id": 99},
             caller_agent_id="a",
         )
@@ -357,12 +473,20 @@ def test_facade_folds_wide_kwargs_into_metadata_for_write_task_memex():
         captured.update(kwargs)
         return {"row_id": 1, "index_id": "i-1"}
 
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch("scripts.backend_memex.write_task", new=fake_write_task):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.write_task", new=fake_write_task),
+    ):
         backend.write_task(
-            workspace_id=10, project_id=3, title="Add OAuth refresh",
-            description="…", subdomain="auth", created_by="atelier-eng-1",
-            assigned_to="atelier-eng-2", priority=5, notes="some notes",
+            workspace_id=10,
+            project_id=3,
+            title="Add OAuth refresh",
+            description="…",
+            subdomain="auth",
+            created_by="atelier-eng-1",
+            assigned_to="atelier-eng-2",
+            priority=5,
+            notes="some notes",
         )
 
     assert "workspace_id" not in captured
@@ -389,11 +513,17 @@ def test_facade_write_task_memex_omits_metadata_when_subdomain_none():
         captured.update(kwargs)
         return {"row_id": 1, "index_id": "i-1"}
 
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch("scripts.backend_memex.write_task", new=fake_write_task):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.write_task", new=fake_write_task),
+    ):
         backend.write_task(
-            workspace_id=10, project_id=3, title="t",
-            description="…", subdomain=None, created_by="a",
+            workspace_id=10,
+            project_id=3,
+            title="t",
+            description="…",
+            subdomain=None,
+            created_by="a",
         )
 
     assert captured["metadata"] is None
@@ -410,12 +540,19 @@ def test_facade_folds_wide_kwargs_into_metadata_for_write_meeting_memex():
         captured.update(kwargs)
         return {"row_id": 1, "index_id": "i-1"}
 
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch("scripts.backend_memex.write_meeting", new=fake_write_meeting):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.write_meeting", new=fake_write_meeting),
+    ):
         backend.write_meeting(
-            workspace_id=10, project_id=3, title="Sync",
-            date="2026-05-18", summary="…", decisions="…",
-            subdomain="weekly", created_by="atelier-pm-1",
+            workspace_id=10,
+            project_id=3,
+            title="Sync",
+            date="2026-05-18",
+            summary="…",
+            decisions="…",
+            subdomain="weekly",
+            created_by="atelier-pm-1",
         )
 
     assert "workspace_id" not in captured
@@ -434,12 +571,19 @@ def test_facade_write_meeting_memex_omits_metadata_when_subdomain_none():
         captured.update(kwargs)
         return {"row_id": 1, "index_id": "i-1"}
 
-    with patch.object(mode_detector, "detect_mode", return_value="memex"), \
-         patch("scripts.backend_memex.write_meeting", new=fake_write_meeting):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.write_meeting", new=fake_write_meeting),
+    ):
         backend.write_meeting(
-            workspace_id=10, project_id=3, title="t",
-            date="2026-05-18", summary="s", decisions="d",
-            subdomain=None, created_by="a",
+            workspace_id=10,
+            project_id=3,
+            title="t",
+            date="2026-05-18",
+            summary="s",
+            decisions="d",
+            subdomain=None,
+            created_by="a",
         )
 
     assert captured["metadata"] is None
@@ -462,11 +606,17 @@ def test_local_preserves_subdomain_for_write_task():
         captured.update(kwargs)
         return {"id": 1}
 
-    with patch.object(mode_detector, "detect_mode", return_value="local"), \
-         patch("scripts.backend_local.write_task", new=fake_write_task):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch("scripts.backend_local.write_task", new=fake_write_task),
+    ):
         backend.write_task(
-            workspace_id=1, project_id=2, title="t", description="d",
-            subdomain="auth", created_by="a",
+            workspace_id=1,
+            project_id=2,
+            title="t",
+            description="d",
+            subdomain="auth",
+            created_by="a",
         )
 
     assert captured["subdomain"] == "auth"
@@ -483,12 +633,19 @@ def test_local_preserves_subdomain_for_write_meeting():
         captured.update(kwargs)
         return {"id": 1}
 
-    with patch.object(mode_detector, "detect_mode", return_value="local"), \
-         patch("scripts.backend_local.write_meeting", new=fake_write_meeting):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch("scripts.backend_local.write_meeting", new=fake_write_meeting),
+    ):
         backend.write_meeting(
-            workspace_id=1, project_id=2, title="t",
-            date="2026-05-18", summary="s", decisions="d",
-            subdomain="weekly", created_by="a",
+            workspace_id=1,
+            project_id=2,
+            title="t",
+            date="2026-05-18",
+            summary="s",
+            decisions="d",
+            subdomain="weekly",
+            created_by="a",
         )
 
     assert captured["subdomain"] == "weekly"

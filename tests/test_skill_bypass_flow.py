@@ -3,6 +3,7 @@
 Exercises the full CLI surface: agent calls check-gate -> sees allowed=False
 -> user confirms -> agent calls log-bypass -> later advance lifts the wall.
 """
+
 from __future__ import annotations
 
 import json
@@ -35,8 +36,7 @@ def _seed(db_path: str) -> int:
     )
     ws_id = cur.lastrowid
     cur = conn.execute(
-        "INSERT INTO roles (name, description, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
         ("pm", "PM", now, now),
     )
     role_id = cur.lastrowid
@@ -61,6 +61,7 @@ def _seed(db_path: str) -> int:
 def project(tmp_path, monkeypatch):
     """Forces Local mode (in-process AND in CLI subprocesses via fake HOME)."""
     from scripts import mode_detector
+
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
     root = tmp_path / "repo"
     root.mkdir()
@@ -74,25 +75,30 @@ def project(tmp_path, monkeypatch):
     apply_migrations(str(db), MIGRATIONS_DIR / "shared")
     apply_migrations(str(db), MIGRATIONS_DIR / "local-only")
     pid = _seed(str(db))
-    return {"root": root, "db": str(db), "project_id": pid,
-            "fake_home": str(fake_home)}
+    return {"root": root, "db": str(db), "project_id": pid, "fake_home": str(fake_home)}
 
 
 def _cli_env(project) -> dict:
     """Env for CLI subprocess: empty HOME so mode_detector picks Local."""
     # Strip USERPROFILE on Windows too (HOME alone isn't enough on Win).
-    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "PYTHONUTF8": "1",
-           "HOME": project["fake_home"]}
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(REPO_ROOT),
+        "PYTHONUTF8": "1",
+        "HOME": project["fake_home"],
+    }
     env.pop("USERPROFILE", None)
     return env
 
 
 def _check_gate_cli(project, skill):
     result = subprocess.run(
-        WORKFLOW_CLI + [project["db"], "check-gate",
-                        str(project["project_id"]), skill],
-        capture_output=True, text=True, encoding="utf-8",
-        env=_cli_env(project), cwd=str(project["root"]),
+        WORKFLOW_CLI + [project["db"], "check-gate", str(project["project_id"]), skill],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=_cli_env(project),
+        cwd=str(project["root"]),
     )
     assert result.returncode == 0, f"check-gate failed: {result.stderr}"
     return json.loads(result.stdout)
@@ -100,11 +106,23 @@ def _check_gate_cli(project, skill):
 
 def _log_bypass_cli(project, from_phase, to_phase, reason, agent_id):
     result = subprocess.run(
-        WORKFLOW_CLI + [project["db"], "log-bypass",
-                        str(project["project_id"]), from_phase, to_phase,
-                        "--reason", reason, "--agent", agent_id],
-        capture_output=True, text=True, encoding="utf-8",
-        env=_cli_env(project), cwd=str(project["root"]),
+        WORKFLOW_CLI
+        + [
+            project["db"],
+            "log-bypass",
+            str(project["project_id"]),
+            from_phase,
+            to_phase,
+            "--reason",
+            reason,
+            "--agent",
+            agent_id,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=_cli_env(project),
+        cwd=str(project["root"]),
     )
     assert result.returncode == 0, f"log-bypass failed: {result.stderr}"
     return json.loads(result.stdout)
@@ -124,7 +142,8 @@ def test_full_bypass_flow(project):
     # 2. User confirms bypass; agent calls log-bypass.
     bypass = _log_bypass_cli(
         project,
-        from_phase=result["current_phase"], to_phase=result["required_phase"],
+        from_phase=result["current_phase"],
+        to_phase=result["required_phase"],
         reason="user explicitly approved out-of-phase plan work",
         agent_id="agent-1",
     )
@@ -134,8 +153,8 @@ def test_full_bypass_flow(project):
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT from_phase, to_phase, reason, agent_id "
-            "FROM phase_bypasses WHERE id = ?", (bypass["bypass_id"],),
+            "SELECT from_phase, to_phase, reason, agent_id FROM phase_bypasses WHERE id = ?",
+            (bypass["bypass_id"],),
         ).fetchone()
     assert row["from_phase"] == "design:open"
     assert row["to_phase"] == "design:approved"
@@ -153,7 +172,8 @@ def test_full_bypass_flow(project):
     # 6. Bypass row remains (audit trail).
     with closing(sqlite3.connect(db_path)) as conn:
         count = conn.execute(
-            "SELECT COUNT(*) FROM phase_bypasses WHERE project_id = ?", (pid,),
+            "SELECT COUNT(*) FROM phase_bypasses WHERE project_id = ?",
+            (pid,),
         ).fetchone()[0]
     assert count == 1
 

@@ -4,6 +4,7 @@
 Post-Plan-3-Task-6: workflow routes writes through `backend.transition_phase`
 and `backend.record_phase_bypass`. Catalog reads still go to the workspace DB.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -30,8 +31,7 @@ def _seed(db_path: str) -> dict:
     )
     ws_id = cur.lastrowid
     cur = conn.execute(
-        "INSERT INTO roles (name, description, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
         ("pm", "PM", now, now),
     )
     role_id = cur.lastrowid
@@ -44,8 +44,7 @@ def _seed(db_path: str) -> dict:
         "INSERT INTO projects (workspace_id, slug, name, description, "
         "phase, created_by, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (ws_id, "auth", "Auth", "OAuth2 login", "design:open",
-         "pm-1", now, now),
+        (ws_id, "auth", "Auth", "OAuth2 login", "design:open", "pm-1", now, now),
     )
     proj_id = cur.lastrowid
     conn.commit()
@@ -62,6 +61,7 @@ def workspace(tmp_path, monkeypatch):
     install (and on `~/.memex`), so we pin Local for deterministic CI.
     Memex-mode coverage lives in `test_backend_memex_*.py`."""
     from scripts import mode_detector
+
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
     root = tmp_path / "repo"
     root.mkdir()
@@ -87,6 +87,7 @@ def project_id(workspace):
 
 # ── get_phase / catalog reads ──────────────────────────────────────────────
 
+
 def test_get_phase_returns_default_design_open(db_path, project_id):
     assert workflow.get_phase(db_path, project_id) == "design:open"
 
@@ -97,6 +98,7 @@ def test_get_phase_unknown_project_raises(db_path):
 
 
 # ── advance_phase ──────────────────────────────────────────────────────────
+
 
 def test_advance_phase_valid_transition(db_path, project_id):
     workflow.advance_phase(db_path, project_id, "design:approved")
@@ -116,11 +118,18 @@ def test_advance_to_diagnose_from_any_phase(db_path, project_id):
 
 def test_full_happy_path(db_path, project_id):
     path = [
-        "design:approved", "plan:open", "plan:approved",
-        "tdd:red", "tdd:green", "tdd:clean",
-        "review:open", "review:approved",
-        "security:open", "security:approved",
-        "qa:open", "qa:approved",
+        "design:approved",
+        "plan:open",
+        "plan:approved",
+        "tdd:red",
+        "tdd:green",
+        "tdd:clean",
+        "review:open",
+        "review:approved",
+        "security:open",
+        "security:approved",
+        "qa:open",
+        "qa:approved",
         "handoff:complete",
     ]
     for phase in path:
@@ -129,6 +138,7 @@ def test_full_happy_path(db_path, project_id):
 
 
 # ── catalog helpers ────────────────────────────────────────────────────────
+
 
 def test_get_valid_transitions_from_design_open(db_path):
     transitions = workflow.get_valid_transitions(db_path, "design:open")
@@ -144,6 +154,7 @@ def test_design_open_allow_from_any_is_false(db_path):
 
 
 # ── check_gate (smoke; deep coverage lives in test_soft_walls) ─────────────
+
 
 def test_check_gate_passes_when_phase_satisfies_required(db_path, project_id):
     workflow.advance_phase(db_path, project_id, "design:approved")
@@ -161,6 +172,7 @@ def test_check_gate_fails_softly_when_phase_unmet(db_path, project_id):
 
 
 # ── Memex-mode catalog routing (T23 round-1 R1) ────────────────────────────
+
 
 def test_catalog_query_routes_through_memex_module(monkeypatch):
     """In Memex mode, `_catalog_query` must resolve `stores` via
@@ -191,9 +203,7 @@ def test_catalog_query_routes_through_memex_module(monkeypatch):
 
     def fake_memex_module(dotted: str):
         requested.append(dotted)
-        assert dotted == "stores", (
-            f"_catalog_query must request 'stores', got {dotted!r}"
-        )
+        assert dotted == "stores", f"_catalog_query must request 'stores', got {dotted!r}"
         return FakeStores
 
     monkeypatch.setattr(backend_memex, "_memex_module", fake_memex_module)
@@ -202,9 +212,7 @@ def test_catalog_query_routes_through_memex_module(monkeypatch):
     phase = workflow.get_phase("ignored.db", 42)
 
     assert phase == "design:open"
-    assert requested == ["stores"], (
-        "_catalog_query must route through backend_memex._memex_module"
-    )
+    assert requested == ["stores"], "_catalog_query must route through backend_memex._memex_module"
     assert len(calls) == 1
     store, sql, params = calls[0]
     assert store == "atelier"

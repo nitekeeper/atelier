@@ -19,6 +19,7 @@ itself does not consume meeting rows, but the convention is documented here
 so the rewrite story for sibling modules (``meetings.py``, Task 4) stays
 uniform.
 """
+
 from __future__ import annotations
 
 import json
@@ -33,8 +34,10 @@ def _now() -> str:
 
 # ── Backend access helpers ─────────────────────────────────────────────────
 
+
 def _is_memex_mode() -> bool:
     from scripts import mode_detector
+
     return mode_detector.detect_mode() == "memex"
 
 
@@ -47,15 +50,16 @@ def _session_by_id(session_id: int) -> dict | None:
     """
     if _is_memex_mode():
         from scripts import backend_memex
+
         rows = backend_memex._memex_core_query(
-            store="atelier", table="sessions", where={"id": session_id})
+            store="atelier", table="sessions", where={"id": session_id}
+        )
         return rows[0] if rows else None
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
-        row = c.execute(
-            "SELECT * FROM sessions WHERE id = ?", (session_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else None
@@ -72,11 +76,13 @@ def _patch_session(session_id: int, updates: dict) -> dict | None:
     updates["updated_at"] = _now()
     if _is_memex_mode():
         from scripts import backend_memex
+
         backend_memex._memex_core_update(
-            store="atelier", table="sessions",
-            row_id=session_id, changes=updates)
+            store="atelier", table="sessions", row_id=session_id, changes=updates
+        )
         return _session_by_id(session_id)
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -85,9 +91,7 @@ def _patch_session(session_id: int, updates: dict) -> dict | None:
             (*updates.values(), session_id),
         )
         c.commit()
-        row = c.execute(
-            "SELECT * FROM sessions WHERE id = ?", (session_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else None
@@ -104,17 +108,22 @@ def _close_in_progress_for_pair(project_id: int, agent_id: str) -> None:
     """
     if _is_memex_mode():
         from scripts import backend_memex
+
         rows = backend_memex._memex_core_query(
-            store="atelier", table="sessions",
-            where={"project_id": project_id, "agent_id": agent_id,
-                   "status": "in-progress"})
+            store="atelier",
+            table="sessions",
+            where={"project_id": project_id, "agent_id": agent_id, "status": "in-progress"},
+        )
         for row in rows:
             backend_memex._memex_core_update(
-                store="atelier", table="sessions",
+                store="atelier",
+                table="sessions",
                 row_id=row["id"],
-                changes={"status": "complete", "updated_at": _now()})
+                changes={"status": "complete", "updated_at": _now()},
+            )
         return
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         c.execute(
@@ -128,6 +137,7 @@ def _close_in_progress_for_pair(project_id: int, agent_id: str) -> None:
 
 
 # ── Public surface ─────────────────────────────────────────────────────────
+
 
 def write_session(
     db_path: str,
@@ -152,9 +162,14 @@ def write_session(
     # Close any open session for this pair so we always INSERT below.
     _close_in_progress_for_pair(project_id, agent_id)
     row = backend.upsert_session(
-        project_id=project_id, agent_id=agent_id, phase=phase,
-        current_tasks=current_tasks, accomplished=accomplished,
-        next_action=next_action, status=status, pm_notes=pm_notes,
+        project_id=project_id,
+        agent_id=agent_id,
+        phase=phase,
+        current_tasks=current_tasks,
+        accomplished=accomplished,
+        next_action=next_action,
+        status=status,
+        pm_notes=pm_notes,
     )
     # Fill in the schema-only fields the facade doesn't carry.
     extras: dict = {}
@@ -177,20 +192,21 @@ def read_latest(db_path: str, project_id: int) -> dict | None:
     """Return the most recent session for a project, or None."""
     if _is_memex_mode():
         from scripts import backend_memex
+
         # Equality-only `where=` per spec §6.2; sort + limit applied here.
         rows = backend_memex._memex_core_query(
-            store="atelier", table="sessions",
-            where={"project_id": project_id})
+            store="atelier", table="sessions", where={"project_id": project_id}
+        )
         if not rows:
             return None
         rows.sort(key=lambda r: r["id"], reverse=True)
         return rows[0]
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         row = c.execute(
-            "SELECT * FROM sessions WHERE project_id = ? "
-            "ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM sessions WHERE project_id = ? ORDER BY id DESC LIMIT 1",
             (project_id,),
         ).fetchone()
     finally:
@@ -202,17 +218,18 @@ def list_sessions(db_path: str, project_id: int, limit: int = 10) -> list[dict]:
     """Return sessions for a project, most recent first."""
     if _is_memex_mode():
         from scripts import backend_memex
+
         rows = backend_memex._memex_core_query(
-            store="atelier", table="sessions",
-            where={"project_id": project_id})
+            store="atelier", table="sessions", where={"project_id": project_id}
+        )
         rows.sort(key=lambda r: r["id"], reverse=True)
         return rows[:limit]
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         rows = c.execute(
-            "SELECT * FROM sessions WHERE project_id = ? "
-            "ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM sessions WHERE project_id = ? ORDER BY id DESC LIMIT ?",
             (project_id, limit),
         ).fetchall()
     finally:
@@ -228,9 +245,16 @@ def update_session(db_path: str, session_id: int, **kwargs) -> dict:
     silently ignored (legacy contract).
     """
     allowed = {
-        "phase", "pre_diagnose_phase", "current_tasks", "accomplished",
-        "next_action", "status", "blocking_reason", "pm_notes",
-        "opened_at", "closed_at",
+        "phase",
+        "pre_diagnose_phase",
+        "current_tasks",
+        "accomplished",
+        "next_action",
+        "status",
+        "blocking_reason",
+        "pm_notes",
+        "opened_at",
+        "closed_at",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
@@ -240,8 +264,7 @@ def update_session(db_path: str, session_id: int, **kwargs) -> dict:
     if existing is None:
         raise ValueError(f"session_id={session_id} not found")
 
-    overlap = {"phase", "current_tasks", "accomplished",
-               "next_action", "status", "pm_notes"}
+    overlap = {"phase", "current_tasks", "accomplished", "next_action", "status", "pm_notes"}
     facade_changes = {k: v for k, v in updates.items() if k in overlap}
     schema_only = {k: v for k, v in updates.items() if k not in overlap}
 
@@ -277,27 +300,27 @@ def prune_sessions(db_path: str, project_id: int, keep: int) -> int:
     """
     if _is_memex_mode():
         from scripts import backend_memex
+
         memex_stores = backend_memex._memex_module("stores")
         rows = backend_memex._memex_core_query(
-            store="atelier", table="sessions",
-            where={"project_id": project_id})
+            store="atelier", table="sessions", where={"project_id": project_id}
+        )
         rows.sort(key=lambda r: r["id"], reverse=True)
         keep_ids = {r["id"] for r in rows[:keep]}
         deleted = 0
         for r in rows:
             if r["id"] not in keep_ids:
-                memex_stores.delete(name="atelier", table="sessions",
-                                    row_id=r["id"])
+                memex_stores.delete(name="atelier", table="sessions", row_id=r["id"])
                 deleted += 1
         return deleted
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         keep_ids = [
             row[0]
             for row in c.execute(
-                "SELECT id FROM sessions WHERE project_id = ? "
-                "ORDER BY id DESC LIMIT ?",
+                "SELECT id FROM sessions WHERE project_id = ? ORDER BY id DESC LIMIT ?",
                 (project_id, keep),
             ).fetchall()
         ]
@@ -305,8 +328,7 @@ def prune_sessions(db_path: str, project_id: int, keep: int) -> int:
             return 0
         placeholders = ",".join("?" * len(keep_ids))
         cur = c.execute(
-            f"DELETE FROM sessions WHERE project_id = ? "
-            f"AND id NOT IN ({placeholders})",
+            f"DELETE FROM sessions WHERE project_id = ? AND id NOT IN ({placeholders})",
             (project_id, *keep_ids),
         )
         c.commit()
@@ -337,7 +359,11 @@ if __name__ == "__main__":
         parser.add_argument("--notes")
         args = parser.parse_args(sys.argv[2:])
         session = write_session(
-            db_path, args.project_id, args.agent_id, args.phase, args.status,
+            db_path,
+            args.project_id,
+            args.agent_id,
+            args.phase,
+            args.status,
             pre_diagnose_phase=args.pre_diagnose_phase,
             current_tasks=args.current_tasks,
             accomplished=args.accomplished,
@@ -360,10 +386,12 @@ if __name__ == "__main__":
         parser.add_argument("project_id", type=int)
         parser.add_argument("--limit", type=int, default=10)
         args = parser.parse_args(sys.argv[2:])
-        print(json.dumps(
-            list_sessions(db_path, args.project_id, limit=args.limit),
-            indent=2,
-        ))
+        print(
+            json.dumps(
+                list_sessions(db_path, args.project_id, limit=args.limit),
+                indent=2,
+            )
+        )
 
     elif cmd == "update":
         parser = argparse.ArgumentParser()
@@ -388,8 +416,7 @@ if __name__ == "__main__":
             kwargs["pm_notes"] = args.notes
         if args.closed_at:
             kwargs["closed_at"] = args.closed_at
-        print(json.dumps(update_session(db_path, args.session_id, **kwargs),
-                         indent=2))
+        print(json.dumps(update_session(db_path, args.session_id, **kwargs), indent=2))
 
     elif cmd == "prune":
         parser = argparse.ArgumentParser()

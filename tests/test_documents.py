@@ -11,14 +11,21 @@ the per-task plan dispatches all 9 in parallel and they merge as a
 batch. Once those siblings land, the seed helper can switch to calling
 `scripts.projects.create_project` etc.
 """
+
 from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from scripts.documents import (create_document, get_document, update_document,
-                               delete_document, list_documents, search_documents)
+from scripts.documents import (
+    create_document,
+    get_document,
+    update_document,
+    delete_document,
+    list_documents,
+    search_documents,
+)
 from scripts.migrate import apply_migrations
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
@@ -41,8 +48,7 @@ def _seed_minimum(db: str) -> tuple[int, int, str]:
         )
         ws_id = cur.lastrowid
         cur = conn.execute(
-            "INSERT INTO roles (name, description, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
             ("pm", "PM", now, now),
         )
         role_id = cur.lastrowid
@@ -56,8 +62,7 @@ def _seed_minimum(db: str) -> tuple[int, int, str]:
             "INSERT INTO projects (workspace_id, slug, name, description, "
             "phase, created_by, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (ws_id, "auth", "Auth Service", "OAuth2",
-             "design:open", agent_id, now, now),
+            (ws_id, "auth", "Auth Service", "OAuth2", "design:open", agent_id, now, now),
         )
         project_id = cur.lastrowid
         conn.commit()
@@ -79,6 +84,7 @@ def workspace(tmp_path, monkeypatch):
     invocation in the suite path).
     """
     from scripts import mode_detector
+
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
     root = tmp_path / "ws"
     root.mkdir()
@@ -89,10 +95,13 @@ def workspace(tmp_path, monkeypatch):
     apply_migrations(str(db), MIGRATIONS_DIR / "shared")
     apply_migrations(str(db), MIGRATIONS_DIR / "local-only")
     ws_id, project_id, agent_id = _seed_minimum(str(db))
-    return {"root": root, "db": str(db),
-            "workspace_id": ws_id,
-            "project_id": project_id,
-            "agent_id": agent_id}
+    return {
+        "root": root,
+        "db": str(db),
+        "workspace_id": ws_id,
+        "project_id": project_id,
+        "agent_id": agent_id,
+    }
 
 
 def _make_file(root: Path, rel: str, body: str = "# placeholder\n") -> None:
@@ -131,9 +140,13 @@ def agent_id(workspace):
 def test_create_document(workspace, db_path, project_id, agent_id):
     _make_file(workspace["root"], "design/DESIGN.md", "# Auth Design\n")
     doc = create_document(
-        db_path, project_id=project_id, type="design",
-        title="Auth Design Doc", filename="design/DESIGN.md",
-        created_by=agent_id, workspace_id=workspace["workspace_id"],
+        db_path,
+        project_id=project_id,
+        type="design",
+        title="Auth Design Doc",
+        filename="design/DESIGN.md",
+        created_by=agent_id,
+        workspace_id=workspace["workspace_id"],
     )
     assert doc["id"] == 1
     assert doc["project_id"] == project_id
@@ -144,8 +157,12 @@ def test_create_document(workspace, db_path, project_id, agent_id):
 def test_get_document(workspace, db_path, project_id, agent_id):
     _make_file(workspace["root"], "DESIGN.md", "# Auth Design\n")
     create_document(
-        db_path, project_id=project_id, type="design",
-        title="Auth Design", filename="DESIGN.md", created_by=agent_id,
+        db_path,
+        project_id=project_id,
+        type="design",
+        title="Auth Design",
+        filename="DESIGN.md",
+        created_by=agent_id,
         workspace_id=workspace["workspace_id"],
     )
     doc = get_document(db_path, 1)
@@ -159,8 +176,12 @@ def test_get_document_missing_returns_none(workspace, db_path):
 def test_update_document(workspace, db_path, project_id, agent_id):
     _make_file(workspace["root"], "DESIGN.md", "# Auth Design\n")
     create_document(
-        db_path, project_id=project_id, type="design",
-        title="Old Title", filename="DESIGN.md", created_by=agent_id,
+        db_path,
+        project_id=project_id,
+        type="design",
+        title="Old Title",
+        filename="DESIGN.md",
+        created_by=agent_id,
         workspace_id=workspace["workspace_id"],
     )
     updated = update_document(db_path, 1, title="New Title")
@@ -170,8 +191,12 @@ def test_update_document(workspace, db_path, project_id, agent_id):
 def test_delete_document(workspace, db_path, project_id, agent_id):
     _make_file(workspace["root"], "DESIGN.md", "# Auth Design\n")
     create_document(
-        db_path, project_id=project_id, type="design",
-        title="Auth Design", filename="DESIGN.md", created_by=agent_id,
+        db_path,
+        project_id=project_id,
+        type="design",
+        title="Auth Design",
+        filename="DESIGN.md",
+        created_by=agent_id,
         workspace_id=workspace["workspace_id"],
     )
     assert delete_document(db_path, 1) is True
@@ -182,13 +207,21 @@ def test_list_documents_by_project(workspace, db_path, project_id, agent_id):
     _make_file(workspace["root"], "DESIGN.md", "# d\n")
     _make_file(workspace["root"], "PLAN.md", "# p\n")
     create_document(
-        db_path, project_id=project_id, type="design",
-        title="Design Doc", filename="DESIGN.md", created_by=agent_id,
+        db_path,
+        project_id=project_id,
+        type="design",
+        title="Design Doc",
+        filename="DESIGN.md",
+        created_by=agent_id,
         workspace_id=workspace["workspace_id"],
     )
     create_document(
-        db_path, project_id=project_id, type="implementation-plan",
-        title="Impl Plan", filename="PLAN.md", created_by=agent_id,
+        db_path,
+        project_id=project_id,
+        type="implementation-plan",
+        title="Impl Plan",
+        filename="PLAN.md",
+        created_by=agent_id,
         workspace_id=workspace["workspace_id"],
     )
     docs = list_documents(db_path, project_id=project_id)
@@ -199,13 +232,21 @@ def test_list_documents_by_type(workspace, db_path, project_id, agent_id):
     _make_file(workspace["root"], "DESIGN.md", "# d\n")
     _make_file(workspace["root"], "PLAN.md", "# p\n")
     create_document(
-        db_path, project_id=project_id, type="design",
-        title="Design Doc", filename="DESIGN.md", created_by=agent_id,
+        db_path,
+        project_id=project_id,
+        type="design",
+        title="Design Doc",
+        filename="DESIGN.md",
+        created_by=agent_id,
         workspace_id=workspace["workspace_id"],
     )
     create_document(
-        db_path, project_id=project_id, type="implementation-plan",
-        title="Impl Plan", filename="PLAN.md", created_by=agent_id,
+        db_path,
+        project_id=project_id,
+        type="implementation-plan",
+        title="Impl Plan",
+        filename="PLAN.md",
+        created_by=agent_id,
         workspace_id=workspace["workspace_id"],
     )
     docs = list_documents(db_path, type="design")
@@ -217,13 +258,21 @@ def test_search_documents(workspace, db_path, project_id, agent_id):
     _make_file(workspace["root"], "DESIGN.md", "# OAuth2 design\n")
     _make_file(workspace["root"], "PLAN.md", "# stripe plan\n")
     create_document(
-        db_path, project_id=project_id, type="design",
-        title="OAuth2 Design", filename="DESIGN.md", created_by=agent_id,
+        db_path,
+        project_id=project_id,
+        type="design",
+        title="OAuth2 Design",
+        filename="DESIGN.md",
+        created_by=agent_id,
         workspace_id=workspace["workspace_id"],
     )
     create_document(
-        db_path, project_id=project_id, type="implementation-plan",
-        title="Stripe Plan", filename="PLAN.md", created_by=agent_id,
+        db_path,
+        project_id=project_id,
+        type="implementation-plan",
+        title="Stripe Plan",
+        filename="PLAN.md",
+        created_by=agent_id,
         workspace_id=workspace["workspace_id"],
     )
     results = search_documents(db_path, query="OAuth")

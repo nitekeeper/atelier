@@ -1,4 +1,5 @@
 """Tests for hooks/session_open.py"""
+
 import json
 import os
 import subprocess
@@ -211,8 +212,10 @@ class TestMain:
         mock_result.returncode = 0
         mock_result.stdout = json.dumps(session_data)
         mock_result.stderr = ""
-        with patch("session_open.Path.cwd", return_value=tmp_path), \
-             patch("session_open.subprocess.run", return_value=mock_result):
+        with (
+            patch("session_open.Path.cwd", return_value=tmp_path),
+            patch("session_open.subprocess.run", return_value=mock_result),
+        ):
             session_open.main()
         captured = capsys.readouterr()
         assert "tdd:clean" in captured.out
@@ -234,8 +237,10 @@ class TestMain:
         """DB error → warning printed, no exception raised, no sys.exit(1)."""
         (tmp_path / ".ai").mkdir()
         (tmp_path / ".ai" / "active_project").write_text("1")
-        with patch("session_open.Path.cwd", return_value=tmp_path), \
-             patch("session_open.subprocess.run", side_effect=OSError("DB gone")):
+        with (
+            patch("session_open.Path.cwd", return_value=tmp_path),
+            patch("session_open.subprocess.run", side_effect=OSError("DB gone")),
+        ):
             session_open.main()  # Must not raise
         captured = capsys.readouterr()
         assert "warning" in captured.out.lower()
@@ -247,11 +252,13 @@ class TestMain:
         (tmp_path / ".ai" / "active_project").write_text("1")
         monkeypatch.setattr(session_open, "find_active_project", lambda cwd: "1")
         monkeypatch.setattr(
-            session_open, "fetch_latest_session",
+            session_open,
+            "fetch_latest_session",
             lambda scripts_dir, project_id: {"notes": "x"},  # no 'phase' key
         )
         monkeypatch.setattr(
-            session_open, "build_announcement",
+            session_open,
+            "build_announcement",
             lambda project_id, session: "Session at unknown phase.",
         )
         with patch("session_open.Path.cwd", return_value=tmp_path):
@@ -321,8 +328,10 @@ class TestGetPhaseGuidance:
         mock_result.returncode = 0
         mock_result.stdout = json.dumps(session_data)
         mock_result.stderr = ""
-        with patch("session_open.Path.cwd", return_value=tmp_path), \
-             patch("session_open.subprocess.run", return_value=mock_result):
+        with (
+            patch("session_open.Path.cwd", return_value=tmp_path),
+            patch("session_open.subprocess.run", return_value=mock_result),
+        ):
             session_open.main()
         captured = capsys.readouterr()
         assert "design:open" in captured.out
@@ -337,8 +346,10 @@ class TestGetPhaseGuidance:
         mock_result.returncode = 0
         mock_result.stdout = ""
         mock_result.stderr = ""
-        with patch("session_open.Path.cwd", return_value=tmp_path), \
-             patch("session_open.subprocess.run", return_value=mock_result):
+        with (
+            patch("session_open.Path.cwd", return_value=tmp_path),
+            patch("session_open.subprocess.run", return_value=mock_result),
+        ):
             session_open.main()
         captured = capsys.readouterr()
         assert "Recommended next action:" not in captured.out
@@ -347,6 +358,7 @@ class TestGetPhaseGuidance:
 # ---------------------------------------------------------------------------
 # Subprocess integration tests — run the hook as a real process with a live DB
 # ---------------------------------------------------------------------------
+
 
 def _make_project_at_phase(db_path: str, phase: str) -> str:
     """Set up a project at the given phase and write a session row.
@@ -375,8 +387,7 @@ def _make_project_at_phase(db_path: str, phase: str) -> str:
     )
     ws_id = cur.lastrowid
     cur = conn.execute(
-        "INSERT INTO roles (name, description, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
         ("pm", "Project Manager", now, now),
     )
     role_id = cur.lastrowid
@@ -397,8 +408,7 @@ def _make_project_at_phase(db_path: str, phase: str) -> str:
         "INSERT INTO sessions (workspace_id, project_id, agent_id, phase, "
         "status, opened_at, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (ws_id, pid, "test-agent", phase, "in-progress",
-         now, now, now),
+        (ws_id, pid, "test-agent", phase, "in-progress", now, now, now),
     )
     conn.commit()
     conn.close()
@@ -414,6 +424,7 @@ def project_at_phase(tmp_path):
     resolves), ``.ai/atelier.db`` (the v2 Local-mode DB path), and
     ``.ai/active_project`` so the hook can locate the project.
     """
+
     def _make(phase: str):
         # Fabricate a git workspace so backend_local resolves DB location.
         (tmp_path / ".git").mkdir(exist_ok=True)
@@ -423,6 +434,7 @@ def project_at_phase(tmp_path):
         pid = _make_project_at_phase(db_path, phase)
         (ai_dir / "active_project").write_text(pid, encoding="utf-8")
         return db_path, pid, tmp_path
+
     return _make
 
 
@@ -443,19 +455,24 @@ def _hook_env(cwd) -> dict:
     }
 
 
-@pytest.mark.parametrize("phase,expected_skill", [
-    ("design:open", "internal/dev-design/SKILL.md"),
-    ("plan:approved", "internal/dev-tdd/SKILL.md"),
-    ("tdd:clean", "internal/dev-review/SKILL.md"),
-    ("review:approved", "internal/dev-security/SKILL.md"),
-    ("qa:approved", "internal/dev-finish/SKILL.md"),
-])
+@pytest.mark.parametrize(
+    "phase,expected_skill",
+    [
+        ("design:open", "internal/dev-design/SKILL.md"),
+        ("plan:approved", "internal/dev-tdd/SKILL.md"),
+        ("tdd:clean", "internal/dev-review/SKILL.md"),
+        ("review:approved", "internal/dev-security/SKILL.md"),
+        ("qa:approved", "internal/dev-finish/SKILL.md"),
+    ],
+)
 def test_hook_appends_phase_guidance(project_at_phase, phase, expected_skill):
     """For each phase, the hook output mentions the phase and the recommended skill."""
     db_path, pid, cwd = project_at_phase(phase)
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
-        capture_output=True, text=True, encoding="utf-8",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
         cwd=str(cwd),
         env=_hook_env(cwd),
     )
@@ -469,6 +486,7 @@ def test_hook_appends_phase_guidance(project_at_phase, phase, expected_skill):
 def test_hook_handles_missing_using_atelier_gracefully(project_at_phase, tmp_path):
     """If run/SKILL.md is missing, hook still announces phase."""
     import shutil
+
     db_path, pid, cwd = project_at_phase("design:open")
 
     # Create an isolated directory tree in tmp_path with the hook and scripts
@@ -481,7 +499,9 @@ def test_hook_handles_missing_using_atelier_gracefully(project_at_phase, tmp_pat
 
     result = subprocess.run(
         [sys.executable, str(target_hook)],
-        capture_output=True, text=True, encoding="utf-8",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
         cwd=str(cwd),
         env=_hook_env(cwd),
     )

@@ -46,14 +46,14 @@ __all__ = (
 
 DOMAINS: frozenset[str] = frozenset(
     {
-        "project",      # atelier.db.projects rows
-        "task",         # atelier.db.tasks rows
-        "meeting",      # atelier.db.meeting_minutes rows
-        "design",       # project_documents subset — system/feature designs
-        "adr",          # project_documents subset — architecture decision records
-        "research",     # project_documents subset — reference + evaluation notes
-        "postmortem",   # project_documents subset — incident/release/retro write-ups
-        "log",          # project_documents subset (or workspace-level) — journals
+        "project",  # atelier.db.projects rows
+        "task",  # atelier.db.tasks rows
+        "meeting",  # atelier.db.meeting_minutes rows
+        "design",  # project_documents subset — system/feature designs
+        "adr",  # project_documents subset — architecture decision records
+        "research",  # project_documents subset — reference + evaluation notes
+        "postmortem",  # project_documents subset — incident/release/retro write-ups
+        "log",  # project_documents subset (or workspace-level) — journals
         "project_doc",  # project_documents catch-all (plans, runbooks, release notes)
     }
 )
@@ -122,19 +122,19 @@ SUBDOMAINS: Mapping[str, tuple[str, ...]] = MappingProxyType(
 TYPE_TO_DOMAIN: Mapping[str, tuple[str, str | None]] = MappingProxyType(
     {
         # ── Promoted to first-class domains in v1.1.0 ──
-        "design":         ("design",     None),
-        "adr":            ("adr",        None),
-        "research":       ("research",   None),
-        "postmortem":     ("postmortem", None),
-        "log":            ("log",        None),
+        "design": ("design", None),
+        "adr": ("adr", None),
+        "research": ("research", None),
+        "postmortem": ("postmortem", None),
+        "log": ("log", None),
         # ── Stay under project_doc with a meaningful subdomain ──
-        "plan":           ("project_doc", "plan"),
-        "runbook":        ("project_doc", "runbook"),
-        "release-notes":  ("project_doc", "release-notes"),
+        "plan": ("project_doc", "plan"),
+        "runbook": ("project_doc", "runbook"),
+        "release-notes": ("project_doc", "release-notes"),
         "pr-description": ("project_doc", "pr-description"),
-        "notes":          ("project_doc", None),
+        "notes": ("project_doc", None),
         # ── Historical aliases ──
-        "spec":           ("design",     None),  # v1 occasionally used "spec" for design docs
+        "spec": ("design", None),  # v1 occasionally used "spec" for design docs
     }
 )
 
@@ -160,9 +160,7 @@ def assert_valid(domain: str) -> None:
         ValueError: If ``domain`` is not a member of :data:`DOMAINS`.
     """
     if not isinstance(domain, str):
-        raise TypeError(
-            f"domain must be str, got {type(domain).__name__}"
-        )
+        raise TypeError(f"domain must be str, got {type(domain).__name__}")
     if domain not in DOMAINS:
         raise ValueError(
             f"unknown domain {domain!r}; must be one of: "

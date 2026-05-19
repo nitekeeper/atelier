@@ -14,6 +14,7 @@ that the facade doesn't yet expose (Plan 2 deferred `find_project`,
 acceptable here because the facade explicitly defers these to v1.2.0
 (spec §10) and Plan 3's other rewires use the same pattern.
 """
+
 from __future__ import annotations
 import re
 import warnings
@@ -50,6 +51,7 @@ def _resolve_workspace_id() -> int:
     (it requires the workspaces script to land first).
     """
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         row = c.execute("SELECT id FROM workspaces ORDER BY id LIMIT 1").fetchone()
@@ -62,8 +64,7 @@ def _resolve_workspace_id() -> int:
         cur = c.execute(
             "INSERT INTO workspaces (slug, identity, name, description, "
             "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("default", "local:default", "Default", "Auto-seeded workspace",
-             now, now),
+            ("default", "local:default", "Default", "Auto-seeded workspace", now, now),
         )
         c.commit()
         return int(cur.lastrowid)
@@ -71,10 +72,15 @@ def _resolve_workspace_id() -> int:
         c.close()
 
 
-def create_project(db_path: str, name: str, description: str | None,
-                   created_by: str, repo: str | None = None,
-                   workspace_id: int | None = None,
-                   slug: str | None = None) -> dict:
+def create_project(
+    db_path: str,
+    name: str,
+    description: str | None,
+    created_by: str,
+    repo: str | None = None,
+    workspace_id: int | None = None,
+    slug: str | None = None,
+) -> dict:
     """Create a project row scoped to a workspace.
 
     `repo` is accepted for backwards-compat with pre-v1.1.0 callers but
@@ -90,8 +96,11 @@ def create_project(db_path: str, name: str, description: str | None,
     if workspace_id is None:
         workspace_id = _resolve_workspace_id()
     result = backend.write_project(
-        workspace_id=workspace_id, slug=slug, name=name,
-        description=description, created_by=created_by,
+        workspace_id=workspace_id,
+        slug=slug,
+        name=name,
+        description=description,
+        created_by=created_by,
     )
     # backend returns the full row + a `row_id` alias. Strip the alias
     # so callers see the canonical column names only.
@@ -109,22 +118,24 @@ def get_project(db_path: str, project_id: int) -> dict | None:
     del db_path
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         rows = backend_memex._memex_core_query(
-            store="atelier", table="projects", where={"id": project_id})
+            store="atelier", table="projects", where={"id": project_id}
+        )
         return rows[0] if rows else None
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
-        row = c.execute(
-            "SELECT * FROM projects WHERE id = ?", (project_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else None
 
 
-def update_project(db_path: str, project_id: int, *,
-                   agent_id: str = "system", **kwargs) -> dict | None:
+def update_project(
+    db_path: str, project_id: int, *, agent_id: str = "system", **kwargs
+) -> dict | None:
     """Update mutable project columns. `phase` routes through
     `backend.transition_phase`; other columns go direct.
 
@@ -141,7 +152,8 @@ def update_project(db_path: str, project_id: int, *,
     if extra:
         warnings.warn(
             f"unrecognized kwargs dropped: {sorted(extra)}",
-            DeprecationWarning, stacklevel=2,
+            DeprecationWarning,
+            stacklevel=2,
         )
     updates = {k: v for k, v in kwargs.items() if k in allowed}
 
@@ -149,7 +161,8 @@ def update_project(db_path: str, project_id: int, *,
     # (`agent_id`, `bypass_reason`) stay consistent across callers.
     if "phase" in updates:
         backend.transition_phase(
-            project_id=project_id, to_phase=updates.pop("phase"),
+            project_id=project_id,
+            to_phase=updates.pop("phase"),
             agent_id=agent_id,
         )
 
@@ -157,11 +170,13 @@ def update_project(db_path: str, project_id: int, *,
         updates["updated_at"] = _now()
         if mode_detector.detect_mode() == "memex":
             from scripts import backend_memex
+
             backend_memex._memex_core_update(
-                store="atelier", table="projects",
-                row_id=project_id, changes=updates)
+                store="atelier", table="projects", row_id=project_id, changes=updates
+            )
         else:
             from scripts import backend_local
+
             c = backend_local._conn()
             try:
                 sets = ", ".join(f"{k} = ?" for k in updates)
@@ -187,6 +202,7 @@ def delete_project(db_path: str, project_id: int) -> bool:
     if mode_detector.detect_mode() == "memex":
         return False
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         cur = c.execute("DELETE FROM projects WHERE id = ?", (project_id,))
@@ -206,13 +222,16 @@ def list_projects(db_path: str, phase: str | None = None) -> list[dict]:
     del db_path
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         where: dict = {}
         if phase is not None:
             where["phase"] = phase
         rows = backend_memex._memex_core_query(
-            store="atelier", table="projects", where=where or None)
+            store="atelier", table="projects", where=where or None
+        )
         return list(rows)
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         if phase is not None:
@@ -243,12 +262,12 @@ def search_projects(db_path: str, query: str) -> list[dict]:
     if mode_detector.detect_mode() == "memex":
         return []
     from scripts import backend_local
+
     pattern = f"%{query}%"
     c = backend_local._conn()
     try:
         cur = c.execute(
-            "SELECT * FROM projects WHERE name LIKE ? OR description LIKE ? "
-            "ORDER BY name",
+            "SELECT * FROM projects WHERE name LIKE ? OR description LIKE ? ORDER BY name",
             (pattern, pattern),
         )
         rows = [dict(r) for r in cur.fetchall()]
@@ -276,10 +295,18 @@ if __name__ == "__main__":
         parser.add_argument("created_by")
         parser.add_argument("--repo")  # accepted but ignored
         args = parser.parse_args(sys.argv[2:])
-        print(json.dumps(create_project(db_path, name=args.name,
-                                        description=args.description,
-                                        created_by=args.created_by,
-                                        repo=args.repo), indent=2))
+        print(
+            json.dumps(
+                create_project(
+                    db_path,
+                    name=args.name,
+                    description=args.description,
+                    created_by=args.created_by,
+                    repo=args.repo,
+                ),
+                indent=2,
+            )
+        )
     elif cmd == "get":
         result = get_project(db_path, int(sys.argv[2]))
         print(json.dumps(result, indent=2) if result else "Not found")
@@ -289,19 +316,24 @@ if __name__ == "__main__":
         parser.add_argument("--name")
         parser.add_argument("--description")
         parser.add_argument("--phase")
-        parser.add_argument("--agent", default="system",
-                            help="audit attribution for phase transitions "
-                                 "(default: system)")
+        parser.add_argument(
+            "--agent",
+            default="system",
+            help="audit attribution for phase transitions (default: system)",
+        )
         args = parser.parse_args(sys.argv[2:])
-        kwargs = {k: v for k, v in vars(args).items()
-                  if k not in ("project_id", "agent") and v is not None}
-        print(json.dumps(
-            update_project(db_path, args.project_id,
-                           agent_id=args.agent, **kwargs),
-            indent=2))
+        kwargs = {
+            k: v
+            for k, v in vars(args).items()
+            if k not in ("project_id", "agent") and v is not None
+        }
+        print(
+            json.dumps(
+                update_project(db_path, args.project_id, agent_id=args.agent, **kwargs), indent=2
+            )
+        )
     elif cmd == "delete":
-        print("Deleted" if delete_project(db_path, int(sys.argv[2]))
-              else "Not found")
+        print("Deleted" if delete_project(db_path, int(sys.argv[2])) else "Not found")
     elif cmd == "list":
         parser = argparse.ArgumentParser()
         parser.add_argument("--phase")

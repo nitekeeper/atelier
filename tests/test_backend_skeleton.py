@@ -17,6 +17,7 @@ distinguishes:
 
 The full surface mirrors spec §4.3 lines 187-223.
 """
+
 # Red-phase verified 2026-05-17: removing scripts/backend.py and running this
 # file yields `ModuleNotFoundError: No module named 'scripts.backend'`.
 # Restored via commit 8ff2504.
@@ -64,57 +65,99 @@ EXPECTED_METHODS = [
 # kwargs so signature drift is caught.
 METHOD_KWARGS: dict[str, list[dict]] = {
     "write_project": [
-        dict(workspace_id=1, slug="proj", name="Proj",
-             description="d", created_by="a"),
+        dict(workspace_id=1, slug="proj", name="Proj", description="d", created_by="a"),
     ],
     "write_document": [
         # Required-only.
-        dict(workspace_id=1, project_id=1, domain="design",
-             subdomain=None, title="t", body="b",
-             metadata={}, caller_agent_id="a"),
+        dict(
+            workspace_id=1,
+            project_id=1,
+            domain="design",
+            subdomain=None,
+            title="t",
+            body="b",
+            metadata={},
+            caller_agent_id="a",
+        ),
         # All optionals exercised: source_url + relations.
-        dict(workspace_id=1, project_id=1, domain="design",
-             subdomain="x", title="t", body="b",
-             metadata={"k": "v"}, caller_agent_id="a",
-             source_url="https://example.test/doc",
-             relations=[{"target_id": 1, "kind": "part_of"}]),
+        dict(
+            workspace_id=1,
+            project_id=1,
+            domain="design",
+            subdomain="x",
+            title="t",
+            body="b",
+            metadata={"k": "v"},
+            caller_agent_id="a",
+            source_url="https://example.test/doc",
+            relations=[{"target_id": 1, "kind": "part_of"}],
+        ),
     ],
     "write_task": [
         # Required-only.
-        dict(workspace_id=1, project_id=1, title="t",
-             description="d", subdomain=None, created_by="a"),
+        dict(
+            workspace_id=1, project_id=1, title="t", description="d", subdomain=None, created_by="a"
+        ),
         # All optionals: assigned_to, priority, notes, relations.
-        dict(workspace_id=1, project_id=1, title="t",
-             description="d", subdomain="x", created_by="a",
-             assigned_to="b", priority=5, notes="n",
-             relations=[{"target_id": 2, "kind": "blocks"}]),
+        dict(
+            workspace_id=1,
+            project_id=1,
+            title="t",
+            description="d",
+            subdomain="x",
+            created_by="a",
+            assigned_to="b",
+            priority=5,
+            notes="n",
+            relations=[{"target_id": 2, "kind": "blocks"}],
+        ),
     ],
     "write_meeting": [
         # Required-only.
-        dict(workspace_id=1, project_id=1, title="t",
-             date="2026-05-16", summary="s", decisions="d",
-             subdomain=None, created_by="a"),
+        dict(
+            workspace_id=1,
+            project_id=1,
+            title="t",
+            date="2026-05-16",
+            summary="s",
+            decisions="d",
+            subdomain=None,
+            created_by="a",
+        ),
         # All optionals: relations.
-        dict(workspace_id=1, project_id=1, title="t",
-             date="2026-05-16", summary="s", decisions="d",
-             subdomain="x", created_by="a",
-             relations=[{"target_id": 3, "kind": "part_of"}]),
+        dict(
+            workspace_id=1,
+            project_id=1,
+            title="t",
+            date="2026-05-16",
+            summary="s",
+            decisions="d",
+            subdomain="x",
+            created_by="a",
+            relations=[{"target_id": 3, "kind": "part_of"}],
+        ),
     ],
     "upsert_session": [
         # Required-only.
         dict(project_id=1, agent_id="a"),
         # All optionals: phase, current_tasks, accomplished, next_action,
         # status, pm_notes.
-        dict(project_id=1, agent_id="a", phase="design:open",
-             current_tasks="t1", accomplished="acc",
-             next_action="next", status="done", pm_notes="n"),
+        dict(
+            project_id=1,
+            agent_id="a",
+            phase="design:open",
+            current_tasks="t1",
+            accomplished="acc",
+            next_action="next",
+            status="done",
+            pm_notes="n",
+        ),
     ],
     "transition_phase": [
         # Required-only.
         dict(project_id=1, to_phase="plan:open", agent_id="a"),
         # Optional bypass_reason.
-        dict(project_id=1, to_phase="plan:open", agent_id="a",
-             bypass_reason="urgent fix"),
+        dict(project_id=1, to_phase="plan:open", agent_id="a", bypass_reason="urgent fix"),
     ],
     "update_task_status": [
         # Required-only.
@@ -123,15 +166,13 @@ METHOD_KWARGS: dict[str, list[dict]] = {
         dict(task_id=1, status="done", notes="shipped"),
     ],
     "record_phase_bypass": [
-        dict(project_id=1, from_phase="x", to_phase="y",
-             reason="r", agent_id="a"),
+        dict(project_id=1, from_phase="x", to_phase="y", reason="r", agent_id="a"),
     ],
     "find_or_create_workspace": [
         # Required-only.
         dict(identity="repo:x", slug="x", name="X"),
         # Optional description.
-        dict(identity="repo:x", slug="x", name="X",
-             description="first-create description"),
+        dict(identity="repo:x", slug="x", name="X", description="first-create description"),
     ],
     "find_workspace_by_identity": [
         dict(identity="repo:x"),
@@ -149,8 +190,7 @@ METHOD_KWARGS: dict[str, list[dict]] = {
         # Required-only.
         dict(query="q"),
         # All optionals: workspace_id, project_id, domain, subdomain, limit.
-        dict(query="q", workspace_id=1, project_id=1,
-             domain="design", subdomain="x", limit=25),
+        dict(query="q", workspace_id=1, project_id=1, domain="design", subdomain="x", limit=25),
     ],
     "get_task": [
         dict(task_id=1),
@@ -194,8 +234,9 @@ IMPLEMENTED_METHODS = set(EXPECTED_METHODS) - DEFERRED_METHODS
 def test_all_methods_defined():
     """Every expected method is present on `backend`, and METHOD_KWARGS
     covers exactly the same set (no drift between the two lists)."""
-    assert set(METHOD_KWARGS.keys()) == set(EXPECTED_METHODS), \
+    assert set(METHOD_KWARGS.keys()) == set(EXPECTED_METHODS), (
         "EXPECTED_METHODS and METHOD_KWARGS keys must match"
+    )
     for name in EXPECTED_METHODS:
         assert hasattr(backend, name), f"backend.{name} missing"
 
@@ -205,8 +246,7 @@ def test_all_methods_defined():
 # `[kwargs0]`. One ID per call site keeps multi-row methods unambiguous.
 def _params_for(method_set):
     return [
-        pytest.param(name, kw,
-                     id=name if len(METHOD_KWARGS[name]) == 1 else f"{name}-{i}")
+        pytest.param(name, kw, id=name if len(METHOD_KWARGS[name]) == 1 else f"{name}-{i}")
         for name in EXPECTED_METHODS
         if name in method_set
         for i, kw in enumerate(METHOD_KWARGS[name])
@@ -240,8 +280,10 @@ def test_implemented_method_dispatches(fn_name, kwargs):
     the matching attribute was called once. The result value itself
     isn't pinned (stays a dispatch test, not a result test)."""
     mock_backend = create_autospec(backend_local, spec_set=True)
-    with patch.object(mode_detector, "detect_mode", return_value="local"), \
-         patch.object(backend, "_backend", return_value=mock_backend):
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch.object(backend, "_backend", return_value=mock_backend),
+    ):
         fn = getattr(backend, fn_name)
         fn(**kwargs)
     # Assert the matching backend symbol was invoked exactly once.
@@ -254,8 +296,7 @@ def test_implemented_method_dispatches(fn_name, kwargs):
 # Methods with no required parameters can't be tested for positional
 # rejection (there are no positional args to pass). Exclude them so the
 # TypeError check below only runs against methods that take >=1 arg.
-_METHODS_WITH_ARGS = [name for name in EXPECTED_METHODS
-                     if name != "list_workspaces"]
+_METHODS_WITH_ARGS = [name for name in EXPECTED_METHODS if name != "list_workspaces"]
 
 
 @pytest.mark.parametrize("fn_name", _METHODS_WITH_ARGS)

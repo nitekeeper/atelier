@@ -19,6 +19,7 @@ re-introduce the coupling. Each method opens a fresh connection, commits,
 and closes — keeps the surface easy to reason about and matches the
 short-lived nature of write operations.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -33,6 +34,7 @@ from typing import Any, Sequence
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+
 def _workspace_root() -> Path:
     """Resolve the workspace root for the current process.
 
@@ -43,6 +45,7 @@ def _workspace_root() -> Path:
     without monkey-patching.
     """
     from scripts.git_utils import find_git_root
+
     cwd = Path.cwd().resolve()
     root = find_git_root(cwd)
     if root is None:
@@ -137,14 +140,21 @@ def _archive_raw(body: str, title: str, *, root: Path | None = None) -> tuple[st
 
 # ── Document-shaped writes — Tier 2 ────────────────────────────────────────
 
-def write_document(*, workspace_id: int, project_id: int,
-                   domain: str, subdomain: str | None,
-                   title: str, body: str,
-                   caller_agent_id: str,
-                   metadata: dict[str, Any] | None = None,
-                   source_url: str | None = None,
-                   source_ref: str | None = None,
-                   relations: Sequence[dict] = ()) -> dict:
+
+def write_document(
+    *,
+    workspace_id: int,
+    project_id: int,
+    domain: str,
+    subdomain: str | None,
+    title: str,
+    body: str,
+    caller_agent_id: str,
+    metadata: dict[str, Any] | None = None,
+    source_url: str | None = None,
+    source_ref: str | None = None,
+    relations: Sequence[dict] = (),
+) -> dict:
     """Persist a project_documents row.
 
     The v1.1.0 schema stores documents as pointer-rows referencing a
@@ -172,14 +182,22 @@ def write_document(*, workspace_id: int, project_id: int,
             "domain, subdomain, title, filename, created_by, source_ref, "
             "created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (workspace_id, project_id, domain, subdomain, title, rel_path,
-             caller_agent_id, source_ref, _now(), _now()),
+            (
+                workspace_id,
+                project_id,
+                domain,
+                subdomain,
+                title,
+                rel_path,
+                caller_agent_id,
+                source_ref,
+                _now(),
+                _now(),
+            ),
         )
         row_id = _checked_lastrowid(cur)
         c.commit()
-        row = c.execute(
-            "SELECT * FROM project_documents WHERE id = ?", (row_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM project_documents WHERE id = ?", (row_id,)).fetchone()
     finally:
         c.close()
     result = dict(row) if row else {}
@@ -190,13 +208,20 @@ def write_document(*, workspace_id: int, project_id: int,
     return result
 
 
-def write_task(*, workspace_id: int, project_id: int,
-               title: str, description: str,
-               subdomain: str | None, created_by: str,
-               assigned_to: str | None = None,
-               priority: int = 0, notes: str | None = None,
-               source_ref: str | None = None,
-               relations: Sequence[dict] = ()) -> dict:
+def write_task(
+    *,
+    workspace_id: int,
+    project_id: int,
+    title: str,
+    description: str,
+    subdomain: str | None,
+    created_by: str,
+    assigned_to: str | None = None,
+    priority: int = 0,
+    notes: str | None = None,
+    source_ref: str | None = None,
+    relations: Sequence[dict] = (),
+) -> dict:
     """Persist a row into the v1.1.0 `tasks` table.
 
     Tasks live in their own table (`tasks`), NOT in `project_documents`
@@ -220,8 +245,19 @@ def write_task(*, workspace_id: int, project_id: int,
             "status, priority, notes, created_by, assigned_to, source_ref, "
             "created_at, updated_at) "
             "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
-            (project_id, title, description, subdomain, priority, notes,
-             created_by, assigned_to, source_ref, _now(), _now()),
+            (
+                project_id,
+                title,
+                description,
+                subdomain,
+                priority,
+                notes,
+                created_by,
+                assigned_to,
+                source_ref,
+                _now(),
+                _now(),
+            ),
         )
         row_id = _checked_lastrowid(cur)
         c.commit()
@@ -234,13 +270,20 @@ def write_task(*, workspace_id: int, project_id: int,
     return result
 
 
-def write_meeting(*, workspace_id: int, project_id: int | None,
-                  title: str, date: str, summary: str,
-                  decisions: str, subdomain: str | None,
-                  created_by: str,
-                  source_ref: str | None = None,
-                  relations: Sequence[dict] = (),
-                  skip_md: bool = False) -> dict:
+def write_meeting(
+    *,
+    workspace_id: int,
+    project_id: int | None,
+    title: str,
+    date: str,
+    summary: str,
+    decisions: str,
+    subdomain: str | None,
+    created_by: str,
+    source_ref: str | None = None,
+    relations: Sequence[dict] = (),
+    skip_md: bool = False,
+) -> dict:
     """Persist a row into `meeting_minutes` and write the markdown file.
 
     The on-disk markdown at `.ai/meetings/<date>-<slug>.md` is the
@@ -268,8 +311,9 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
     meetings_dir = root / ".ai" / "meetings"
     meetings_dir.mkdir(parents=True, exist_ok=True)
     if not skip_md:
-        body = (f"# {title}\n\nDate: {date}\n\n## Summary\n\n{summary}\n\n"
-                f"## Decisions\n\n{decisions}\n")
+        body = (
+            f"# {title}\n\nDate: {date}\n\n## Summary\n\n{summary}\n\n## Decisions\n\n{decisions}\n"
+        )
         (meetings_dir / filename).write_text(body, encoding="utf-8")
     # Store filename as workspace-relative for parity with project_documents.
     rel_filename = str((meetings_dir / filename).relative_to(root))
@@ -280,14 +324,24 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
             "date, subdomain, filename, summary, decisions, created_by, "
             "source_ref, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (workspace_id, project_id, title, date, subdomain, rel_filename,
-             summary, decisions, created_by, source_ref, _now(), _now()),
+            (
+                workspace_id,
+                project_id,
+                title,
+                date,
+                subdomain,
+                rel_filename,
+                summary,
+                decisions,
+                created_by,
+                source_ref,
+                _now(),
+                _now(),
+            ),
         )
         row_id = _checked_lastrowid(cur)
         c.commit()
-        row = c.execute(
-            "SELECT * FROM meeting_minutes WHERE id = ?", (row_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM meeting_minutes WHERE id = ?", (row_id,)).fetchone()
     finally:
         c.close()
     result = dict(row) if row else {}
@@ -296,8 +350,9 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
     return result
 
 
-def write_project(*, workspace_id: int, slug: str, name: str,
-                  description: str, created_by: str) -> dict:
+def write_project(
+    *, workspace_id: int, slug: str, name: str, description: str, created_by: str
+) -> dict:
     """Create a new project row scoped to `workspace_id`.
 
     v1.1.0 `(workspace_id, slug)` is UNIQUE so the local `slug` collides
@@ -316,9 +371,7 @@ def write_project(*, workspace_id: int, slug: str, name: str,
         )
         row_id = _checked_lastrowid(cur)
         c.commit()
-        row = c.execute(
-            "SELECT * FROM projects WHERE id = ?", (row_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM projects WHERE id = ?", (row_id,)).fetchone()
     finally:
         c.close()
     result = dict(row) if row else {}
@@ -329,6 +382,7 @@ def write_project(*, workspace_id: int, slug: str, name: str,
 
 # ── Operational state — Tier 1 ─────────────────────────────────────────────
 
+
 def _workspace_id_for_project(c: sqlite3.Connection, project_id: int) -> int:
     """Derive `workspace_id` from `project_id` via the projects FK chain.
 
@@ -338,22 +392,23 @@ def _workspace_id_for_project(c: sqlite3.Connection, project_id: int) -> int:
     making the caller plumb it through — cheaper than a signature change
     and matches the Memex backend, which faces the same problem.
     """
-    row = c.execute(
-        "SELECT workspace_id FROM projects WHERE id = ?", (project_id,)
-    ).fetchone()
+    row = c.execute("SELECT workspace_id FROM projects WHERE id = ?", (project_id,)).fetchone()
     if row is None:
-        raise ValueError(
-            f"project_id={project_id} not found — cannot derive workspace_id"
-        )
+        raise ValueError(f"project_id={project_id} not found — cannot derive workspace_id")
     return row["workspace_id"]
 
 
-def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
-                   current_tasks: str | None = None,
-                   accomplished: str | None = None,
-                   next_action: str | None = None,
-                   status: str = "in-progress",
-                   pm_notes: str | None = None) -> dict:
+def upsert_session(
+    *,
+    project_id: int,
+    agent_id: str,
+    phase: str | None = None,
+    current_tasks: str | None = None,
+    accomplished: str | None = None,
+    next_action: str | None = None,
+    status: str = "in-progress",
+    pm_notes: str | None = None,
+) -> dict:
     """Idempotent session upsert for `(project_id, agent_id, status='in-progress')`.
 
     The schema doesn't enforce uniqueness on `(project_id, agent_id)` — a
@@ -401,9 +456,7 @@ def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
                 vals,
             )
             c.commit()
-            row = c.execute(
-                "SELECT * FROM sessions WHERE id = ?", (existing["id"],)
-            ).fetchone()
+            row = c.execute("SELECT * FROM sessions WHERE id = ?", (existing["id"],)).fetchone()
         else:
             now = _now()
             cur = c.execute(
@@ -411,22 +464,32 @@ def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
                 "phase, current_tasks, accomplished, next_action, status, "
                 "pm_notes, opened_at, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (ws_id, project_id, agent_id, phase, current_tasks,
-                 accomplished, next_action, status, pm_notes,
-                 now, now, now),
+                (
+                    ws_id,
+                    project_id,
+                    agent_id,
+                    phase,
+                    current_tasks,
+                    accomplished,
+                    next_action,
+                    status,
+                    pm_notes,
+                    now,
+                    now,
+                    now,
+                ),
             )
             new_id = _checked_lastrowid(cur)
             c.commit()
-            row = c.execute(
-                "SELECT * FROM sessions WHERE id = ?", (new_id,)
-            ).fetchone()
+            row = c.execute("SELECT * FROM sessions WHERE id = ?", (new_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else {}
 
 
-def transition_phase(*, project_id: int, to_phase: str,
-                     agent_id: str, bypass_reason: str | None = None) -> dict:
+def transition_phase(
+    *, project_id: int, to_phase: str, agent_id: str, bypass_reason: str | None = None
+) -> dict:
     """Advance `projects.phase`.
 
     Spec §3 (soft walls): the facade-level `transition_phase` does NOT
@@ -449,9 +512,7 @@ def transition_phase(*, project_id: int, to_phase: str,
             (to_phase, _now(), project_id),
         )
         c.commit()
-        row = c.execute(
-            "SELECT * FROM projects WHERE id = ?", (project_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
     finally:
         c.close()
     if row is None:
@@ -459,8 +520,7 @@ def transition_phase(*, project_id: int, to_phase: str,
     return dict(row)
 
 
-def update_task_status(*, task_id: int, status: str,
-                       notes: str | None = None) -> dict:
+def update_task_status(*, task_id: int, status: str, notes: str | None = None) -> dict:
     """Set `tasks.status` (and optionally `tasks.notes`).
 
     `claimed_at` / `completed_at` are touched when the new status implies
@@ -487,13 +547,9 @@ def update_task_status(*, task_id: int, status: str,
             sets.append("completed_at = COALESCE(completed_at, ?)")
             vals.append(now)
         vals.append(task_id)
-        c.execute(
-            f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals
-        )
+        c.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals)
         c.commit()
-        row = c.execute(
-            "SELECT * FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     finally:
         c.close()
     if row is None:
@@ -501,8 +557,9 @@ def update_task_status(*, task_id: int, status: str,
     return dict(row)
 
 
-def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
-                        reason: str, agent_id: str) -> dict:
+def record_phase_bypass(
+    *, project_id: int, from_phase: str, to_phase: str, reason: str, agent_id: str
+) -> dict:
     """Log a soft-wall bypass to `phase_bypasses`.
 
     The skill_gates table is advisory (spec §3) — bypasses ARE allowed,
@@ -519,9 +576,7 @@ def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
         )
         new_id = _checked_lastrowid(cur)
         c.commit()
-        row = c.execute(
-            "SELECT * FROM phase_bypasses WHERE id = ?", (new_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM phase_bypasses WHERE id = ?", (new_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else {}
@@ -529,10 +584,16 @@ def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
 
 # ── Reads ──────────────────────────────────────────────────────────────────
 
-def find_documents(*, query: str, workspace_id: int | None = None,
-                   project_id: int | None = None,
-                   domain: str | None = None, subdomain: str | None = None,
-                   limit: int = 10) -> list[dict]:
+
+def find_documents(
+    *,
+    query: str,
+    workspace_id: int | None = None,
+    project_id: int | None = None,
+    domain: str | None = None,
+    subdomain: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
     """Search `project_documents` with optional scope filters.
 
     Text search uses the FTS5 virtual table `project_documents_fts`
@@ -573,8 +634,7 @@ def find_documents(*, query: str, workspace_id: int | None = None,
         where.append("subdomain = ?")
         params.append(subdomain)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
-    sql = (f"SELECT * FROM project_documents {clause} "
-           f"ORDER BY created_at DESC, id DESC LIMIT ?")
+    sql = f"SELECT * FROM project_documents {clause} ORDER BY created_at DESC, id DESC LIMIT ?"
     params.append(limit)
     c = _conn()
     try:
@@ -588,9 +648,7 @@ def get_task(*, task_id: int) -> dict | None:
     """Return the task row for `task_id` or None when missing."""
     c = _conn()
     try:
-        row = c.execute(
-            "SELECT * FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else None
@@ -608,8 +666,7 @@ def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
             ).fetchall()
         else:
             rows = c.execute(
-                "SELECT * FROM tasks WHERE project_id = ? "
-                "ORDER BY priority DESC, created_at",
+                "SELECT * FROM tasks WHERE project_id = ? ORDER BY priority DESC, created_at",
                 (project_id,),
             ).fetchall()
     finally:
@@ -618,6 +675,7 @@ def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
 
 
 # ── Cross-plan helpers ─────────────────────────────────────────────────────
+
 
 def lookup_index_id_by_source_ref(*, source_ref: str) -> int | None:
     """Return the local row id for a given v1.0.13 `source_ref`, or None.
@@ -667,29 +725,23 @@ def find_or_create_role(*, name: str, description: str) -> dict:
     """
     c = _conn()
     try:
-        existing = c.execute(
-            "SELECT * FROM roles WHERE name = ?", (name,)
-        ).fetchone()
+        existing = c.execute("SELECT * FROM roles WHERE name = ?", (name,)).fetchone()
         if existing is not None:
             return dict(existing)
         now = _now()
         cur = c.execute(
-            "INSERT INTO roles (name, description, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
             (name, description, now, now),
         )
         new_id = _checked_lastrowid(cur)
         c.commit()
-        row = c.execute(
-            "SELECT * FROM roles WHERE id = ?", (new_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM roles WHERE id = ?", (new_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else {}
 
 
-def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
-                         profile: str) -> dict:
+def find_or_create_agent(*, agent_id: str, name: str, role_id: int, profile: str) -> dict:
     """Return the local `agents` row for `agent_id`, creating it if absent.
 
     Idempotent: same shape as `find_or_create_role`. Local mode owns its
@@ -699,9 +751,7 @@ def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
     """
     c = _conn()
     try:
-        existing = c.execute(
-            "SELECT * FROM agents WHERE id = ?", (agent_id,)
-        ).fetchone()
+        existing = c.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
         if existing is not None:
             return dict(existing)
         now = _now()
@@ -711,9 +761,7 @@ def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
             (agent_id, name, role_id, profile, now, now),
         )
         c.commit()
-        row = c.execute(
-            "SELECT * FROM agents WHERE id = ?", (agent_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else {}

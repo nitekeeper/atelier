@@ -41,6 +41,7 @@ Spec §4.3 keeps them on the surface (callers don't have to feature-flag);
 Plan 2 defers their bodies. Re-implement them when the workspaces
 script lands (Plan 3 / spec §10).
 """
+
 from __future__ import annotations
 from collections.abc import Sequence
 from types import ModuleType
@@ -59,10 +60,13 @@ def _backend() -> ModuleType:
     without forcing each test to reach into `backend._impl`.
     """
     from scripts import mode_detector
+
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         return backend_memex
     from scripts import backend_local
+
     return backend_local
 
 
@@ -75,6 +79,7 @@ def _backend_is_memex(be: ModuleType) -> bool:
     if someone re-exports the module under an alias.
     """
     from scripts import backend_memex
+
     return be is backend_memex
 
 
@@ -88,8 +93,9 @@ def _not_implemented(name: str) -> NoReturn:
 # ── Document-shaped writes — Tier 2 ────────────────────────────────────────
 
 
-def write_project(*, workspace_id: int, slug: str, name: str,
-                  description: str, created_by: str) -> dict:
+def write_project(
+    *, workspace_id: int, slug: str, name: str, description: str, created_by: str
+) -> dict:
     """Create a project row scoped to a workspace. Returns the new row.
 
     Symmetric across both backends — Memex builds the project's
@@ -97,18 +103,28 @@ def write_project(*, workspace_id: int, slug: str, name: str,
     in `projects`. The facade passes the kwargs through unchanged.
     """
     return _backend().write_project(
-        workspace_id=workspace_id, slug=slug, name=name,
-        description=description, created_by=created_by,
+        workspace_id=workspace_id,
+        slug=slug,
+        name=name,
+        description=description,
+        created_by=created_by,
     )
 
 
-def write_document(*, workspace_id: int, project_id: int,
-                   domain: str, subdomain: str | None,
-                   title: str, body: str,
-                   metadata: dict[str, object], caller_agent_id: str,
-                   source_url: str | None = None,
-                   source_ref: str | None = None,
-                   relations: Sequence[dict] = ()) -> dict:
+def write_document(
+    *,
+    workspace_id: int,
+    project_id: int,
+    domain: str,
+    subdomain: str | None,
+    title: str,
+    body: str,
+    metadata: dict[str, object],
+    caller_agent_id: str,
+    source_url: str | None = None,
+    source_ref: str | None = None,
+    relations: Sequence[dict] = (),
+) -> dict:
     """Persist a project document and any declared relations.
 
     Memex-mode signature is narrower (no explicit `workspace_id` /
@@ -116,6 +132,7 @@ def write_document(*, workspace_id: int, project_id: int,
     canonical spec §4.3 wide signature stays the caller-facing contract.
     """
     from scripts.domain_vocabulary import assert_valid_domain
+
     assert_valid_domain(domain)
     be = _backend()
     if _backend_is_memex(be):
@@ -134,29 +151,44 @@ def write_document(*, workspace_id: int, project_id: int,
         if source_ref is not None:
             adapted_metadata.setdefault("source_ref", source_ref)
         return be.write_document(
-            domain=domain, title=title, body=body,
-            metadata=adapted_metadata, caller_agent_id=caller_agent_id,
+            domain=domain,
+            title=title,
+            body=body,
+            metadata=adapted_metadata,
+            caller_agent_id=caller_agent_id,
             source_url=source_url,
             relations=list(relations) if relations else None,
         )
     # Local mode accepts the wide signature directly.
     return be.write_document(
-        workspace_id=workspace_id, project_id=project_id,
-        domain=domain, subdomain=subdomain,
-        title=title, body=body, metadata=metadata,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        domain=domain,
+        subdomain=subdomain,
+        title=title,
+        body=body,
+        metadata=metadata,
         caller_agent_id=caller_agent_id,
-        source_url=source_url, source_ref=source_ref,
+        source_url=source_url,
+        source_ref=source_ref,
         relations=relations,
     )
 
 
-def write_task(*, workspace_id: int, project_id: int,
-               title: str, description: str,
-               subdomain: str | None, created_by: str,
-               assigned_to: str | None = None,
-               priority: int = 0, notes: str | None = None,
-               source_ref: str | None = None,
-               relations: Sequence[dict] = ()) -> dict:
+def write_task(
+    *,
+    workspace_id: int,
+    project_id: int,
+    title: str,
+    description: str,
+    subdomain: str | None,
+    created_by: str,
+    assigned_to: str | None = None,
+    priority: int = 0,
+    notes: str | None = None,
+    source_ref: str | None = None,
+    relations: Sequence[dict] = (),
+) -> dict:
     """Persist a task row and any declared relations.
 
     Memex-mode signature is narrower (no `workspace_id` / `subdomain`).
@@ -172,28 +204,45 @@ def write_task(*, workspace_id: int, project_id: int,
         if subdomain is not None:
             adapted_metadata["subdomain"] = subdomain
         return be.write_task(
-            title=title, description=description,
-            project_id=project_id, created_by=created_by,
-            assigned_to=assigned_to, priority=priority, notes=notes,
+            title=title,
+            description=description,
+            project_id=project_id,
+            created_by=created_by,
+            assigned_to=assigned_to,
+            priority=priority,
+            notes=notes,
             source_ref=source_ref,
             metadata=adapted_metadata if adapted_metadata else None,
             relations=list(relations) if relations else None,
         )
     return be.write_task(
-        workspace_id=workspace_id, project_id=project_id,
-        title=title, description=description, subdomain=subdomain,
-        created_by=created_by, assigned_to=assigned_to,
-        priority=priority, notes=notes, source_ref=source_ref,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        title=title,
+        description=description,
+        subdomain=subdomain,
+        created_by=created_by,
+        assigned_to=assigned_to,
+        priority=priority,
+        notes=notes,
+        source_ref=source_ref,
         relations=relations,
     )
 
 
-def write_meeting(*, workspace_id: int, project_id: int | None,
-                  title: str, date: str, summary: str,
-                  decisions: str, subdomain: str | None,
-                  created_by: str,
-                  source_ref: str | None = None,
-                  relations: Sequence[dict] = ()) -> dict:
+def write_meeting(
+    *,
+    workspace_id: int,
+    project_id: int | None,
+    title: str,
+    date: str,
+    summary: str,
+    decisions: str,
+    subdomain: str | None,
+    created_by: str,
+    source_ref: str | None = None,
+    relations: Sequence[dict] = (),
+) -> dict:
     """Persist a meeting record (DB row + markdown payload) plus relations.
 
     `date` is ISO YYYY-MM-DD form. Same Memex-vs-Local signature drift
@@ -209,17 +258,26 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
         if subdomain is not None:
             adapted_metadata["subdomain"] = subdomain
         return be.write_meeting(
-            title=title, date=date, summary=summary, decisions=decisions,
-            created_by=created_by, project_id=project_id,
+            title=title,
+            date=date,
+            summary=summary,
+            decisions=decisions,
+            created_by=created_by,
+            project_id=project_id,
             source_ref=source_ref,
             metadata=adapted_metadata if adapted_metadata else None,
             relations=list(relations) if relations else None,
         )
     return be.write_meeting(
-        workspace_id=workspace_id, project_id=project_id,
-        title=title, date=date, summary=summary,
-        decisions=decisions, subdomain=subdomain,
-        created_by=created_by, source_ref=source_ref,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        title=title,
+        date=date,
+        summary=summary,
+        decisions=decisions,
+        subdomain=subdomain,
+        created_by=created_by,
+        source_ref=source_ref,
         relations=relations,
     )
 
@@ -227,22 +285,33 @@ def write_meeting(*, workspace_id: int, project_id: int | None,
 # ── Operational state — Tier 1 ─────────────────────────────────────────────
 
 
-def upsert_session(*, project_id: int, agent_id: str, phase: str | None = None,
-                   current_tasks: str | None = None,
-                   accomplished: str | None = None,
-                   next_action: str | None = None,
-                   status: str = "in-progress",
-                   pm_notes: str | None = None) -> dict:
+def upsert_session(
+    *,
+    project_id: int,
+    agent_id: str,
+    phase: str | None = None,
+    current_tasks: str | None = None,
+    accomplished: str | None = None,
+    next_action: str | None = None,
+    status: str = "in-progress",
+    pm_notes: str | None = None,
+) -> dict:
     """Idempotent session upsert for `(project_id, agent_id)`."""
     return _backend().upsert_session(
-        project_id=project_id, agent_id=agent_id, phase=phase,
-        current_tasks=current_tasks, accomplished=accomplished,
-        next_action=next_action, status=status, pm_notes=pm_notes,
+        project_id=project_id,
+        agent_id=agent_id,
+        phase=phase,
+        current_tasks=current_tasks,
+        accomplished=accomplished,
+        next_action=next_action,
+        status=status,
+        pm_notes=pm_notes,
     )
 
 
-def transition_phase(*, project_id: int, to_phase: str,
-                     agent_id: str, bypass_reason: str | None = None) -> dict:
+def transition_phase(
+    *, project_id: int, to_phase: str, agent_id: str, bypass_reason: str | None = None
+) -> dict:
     """Advance the project phase.
 
     `bypass_reason` is accepted for signature parity; callers MUST log
@@ -251,26 +320,33 @@ def transition_phase(*, project_id: int, to_phase: str,
     backends ignore the kwarg.
     """
     return _backend().transition_phase(
-        project_id=project_id, to_phase=to_phase,
-        agent_id=agent_id, bypass_reason=bypass_reason,
+        project_id=project_id,
+        to_phase=to_phase,
+        agent_id=agent_id,
+        bypass_reason=bypass_reason,
     )
 
 
-def update_task_status(*, task_id: int, status: str,
-                       notes: str | None = None) -> dict:
+def update_task_status(*, task_id: int, status: str, notes: str | None = None) -> dict:
     """Set the task status. Returns the updated row."""
     return _backend().update_task_status(
-        task_id=task_id, status=status, notes=notes,
+        task_id=task_id,
+        status=status,
+        notes=notes,
     )
 
 
-def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
-                        reason: str, agent_id: str) -> dict:
+def record_phase_bypass(
+    *, project_id: int, from_phase: str, to_phase: str, reason: str, agent_id: str
+) -> dict:
     """Log a soft-wall bypass to `phase_bypasses`. Returns the new row.
     Surfaced by `internal/dev-handoff` retros."""
     return _backend().record_phase_bypass(
-        project_id=project_id, from_phase=from_phase, to_phase=to_phase,
-        reason=reason, agent_id=agent_id,
+        project_id=project_id,
+        from_phase=from_phase,
+        to_phase=to_phase,
+        reason=reason,
+        agent_id=agent_id,
     )
 
 
@@ -281,8 +357,9 @@ def record_phase_bypass(*, project_id: int, from_phase: str, to_phase: str,
 # alongside the workspaces script.
 
 
-def find_or_create_workspace(*, identity: str, slug: str, name: str,
-                             description: str | None = None) -> dict:
+def find_or_create_workspace(
+    *, identity: str, slug: str, name: str, description: str | None = None
+) -> dict:
     """Return the workspace row for `identity`, creating it if absent.
     Deferred to v1.2.0."""
     _not_implemented("find_or_create_workspace")
@@ -312,15 +389,24 @@ def list_projects(*, workspace_id: int) -> list[dict]:
 # ── Reads ──────────────────────────────────────────────────────────────────
 
 
-def find_documents(*, query: str, workspace_id: int | None = None,
-                   project_id: int | None = None,
-                   domain: str | None = None, subdomain: str | None = None,
-                   limit: int = 10) -> list[dict]:
+def find_documents(
+    *,
+    query: str,
+    workspace_id: int | None = None,
+    project_id: int | None = None,
+    domain: str | None = None,
+    subdomain: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
     """Full-text / metadata search over documents, optionally scoped to a
     workspace / project / domain. Returns ranked rows."""
     return _backend().find_documents(
-        query=query, workspace_id=workspace_id, project_id=project_id,
-        domain=domain, subdomain=subdomain, limit=limit,
+        query=query,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        domain=domain,
+        subdomain=subdomain,
+        limit=limit,
     )
 
 
@@ -364,10 +450,12 @@ def find_or_create_role(*, name: str, description: str) -> dict:
     return _backend().find_or_create_role(name=name, description=description)
 
 
-def find_or_create_agent(*, agent_id: str, name: str, role_id: int,
-                         profile: str) -> dict:
+def find_or_create_agent(*, agent_id: str, name: str, role_id: int, profile: str) -> dict:
     """Return the agent row with this `agent_id`, creating it if absent.
     Idempotent."""
     return _backend().find_or_create_agent(
-        agent_id=agent_id, name=name, role_id=role_id, profile=profile,
+        agent_id=agent_id,
+        name=name,
+        role_id=role_id,
+        profile=profile,
     )

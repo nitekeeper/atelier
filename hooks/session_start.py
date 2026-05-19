@@ -21,6 +21,7 @@ Install: add to .claude/settings.json:
     }
   }
 """
+
 import re
 import sys
 from pathlib import Path

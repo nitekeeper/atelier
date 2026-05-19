@@ -3,6 +3,7 @@
 Conftest: mock preflight.check at collection time so importing workspace.py
 during test collection does not trigger real platform detection.
 """
+
 from unittest.mock import patch
 
 import pytest
@@ -23,6 +24,7 @@ def _clear_mode_cache():
     into the next file.
     """
     from scripts import mode_detector
+
     mode_detector._clear_cache()
     yield
     mode_detector._clear_cache()

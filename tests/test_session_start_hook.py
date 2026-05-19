@@ -1,4 +1,5 @@
 """Tests for the SessionStart hook."""
+
 import os
 import subprocess
 import sys
@@ -14,13 +15,20 @@ def test_hook_outputs_skill_body():
     """Hook stdout contains the body of run/SKILL.md."""
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
-        capture_output=True, text=True, encoding="utf-8",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
         env={**os.environ, "PYTHONUTF8": "1"},
     )
     assert result.returncode == 0, f"hook failed; stderr: {result.stderr}"
     # Body must contain the canonical sections
-    for section in ["## Trigger contract", "## Red Flags",
-                    "## Phase guidance", "## Dev arc", "## Bypass procedure"]:
+    for section in [
+        "## Trigger contract",
+        "## Red Flags",
+        "## Phase guidance",
+        "## Dev arc",
+        "## Bypass procedure",
+    ]:
         assert section in result.stdout, f"missing section in hook output: {section}"
 
 
@@ -28,7 +36,9 @@ def test_hook_does_not_emit_frontmatter():
     """The frontmatter delimiters and YAML keys should not appear in injected context."""
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
-        capture_output=True, text=True, encoding="utf-8",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
         env={**os.environ, "PYTHONUTF8": "1"},
     )
     # The hook strips the frontmatter block before printing
@@ -46,12 +56,16 @@ def test_hook_exits_zero_when_skill_missing(tmp_path):
 
     result = subprocess.run(
         [sys.executable, str(target_hook)],
-        capture_output=True, text=True, encoding="utf-8",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
         cwd=tmp_path,
         env={**os.environ, "PYTHONPATH": str(tmp_path), "PYTHONUTF8": "1"},
     )
     # Must NOT block session even if the canonical file is missing
-    assert result.returncode == 0, f"hook returned non-zero on missing skill; stderr: {result.stderr}"
+    assert result.returncode == 0, (
+        f"hook returned non-zero on missing skill; stderr: {result.stderr}"
+    )
 
 
 def test_hook_strips_frontmatter_with_crlf_line_endings(tmp_path):
@@ -68,7 +82,9 @@ def test_hook_strips_frontmatter_with_crlf_line_endings(tmp_path):
 
     result = subprocess.run(
         [sys.executable, str(target_hook)],
-        capture_output=True, text=True, encoding="utf-8",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
         cwd=tmp_path,
         env={**os.environ, "PYTHONUTF8": "1"},
     )

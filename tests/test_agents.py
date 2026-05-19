@@ -7,6 +7,7 @@ mode resolves the DB via `backend_local._conn()` (workspace_root
 Memex registry. These tests pin Local-mode behavior; Memex-mode
 coverage lives in the backend_memex / backend dispatch suites.
 """
+
 from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
@@ -61,8 +62,13 @@ def role_id(db_path):
 
 
 def test_create_agent(db_path, role_id):
-    agent = create_agent(db_path, id="dev-1", name="Alice", role_id=role_id,
-                         profile="Senior Python developer, 15 years experience")
+    agent = create_agent(
+        db_path,
+        id="dev-1",
+        name="Alice",
+        role_id=role_id,
+        profile="Senior Python developer, 15 years experience",
+    )
     assert agent["id"] == "dev-1"
     assert agent["name"] == "Alice"
     assert agent["role_id"] == role_id

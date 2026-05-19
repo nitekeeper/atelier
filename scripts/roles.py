@@ -24,6 +24,7 @@ if/when both modes share an agents source. (Reseeded here because
 `scripts/roles.py` is the canonical home of the role/agent identity
 contract.)
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -48,15 +49,14 @@ def create_role(db_path: str, name: str, description: str) -> dict:
 def get_role(db_path: str, role_id: int) -> dict | None:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
-        rows = backend_memex._memex_core_query(
-            store="agents", table="roles", where={"id": role_id})
+
+        rows = backend_memex._memex_core_query(store="agents", table="roles", where={"id": role_id})
         return rows[0] if rows else None
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
-        row = c.execute(
-            "SELECT * FROM roles WHERE id = ?", (role_id,)
-        ).fetchone()
+        row = c.execute("SELECT * FROM roles WHERE id = ?", (role_id,)).fetchone()
     finally:
         c.close()
     return dict(row) if row else None
@@ -81,11 +81,12 @@ def update_role(db_path: str, role_id: int, **kwargs) -> dict | None:
     updates["updated_at"] = _now()
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         memex_stores = backend_memex._memex_module("stores")
-        memex_stores.update(name="agents", table="roles",
-                            row_id=role_id, updates=updates)
+        memex_stores.update(name="agents", table="roles", row_id=role_id, updates=updates)
         return get_role(db_path, role_id)
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         sets = ", ".join(f"{k} = ?" for k in updates)
@@ -102,10 +103,12 @@ def update_role(db_path: str, role_id: int, **kwargs) -> dict | None:
 def delete_role(db_path: str, role_id: int) -> bool:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         memex_stores = backend_memex._memex_module("stores")
         memex_stores.delete(name="agents", table="roles", row_id=role_id)
         return True
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
         cur = c.execute("DELETE FROM roles WHERE id = ?", (role_id,))
@@ -119,14 +122,14 @@ def delete_role(db_path: str, role_id: int) -> bool:
 def list_roles(db_path: str) -> list[dict]:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         memex_stores = backend_memex._memex_module("stores")
-        return memex_stores.query(
-            "agents", "SELECT * FROM roles ORDER BY name", ())
+        return memex_stores.query("agents", "SELECT * FROM roles ORDER BY name", ())
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
-        rows = [dict(r) for r in c.execute(
-            "SELECT * FROM roles ORDER BY name").fetchall()]
+        rows = [dict(r) for r in c.execute("SELECT * FROM roles ORDER BY name").fetchall()]
     finally:
         c.close()
     return rows
@@ -139,21 +142,24 @@ def search_roles(db_path: str, query: str) -> list[dict]:
     pattern = f"%{query}%"
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
+
         memex_stores = backend_memex._memex_module("stores")
         return memex_stores.query(
             "agents",
-            "SELECT * FROM roles WHERE name LIKE ? OR description LIKE ? "
-            "ORDER BY name",
+            "SELECT * FROM roles WHERE name LIKE ? OR description LIKE ? ORDER BY name",
             (pattern, pattern),
         )
     from scripts import backend_local
+
     c = backend_local._conn()
     try:
-        rows = [dict(r) for r in c.execute(
-            "SELECT * FROM roles WHERE name LIKE ? OR description LIKE ? "
-            "ORDER BY name",
-            (pattern, pattern),
-        ).fetchall()]
+        rows = [
+            dict(r)
+            for r in c.execute(
+                "SELECT * FROM roles WHERE name LIKE ? OR description LIKE ? ORDER BY name",
+                (pattern, pattern),
+            ).fetchall()
+        ]
     finally:
         c.close()
     return rows
@@ -176,6 +182,7 @@ if __name__ == "__main__":
         # field (passed through to update_role as-is). Omit the flag
         # entirely to leave the field untouched.
         import argparse
+
         parser = argparse.ArgumentParser()
         parser.add_argument("role_id", type=int)
         parser.add_argument("--name")

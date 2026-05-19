@@ -1,4 +1,5 @@
 """Verify session-lifecycle skills have YAML frontmatter with required keys."""
+
 import re
 from pathlib import Path
 

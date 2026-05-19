@@ -6,6 +6,7 @@ mirror `scripts/seed_roles.py:ROLES` byte-for-byte at the persona
 profile level — Plan 4's migrator and both bootstrap paths (Memex
 `register-agent` and Local INSERT) depend on this parity.
 """
+
 import json
 from pathlib import Path
 
@@ -45,19 +46,15 @@ def test_each_agent_has_required_keys():
     for path in sorted(TEMPLATES_DIR.glob("*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
         assert set(data.keys()) == required, (
-            f"{path.name}: unexpected keys: "
-            f"{set(data.keys()) - required}"
+            f"{path.name}: unexpected keys: {set(data.keys()) - required}"
         )
 
 
 def test_each_agent_profile_is_nontrivial_string():
     for a in load_agent_seed():
-        assert isinstance(a["profile"], str), (
-            f"{a['agent_id']}: profile must be str"
-        )
+        assert isinstance(a["profile"], str), f"{a['agent_id']}: profile must be str"
         assert len(a["profile"]) >= 500, (
-            f"{a['agent_id']}: profile too short "
-            f"({len(a['profile'])} < 500)"
+            f"{a['agent_id']}: profile too short ({len(a['profile'])} < 500)"
         )
 
 
@@ -130,8 +127,7 @@ def test_load_agent_seed_raises_on_duplicate_agent_id(tmp_path, monkeypatch):
     bad.mkdir()
     for slug in ("a", "b"):
         (bad / f"{slug}.json").write_text(
-            '{"agent_id":"dup","name":"x","role_name":"y",'
-            '"profile":"...long enough..."}',
+            '{"agent_id":"dup","name":"x","role_name":"y","profile":"...long enough..."}',
             encoding="utf-8",
         )
     monkeypatch.setattr("scripts.seed_data._AGENTS_DIR", bad)

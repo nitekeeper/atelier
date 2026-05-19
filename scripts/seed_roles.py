@@ -9,6 +9,7 @@ Usage:
     python scripts/seed_roles.py [db_path]
     db_path defaults to .ai/atelier.db
 """
+
 from __future__ import annotations
 import sys
 from datetime import datetime, timezone
@@ -1143,6 +1144,7 @@ Communication style: Interdisciplinary, mind-modeler. Brings human cognition res
 # Seed logic
 # ---------------------------------------------------------------------------
 
+
 def seed(db_path: str) -> tuple[int, int]:
     """Insert roles and agents. Skips existing entries by name/id.
 
@@ -1174,7 +1176,8 @@ def seed(db_path: str) -> tuple[int, int]:
 
     for entry in ROLES:
         role = backend.find_or_create_role(
-            name=entry["role_name"], description=entry["role_desc"],
+            name=entry["role_name"],
+            description=entry["role_desc"],
         )
         if role.get("created_at", "") >= seed_started_at:
             roles_added += 1

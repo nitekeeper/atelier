@@ -4,6 +4,7 @@ Trimmed copy of memex/scripts/db.py. Honors $MEMEX_HOME so the
 fake_home fixture's monkeypatch redirects the stub the same way it
 redirects the real Memex package.
 """
+
 from __future__ import annotations
 
 import os
@@ -54,6 +55,4 @@ def memex_home() -> Path:
 def require_bootstrap() -> None:
     home = memex_home()
     if not (home / "registry.json").exists():
-        raise MemexNotInitializedError(
-            f"Memex is not bootstrapped at {home}."
-        )
+        raise MemexNotInitializedError(f"Memex is not bootstrapped at {home}.")

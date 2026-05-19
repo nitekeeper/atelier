@@ -13,15 +13,25 @@ via sqlite3. We bypass the legacy `create_role` / `create_agent` /
 backend facade resolves the active DB itself (`<workspace>/.ai/atelier.db`
 in Local mode). Tests verify against the same path on disk.
 """
+
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 from scripts.migrate import apply_migrations
-from scripts.tasks import (create_task, get_task, update_task, delete_task,
-                            assign_task, claim_task, complete_task,
-                            list_tasks, search_tasks, _coerce_priority)
+from scripts.tasks import (
+    create_task,
+    get_task,
+    update_task,
+    delete_task,
+    assign_task,
+    claim_task,
+    complete_task,
+    list_tasks,
+    search_tasks,
+    _coerce_priority,
+)
 
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
@@ -39,8 +49,7 @@ def _seed(db_path: str) -> tuple[int, int, str]:
     )
     ws_id = cur.lastrowid
     cur = conn.execute(
-        "INSERT INTO roles (name, description, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
         ("developer", "Writes code", now, now),
     )
     role_id = cur.lastrowid
@@ -71,6 +80,7 @@ def setup(tmp_path, monkeypatch):
     `detect_mode` cache around each test so the patch can't leak.
     """
     from scripts import mode_detector
+
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
 
     root = tmp_path / "repo"
@@ -82,15 +92,19 @@ def setup(tmp_path, monkeypatch):
     apply_migrations(str(db), MIGRATIONS_DIR / "shared")
     apply_migrations(str(db), MIGRATIONS_DIR / "local-only")
     ws_id, proj_id, agent_id = _seed(str(db))
-    return {"db_path": str(db), "agent_id": agent_id,
-            "project_id": proj_id, "workspace_id": ws_id}
+    return {"db_path": str(db), "agent_id": agent_id, "project_id": proj_id, "workspace_id": ws_id}
 
 
 def test_create_task(setup):
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    task = create_task(db, project_id=project_id, title="Write failing auth tests",
-                       description="TDD red phase for JWT validation", created_by=agent_id,
-                       workspace_id=setup["workspace_id"])
+    task = create_task(
+        db,
+        project_id=project_id,
+        title="Write failing auth tests",
+        description="TDD red phase for JWT validation",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
     assert task["id"] == 1
     assert task["status"] == "pending"
     assert task["assigned_to"] is None
@@ -100,16 +114,26 @@ def test_create_task_coerces_string_priority(setup):
     """v1.0.13 callers passed 'critical'|'high'|'medium'|'low'; the
     coercion helper maps those to the v1.1.0 INTEGER column."""
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    task = create_task(db, project_id=project_id, title="urgent",
-                       created_by=agent_id, priority="critical",
-                       workspace_id=setup["workspace_id"])
+    task = create_task(
+        db,
+        project_id=project_id,
+        title="urgent",
+        created_by=agent_id,
+        priority="critical",
+        workspace_id=setup["workspace_id"],
+    )
     assert task["priority"] == 4
 
 
 def test_get_task(setup):
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    create_task(db, project_id=project_id, title="Write tests", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
+    create_task(
+        db,
+        project_id=project_id,
+        title="Write tests",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
     task = get_task(db, 1)
     assert task["title"] == "Write tests"
 
@@ -120,8 +144,13 @@ def test_get_task_missing_returns_none(setup):
 
 def test_assign_task(setup):
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    create_task(db, project_id=project_id, title="Write tests", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
+    create_task(
+        db,
+        project_id=project_id,
+        title="Write tests",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
     task = assign_task(db, task_id=1, agent_id=agent_id)
     assert task["assigned_to"] == agent_id
     assert task["status"] == "assigned"
@@ -129,8 +158,13 @@ def test_assign_task(setup):
 
 def test_claim_task(setup):
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    create_task(db, project_id=project_id, title="Write tests", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
+    create_task(
+        db,
+        project_id=project_id,
+        title="Write tests",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
     assign_task(db, task_id=1, agent_id=agent_id)
     task = claim_task(db, task_id=1, agent_id=agent_id)
     assert task["status"] == "in-progress"
@@ -138,8 +172,13 @@ def test_claim_task(setup):
 
 def test_complete_task(setup):
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    create_task(db, project_id=project_id, title="Write tests", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
+    create_task(
+        db,
+        project_id=project_id,
+        title="Write tests",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
     assign_task(db, task_id=1, agent_id=agent_id)
     claim_task(db, task_id=1, agent_id=agent_id)
     task = complete_task(db, task_id=1)
@@ -148,26 +187,46 @@ def test_complete_task(setup):
 
 def test_update_task_notes(setup):
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    create_task(db, project_id=project_id, title="Write tests", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
+    create_task(
+        db,
+        project_id=project_id,
+        title="Write tests",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
     task = update_task(db, 1, notes="Blocked on missing mock library")
     assert task["notes"] == "Blocked on missing mock library"
 
 
 def test_delete_task(setup):
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    create_task(db, project_id=project_id, title="Write tests", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
+    create_task(
+        db,
+        project_id=project_id,
+        title="Write tests",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
     assert delete_task(db, 1) is True
     assert get_task(db, 1) is None
 
 
 def test_list_tasks_by_status(setup):
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    create_task(db, project_id=project_id, title="Task A", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
-    create_task(db, project_id=project_id, title="Task B", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
+    create_task(
+        db,
+        project_id=project_id,
+        title="Task A",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
+    create_task(
+        db,
+        project_id=project_id,
+        title="Task B",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
     assign_task(db, task_id=2, agent_id=agent_id)
     pending = list_tasks(db, status="pending", project_id=project_id)
     assert len(pending) == 1
@@ -176,18 +235,29 @@ def test_list_tasks_by_status(setup):
 
 def test_search_tasks(setup):
     db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
-    create_task(db, project_id=project_id, title="Write JWT tests",
-                description="Test token validation", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
-    create_task(db, project_id=project_id, title="Fix login bug",
-                description="Auth redirect broken", created_by=agent_id,
-                workspace_id=setup["workspace_id"])
+    create_task(
+        db,
+        project_id=project_id,
+        title="Write JWT tests",
+        description="Test token validation",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
+    create_task(
+        db,
+        project_id=project_id,
+        title="Fix login bug",
+        description="Auth redirect broken",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
     results = search_tasks(db, query="JWT")
     assert len(results) == 1
     assert results[0]["title"] == "Write JWT tests"
 
 
 # ── _coerce_priority unit tests ────────────────────────────────────────────
+
 
 def test_coerce_priority_known_strings():
     assert _coerce_priority("critical") == 4

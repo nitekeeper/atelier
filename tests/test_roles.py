@@ -7,6 +7,7 @@ mode resolves the DB via `backend_local._local_db()` (workspace_root
 Memex registry. These tests pin Local-mode behavior; Memex-mode
 coverage lives in the backend_memex / backend dispatch suites.
 """
+
 from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch

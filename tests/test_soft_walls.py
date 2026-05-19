@@ -1,4 +1,5 @@
 """Soft walls: check_gate returns GateResult instead of raising on phase mismatch."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -24,8 +25,7 @@ def _seed(db_path: str) -> int:
     )
     ws_id = cur.lastrowid
     cur = conn.execute(
-        "INSERT INTO roles (name, description, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
         ("pm", "PM", now, now),
     )
     role_id = cur.lastrowid
@@ -50,6 +50,7 @@ def _seed(db_path: str) -> int:
 def project(tmp_path, monkeypatch):
     """Forces Local mode -- Memex-mode soft-wall coverage lives in test_backend_memex_*."""
     from scripts import mode_detector
+
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
     root = tmp_path / "repo"
     root.mkdir()

@@ -15,6 +15,7 @@ preflight.check()
 
 class _Obj:
     """Simple return object for Windows path — matches libtmux attribute names."""
+
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -37,9 +38,7 @@ def create_workspace(name: str, project_root: str):
         return _Obj(name=name)
     server = _get_server()
     session = server.new_session(
-        session_name=name,
-        start_directory=project_root,
-        environment={AGENT_TEAMS_ENV: "1"}
+        session_name=name, start_directory=project_root, environment={AGENT_TEAMS_ENV: "1"}
     )
     session.new_window(window_name="main")
     return session
@@ -49,7 +48,8 @@ def list_workspaces() -> list[str]:
     if sys.platform == "win32":
         result = subprocess.run(
             preflight.get_tmux_cmd() + ["list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             return []
@@ -96,7 +96,8 @@ def list_rooms(workspace: str) -> list[str]:
     if sys.platform == "win32":
         result = subprocess.run(
             preflight.get_tmux_cmd() + ["list-windows", "-t", workspace, "-F", "#{window_name}"],
-            capture_output=True, text=True
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             return []
@@ -141,15 +142,24 @@ def close_room(workspace: str, room_name: str) -> None:
 
 def agent_join(workspace: str, room_name: str, agent_id: str):
     if sys.platform == "win32":
-        count_result = _run_tmux(["list-panes", "-t", f"{workspace}:{room_name}", "-F", "#{pane_id}"])
+        count_result = _run_tmux(
+            ["list-panes", "-t", f"{workspace}:{room_name}", "-F", "#{pane_id}"]
+        )
         pane_count = len([p for p in count_result.stdout.strip().split("\n") if p])
         if pane_count >= _MAX_AGENTS:
             raise ValueError(f"Maximum {_MAX_AGENTS} agents per room reached")
-        result = _run_tmux([
-            "split-window", "-t", f"{workspace}:{room_name}",
-            "-e", f"{AGENT_TEAMS_ENV}=1",
-            "-P", "-F", "#{pane_id}",
-        ])
+        result = _run_tmux(
+            [
+                "split-window",
+                "-t",
+                f"{workspace}:{room_name}",
+                "-e",
+                f"{AGENT_TEAMS_ENV}=1",
+                "-P",
+                "-F",
+                "#{pane_id}",
+            ]
+        )
         pane_id = result.stdout.strip()
         _run_tmux(["send-keys", "-t", pane_id, "claude", "Enter"])
         return _Obj(id=pane_id)
@@ -297,8 +307,12 @@ if __name__ == "__main__":
         parser.add_argument("room_name")
         parser.add_argument("agent_id")
         args = parser.parse_args(sys.argv[2:])
-        pane = agent_join(workspace=args.workspace, room_name=args.room_name, agent_id=args.agent_id)
-        print(f"Agent '{args.agent_id}' joined room '{args.room_name}' (pane: {pane.id}). Claude Code launched.")
+        pane = agent_join(
+            workspace=args.workspace, room_name=args.room_name, agent_id=args.agent_id
+        )
+        print(
+            f"Agent '{args.agent_id}' joined room '{args.room_name}' (pane: {pane.id}). Claude Code launched."
+        )
 
     elif cmd == "agent:leave":
         parser = argparse.ArgumentParser()

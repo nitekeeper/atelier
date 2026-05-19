@@ -18,6 +18,7 @@ Install as a PreToolUse hook in .claude/settings.json. Example:
 Option B (from spec): DB errors never block a session. Errors produce a warning
 and Claude continues with reduced context.
 """
+
 from __future__ import annotations
 
 import json

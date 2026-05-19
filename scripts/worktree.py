@@ -1,4 +1,5 @@
 """Git worktree merge-back and cleanup for session close."""
+
 from __future__ import annotations
 
 import sys
@@ -28,8 +29,12 @@ def classify_status(porcelain_output: str) -> tuple[list[str], list[str], list[s
     """
     lines = porcelain_output.splitlines()
     dirty = [line for line in lines if not line.startswith("??")]
-    untracked_claude = [line for line in lines if line.startswith("?? ") and line[3:].startswith(".claude/")]
-    untracked_other = [line for line in lines if line.startswith("?? ") and not line[3:].startswith(".claude/")]
+    untracked_claude = [
+        line for line in lines if line.startswith("?? ") and line[3:].startswith(".claude/")
+    ]
+    untracked_other = [
+        line for line in lines if line.startswith("?? ") and not line[3:].startswith(".claude/")
+    ]
     return dirty, untracked_claude, untracked_other
 
 

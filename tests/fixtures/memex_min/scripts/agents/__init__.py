@@ -1,4 +1,5 @@
 """agents CRUD — minimal stub. Trimmed copy of memex/scripts/agents/__init__.py."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -10,8 +11,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def create_agent(db_path: str, agent_id: str, name: str, role_id: int,
-                 profile: str) -> dict:
+def create_agent(db_path: str, agent_id: str, name: str, role_id: int, profile: str) -> dict:
     conn = get_connection(db_path)
     now = _now()
     conn.execute(

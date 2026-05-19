@@ -4,6 +4,7 @@ Trimmed copy of memex/scripts/registry.py. Same JSON-on-disk format
 (flat `{name: record}` map) so atelier's bootstrap sees the registry
 shape it expects.
 """
+
 from __future__ import annotations
 
 import json

@@ -3,6 +3,7 @@
 Both Memex bootstrap (memex:core:register-role / register-agent) and
 Local-mode INSERT paths read from the same JSON files in templates/.
 """
+
 from __future__ import annotations
 
 import json
@@ -28,9 +29,7 @@ def load_role_seed() -> list[dict]:
             raise ValueError(f"roles.json[{i}]: missing keys: {sorted(missing)}")
         for k in required:
             if not isinstance(role[k], str):
-                raise TypeError(
-                    f"roles.json[{i}]: '{k}' must be str, got {type(role[k]).__name__}"
-                )
+                raise TypeError(f"roles.json[{i}]: '{k}' must be str, got {type(role[k]).__name__}")
         if role["name"] in seen_names:
             raise ValueError(f"roles.json[{i}]: duplicate role name '{role['name']}'")
         seen_names.add(role["name"])
@@ -62,9 +61,7 @@ def load_agent_seed() -> list[dict]:
             raise ValueError(f"{path}: missing keys: {sorted(missing)}")
         for k in required:
             if not isinstance(data[k], str):
-                raise TypeError(
-                    f"{path}: '{k}' must be str, got {type(data[k]).__name__}"
-                )
+                raise TypeError(f"{path}: '{k}' must be str, got {type(data[k]).__name__}")
         if data["agent_id"] in seen_ids:
             raise ValueError(f"{path}: duplicate agent_id '{data['agent_id']}'")
         seen_ids.add(data["agent_id"])

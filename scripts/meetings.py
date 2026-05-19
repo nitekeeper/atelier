@@ -238,21 +238,37 @@ def update_meeting(db_path: str, meeting_id: int, **kwargs) -> dict | None:
     test harness covers this in test_meetings.py::test_update_meeting."""
     allowed = {"title", "date", "summary", "decisions"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
-    updates["updated_at"] = _now()
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
+        updates["updated_at"] = _now()
         return backend_memex._memex_core_update(
             store="atelier", table="meeting_minutes", row_id=meeting_id, changes=updates
         )
     from scripts import backend_local
 
+    now = _now()
     c = backend_local._conn()
-    sets = ", ".join(f"{k} = ?" for k in updates)
-    c.execute(
-        f"UPDATE meeting_minutes SET {sets} WHERE id = ?",  # nosec B608
-        (*tuple(updates.values()), meeting_id),
-    )
+    if "title" in updates:
+        c.execute(
+            "UPDATE meeting_minutes SET title = ?, updated_at = ? WHERE id = ?",
+            (updates["title"], now, meeting_id),
+        )
+    if "date" in updates:
+        c.execute(
+            "UPDATE meeting_minutes SET date = ?, updated_at = ? WHERE id = ?",
+            (updates["date"], now, meeting_id),
+        )
+    if "summary" in updates:
+        c.execute(
+            "UPDATE meeting_minutes SET summary = ?, updated_at = ? WHERE id = ?",
+            (updates["summary"], now, meeting_id),
+        )
+    if "decisions" in updates:
+        c.execute(
+            "UPDATE meeting_minutes SET decisions = ?, updated_at = ? WHERE id = ?",
+            (updates["decisions"], now, meeting_id),
+        )
     c.commit()
     row = c.execute("SELECT * FROM meeting_minutes WHERE id = ?", (meeting_id,)).fetchone()
     c.close()

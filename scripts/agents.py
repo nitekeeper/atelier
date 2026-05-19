@@ -100,16 +100,28 @@ def update_agent(db_path: str, agent_id: str, **kwargs) -> dict | None:
     if mode_detector.detect_mode() == "memex":
         pkg = _memex_agents_pkg()
         return pkg.update_agent(_memex_db_path(), agent_id, **fields)
-    fields["updated_at"] = _now()
     from scripts import backend_local
 
+    now = _now()
     c = backend_local._conn()
     try:
-        set_clause = ", ".join(f"{k} = ?" for k in fields)
-        c.execute(
-            f"UPDATE agents SET {set_clause} WHERE id = ?",  # nosec B608
-            (*fields.values(), agent_id),
-        )
+        # Per-column static SQL: each branch is a hardcoded literal so
+        # the column name can't be poisoned by a future kwarg passthrough.
+        if "name" in fields:
+            c.execute(
+                "UPDATE agents SET name = ?, updated_at = ? WHERE id = ?",
+                (fields["name"], now, agent_id),
+            )
+        if "role_id" in fields:
+            c.execute(
+                "UPDATE agents SET role_id = ?, updated_at = ? WHERE id = ?",
+                (fields["role_id"], now, agent_id),
+            )
+        if "profile" in fields:
+            c.execute(
+                "UPDATE agents SET profile = ?, updated_at = ? WHERE id = ?",
+                (fields["profile"], now, agent_id),
+            )
         c.commit()
     finally:
         c.close()

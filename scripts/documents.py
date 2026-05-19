@@ -219,13 +219,29 @@ def update_document(db_path: str, doc_id: int, **kwargs) -> dict | None:
     else:
         from scripts import backend_local
 
+        now = changes.get("updated_at") or _now()
         c = backend_local._conn()
         try:
-            sets = ", ".join(f"{k} = ?" for k in changes)
-            c.execute(
-                f"UPDATE project_documents SET {sets} WHERE id = ?",  # nosec B608
-                (*changes.values(), doc_id),
-            )
+            if "title" in changes:
+                c.execute(
+                    "UPDATE project_documents SET title = ?, updated_at = ? WHERE id = ?",
+                    (changes["title"], now, doc_id),
+                )
+            if "filename" in changes:
+                c.execute(
+                    "UPDATE project_documents SET filename = ?, updated_at = ? WHERE id = ?",
+                    (changes["filename"], now, doc_id),
+                )
+            if "domain" in changes:
+                c.execute(
+                    "UPDATE project_documents SET domain = ?, updated_at = ? WHERE id = ?",
+                    (changes["domain"], now, doc_id),
+                )
+            if "subdomain" in changes:
+                c.execute(
+                    "UPDATE project_documents SET subdomain = ?, updated_at = ? WHERE id = ?",
+                    (changes["subdomain"], now, doc_id),
+                )
             c.commit()
         finally:
             c.close()

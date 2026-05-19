@@ -74,23 +74,41 @@ def _patch_session(session_id: int, updates: dict) -> dict | None:
     if not updates:
         return _session_by_id(session_id)
     updates = dict(updates)
-    updates["updated_at"] = _now()
     if _is_memex_mode():
         from scripts import backend_memex
 
+        updates["updated_at"] = _now()
         backend_memex._memex_core_update(
             store="atelier", table="sessions", row_id=session_id, changes=updates
         )
         return _session_by_id(session_id)
     from scripts import backend_local
 
+    now = _now()
     c = backend_local._conn()
     try:
-        set_clause = ", ".join(f"{k} = ?" for k in updates)
-        c.execute(
-            f"UPDATE sessions SET {set_clause} WHERE id = ?",  # nosec B608
-            (*updates.values(), session_id),
-        )
+        # Schema-only fields the facade upsert_session doesn't carry.
+        # Per-column static SQL avoids any dynamic SET-clause construction.
+        if "pre_diagnose_phase" in updates:
+            c.execute(
+                "UPDATE sessions SET pre_diagnose_phase = ?, updated_at = ? WHERE id = ?",
+                (updates["pre_diagnose_phase"], now, session_id),
+            )
+        if "blocking_reason" in updates:
+            c.execute(
+                "UPDATE sessions SET blocking_reason = ?, updated_at = ? WHERE id = ?",
+                (updates["blocking_reason"], now, session_id),
+            )
+        if "opened_at" in updates:
+            c.execute(
+                "UPDATE sessions SET opened_at = ?, updated_at = ? WHERE id = ?",
+                (updates["opened_at"], now, session_id),
+            )
+        if "closed_at" in updates:
+            c.execute(
+                "UPDATE sessions SET closed_at = ?, updated_at = ? WHERE id = ?",
+                (updates["closed_at"], now, session_id),
+            )
         c.commit()
         row = c.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
     finally:

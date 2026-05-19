@@ -188,14 +188,41 @@ def update_task(db_path: str, task_id: int, **kwargs) -> dict:
 
     from scripts import backend_local
 
-    updates["updated_at"] = _now()
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    now = _now()
     c = backend_local._conn()
     try:
-        c.execute(
-            f"UPDATE tasks SET {set_clause} WHERE id = ?",  # nosec B608
-            (*updates.values(), task_id),
-        )
+        # Per-column static SQL: each branch is a hardcoded literal so
+        # the column name can't be poisoned by a future kwarg passthrough.
+        if "title" in updates:
+            c.execute(
+                "UPDATE tasks SET title = ?, updated_at = ? WHERE id = ?",
+                (updates["title"], now, task_id),
+            )
+        if "description" in updates:
+            c.execute(
+                "UPDATE tasks SET description = ?, updated_at = ? WHERE id = ?",
+                (updates["description"], now, task_id),
+            )
+        if "priority" in updates:
+            c.execute(
+                "UPDATE tasks SET priority = ?, updated_at = ? WHERE id = ?",
+                (updates["priority"], now, task_id),
+            )
+        if "notes" in updates:
+            c.execute(
+                "UPDATE tasks SET notes = ?, updated_at = ? WHERE id = ?",
+                (updates["notes"], now, task_id),
+            )
+        if "status" in updates:
+            c.execute(
+                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                (updates["status"], now, task_id),
+            )
+        if "assigned_to" in updates:
+            c.execute(
+                "UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ?",
+                (updates["assigned_to"], now, task_id),
+            )
         c.commit()
     finally:
         c.close()

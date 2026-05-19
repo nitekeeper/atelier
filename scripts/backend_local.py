@@ -428,34 +428,46 @@ def upsert_session(
             (project_id, agent_id),
         ).fetchone()
         if existing is not None:
-            sets: list[str] = []
-            vals: list[Any] = []
-            for col, val in [
-                ("phase", phase),
-                ("current_tasks", current_tasks),
-                ("accomplished", accomplished),
-                ("next_action", next_action),
-                ("pm_notes", pm_notes),
-            ]:
-                if val is not None:
-                    sets.append(f"{col} = ?")
-                    vals.append(val)
+            # Per-column static SQL. Each branch is a hardcoded literal so
+            # the column identity comes from this file, never from kwargs.
+            now = _now()
+            existing_id = existing["id"]
+            if phase is not None:
+                c.execute(
+                    "UPDATE sessions SET phase = ?, updated_at = ? WHERE id = ?",
+                    (phase, now, existing_id),
+                )
+            if current_tasks is not None:
+                c.execute(
+                    "UPDATE sessions SET current_tasks = ?, updated_at = ? WHERE id = ?",
+                    (current_tasks, now, existing_id),
+                )
+            if accomplished is not None:
+                c.execute(
+                    "UPDATE sessions SET accomplished = ?, updated_at = ? WHERE id = ?",
+                    (accomplished, now, existing_id),
+                )
+            if next_action is not None:
+                c.execute(
+                    "UPDATE sessions SET next_action = ?, updated_at = ? WHERE id = ?",
+                    (next_action, now, existing_id),
+                )
+            if pm_notes is not None:
+                c.execute(
+                    "UPDATE sessions SET pm_notes = ?, updated_at = ? WHERE id = ?",
+                    (pm_notes, now, existing_id),
+                )
             # status is a kwarg with a default, so we have to be careful
             # not to flip an already-closed session back to in-progress
             # accidentally. Only update if the caller asked for a status
             # different from what's already there.
             if status != existing["status"]:
-                sets.append("status = ?")
-                vals.append(status)
-            sets.append("updated_at = ?")
-            vals.append(_now())
-            vals.append(existing["id"])
-            c.execute(
-                f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?",  # nosec B608
-                vals,
-            )
+                c.execute(
+                    "UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?",
+                    (status, now, existing_id),
+                )
             c.commit()
-            row = c.execute("SELECT * FROM sessions WHERE id = ?", (existing["id"],)).fetchone()
+            row = c.execute("SELECT * FROM sessions WHERE id = ?", (existing_id,)).fetchone()
         else:
             now = _now()
             cur = c.execute(
@@ -534,19 +546,30 @@ def update_task_status(*, task_id: int, status: str, notes: str | None = None) -
     now = _now()
     c = _conn()
     try:
-        sets = ["status = ?", "updated_at = ?"]
-        vals: list[Any] = [status, now]
+        # Per-column static SQL — every UPDATE statement below is a
+        # hardcoded literal, no dynamic SET-clause construction.
+        c.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+            (status, now, task_id),
+        )
         if notes is not None:
-            sets.append("notes = ?")
-            vals.append(notes)
+            c.execute(
+                "UPDATE tasks SET notes = ?, updated_at = ? WHERE id = ?",
+                (notes, now, task_id),
+            )
+        # claimed_at / completed_at use COALESCE so the FIRST transition
+        # wins — flipping a complete task back to in-progress doesn't
+        # clobber its original completion timestamp.
         if status == "in-progress":
-            sets.append("claimed_at = COALESCE(claimed_at, ?)")
-            vals.append(now)
+            c.execute(
+                "UPDATE tasks SET claimed_at = COALESCE(claimed_at, ?), updated_at = ? WHERE id = ?",
+                (now, now, task_id),
+            )
         elif status == "complete":
-            sets.append("completed_at = COALESCE(completed_at, ?)")
-            vals.append(now)
-        vals.append(task_id)
-        c.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals)  # nosec B608
+            c.execute(
+                "UPDATE tasks SET completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE id = ?",
+                (now, now, task_id),
+            )
         c.commit()
         row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     finally:

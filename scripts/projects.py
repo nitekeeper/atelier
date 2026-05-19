@@ -168,23 +168,29 @@ def update_project(
         )
 
     if updates:
-        updates["updated_at"] = _now()
         if mode_detector.detect_mode() == "memex":
             from scripts import backend_memex
 
+            updates["updated_at"] = _now()
             backend_memex._memex_core_update(
                 store="atelier", table="projects", row_id=project_id, changes=updates
             )
         else:
             from scripts import backend_local
 
+            now = _now()
             c = backend_local._conn()
             try:
-                sets = ", ".join(f"{k} = ?" for k in updates)
-                c.execute(
-                    f"UPDATE projects SET {sets} WHERE id = ?",  # nosec B608
-                    (*updates.values(), project_id),
-                )
+                if "name" in updates:
+                    c.execute(
+                        "UPDATE projects SET name = ?, updated_at = ? WHERE id = ?",
+                        (updates["name"], now, project_id),
+                    )
+                if "description" in updates:
+                    c.execute(
+                        "UPDATE projects SET description = ?, updated_at = ? WHERE id = ?",
+                        (updates["description"], now, project_id),
+                    )
                 c.commit()
             finally:
                 c.close()

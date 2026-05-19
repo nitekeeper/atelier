@@ -78,22 +78,28 @@ def update_role(db_path: str, role_id: int, **kwargs) -> dict | None:
         # No allowed keys supplied — avoid touching `updated_at` for a
         # payload-pollution-only update.
         return get_role(db_path, role_id)
-    updates["updated_at"] = _now()
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
+        updates["updated_at"] = _now()
         memex_stores = backend_memex._memex_module("stores")
         memex_stores.update(name="agents", table="roles", row_id=role_id, updates=updates)
         return get_role(db_path, role_id)
     from scripts import backend_local
 
+    now = _now()
     c = backend_local._conn()
     try:
-        sets = ", ".join(f"{k} = ?" for k in updates)
-        c.execute(
-            f"UPDATE roles SET {sets} WHERE id = ?",  # nosec B608
-            (*updates.values(), role_id),
-        )
+        if "name" in updates:
+            c.execute(
+                "UPDATE roles SET name = ?, updated_at = ? WHERE id = ?",
+                (updates["name"], now, role_id),
+            )
+        if "description" in updates:
+            c.execute(
+                "UPDATE roles SET description = ?, updated_at = ? WHERE id = ?",
+                (updates["description"], now, role_id),
+            )
         c.commit()
     finally:
         c.close()

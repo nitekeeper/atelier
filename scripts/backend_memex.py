@@ -104,62 +104,81 @@ def _ensure_memex_importable() -> None:
 
 @contextlib.contextmanager
 def _scripts_db_shim(plugin_root: Path):
-    """Temporarily expose Memex's `scripts/db.py` as `sys.modules['scripts.db']`
-    so Memex modules that do `from scripts.db import get_connection` at exec
-    time resolve to the Memex helper rather than crashing with
-    `ModuleNotFoundError` (Atelier retired its own `scripts/db.py` in T26).
+    """Temporarily expose Memex's `scripts/db.py`, `scripts/registry.py`,
+    and `scripts/paths.py` as `sys.modules['scripts.*']` entries so that
+    Memex modules exec'd by `_load_memex_module` resolve their intra-package
+    imports against Memex's own copies rather than crashing against Atelier's
+    empty `scripts/` package.
 
-    Memex's `scripts/db.py` is self-contained (no transitive `scripts.*`
-    imports — only stdlib), so we can load it directly via the same
-    file-path loader used for every other Memex module, install it as
-    `sys.modules['scripts.db']` for the duration of the `with` block,
-    and unconditionally restore the prior `sys.modules` state on exit.
+    Affected imports in Memex's `stores.py` (and siblings):
+      - `from scripts.db import get_connection` → `scripts.db`
+      - `from scripts import registry`           → `scripts.registry`
+      - `from scripts.paths import DB_DIR`       → `scripts.paths`
 
-    Restoration is unconditional: if `scripts.db` was absent before the
-    block (the common case post-T26), we remove our injection; if it
-    was present (an unlikely paranoia case — another shim is already
-    active), we put the prior object back. Either way the module table
-    looks the same before and after, so concurrent or nested loads in
-    the same process are isolated.
+    All three are loaded via `_load_memex_module` (file-path loader, cached)
+    before any injection, so the lru_cache absorbs the spec/exec cost on the
+    first call and subsequent shim activations are free. Loading order:
+      1. `db`       — stdlib-only, no `scripts.*` deps; loaded without a shim.
+      2. `paths`    — stdlib-only; nested `_scripts_db_shim` is a no-op.
+      3. `registry` — depends on `scripts.db`; nested shim injects db
+                      temporarily during its own exec then restores — correct
+                      because db was already cached in step 1.
 
-    If the plugin root has no `scripts/db.py` (synthetic test fixtures
-    that mock out a minimal Memex install), the shim degrades to a
-    no-op — the module being loaded inside the `with` block is
-    presumably also self-contained, so leaving `scripts.db` absent is
-    correct.
+    Restoration is unconditional and per-key: for each injected key we
+    snapshot the pre-shim state (present/absent + value) and restore it on
+    exit.  If a key was absent before the block (the common case), we `pop`
+    it; if another shim was already active (paranoia case), we put back the
+    prior object.  Either way the module table is bit-for-bit identical
+    before and after, so concurrent or nested activations are isolated.
 
-    Used by `_load_memex_module` around `spec.loader.exec_module` for
-    every Memex module except `db` itself (the shim's own dependency —
-    loading `db` does not need the shim because its imports are all
-    stdlib).
+    If `db.py` is absent from the plugin root (synthetic test fixtures), the
+    shim degrades to a no-op — modules loaded inside the `with` block are
+    presumably self-contained, so leaving `scripts.*` absent is correct.
     """
-    # Load memex's db.py via the same file-path loader to keep the
-    # "no Atelier scripts.* dependency" property of the shim — calling
-    # `_load_memex_module(plugin_root, "db")` is intentional: it goes
-    # through the lru_cache so we only pay the spec/exec cost once.
-    # If the plugin tree has no db.py (test fixtures), skip the shim;
-    # any module that genuinely needs `scripts.db` will fail at its
-    # own import site with the original ModuleNotFoundError, which is
-    # the correct surfacing for that case.
     try:
         memex_db = _load_memex_module(plugin_root, "db")
     except ImportError:
         yield None
         return
-    saved_present = "scripts.db" in sys.modules
-    saved = sys.modules.get("scripts.db")
-    sys.modules["scripts.db"] = memex_db
+
+    # Load paths and registry now (before any injection) so the nested
+    # _scripts_db_shim calls they trigger leave sys.modules clean.
+    # Missing submodules (stripped test fixtures) are silently skipped —
+    # any genuine dependency on them surfaces at the module's own import site.
+    memex_paths: ModuleType | None = None
+    memex_registry: ModuleType | None = None
+    try:
+        memex_paths = _load_memex_module(plugin_root, "paths")
+    except ImportError:
+        pass
+    try:
+        memex_registry = _load_memex_module(plugin_root, "registry")
+    except ImportError:
+        pass
+
+    # Snapshot current sys.modules state for every key we are about to inject,
+    # then inject.  Keys with None values (module failed to load) are skipped.
+    _shims: dict[str, ModuleType] = {}
+    if memex_db is not None:
+        _shims["scripts.db"] = memex_db
+    if memex_paths is not None:
+        _shims["scripts.paths"] = memex_paths
+    if memex_registry is not None:
+        _shims["scripts.registry"] = memex_registry
+
+    _saved: dict[str, tuple[bool, object]] = {
+        key: (key in sys.modules, sys.modules.get(key)) for key in _shims
+    }
+    for key, mod in _shims.items():
+        sys.modules[key] = mod
     try:
         yield memex_db
     finally:
-        if saved_present:
-            sys.modules["scripts.db"] = saved
-        else:
-            # The pre-shim state had no `scripts.db` entry; remove our
-            # injection so the global module table is bit-for-bit
-            # identical to its pre-shim state. `pop` with default avoids
-            # KeyError if a concurrent loader already cleaned up.
-            sys.modules.pop("scripts.db", None)
+        for key, (was_present, prior) in _saved.items():
+            if was_present:
+                sys.modules[key] = prior  # type: ignore[assignment]
+            else:
+                sys.modules.pop(key, None)
 
 
 @functools.cache

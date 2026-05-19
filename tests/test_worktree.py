@@ -191,7 +191,6 @@ class TestMergeBack:
         merge_back(wt_path)
 
         # dirty.txt should appear in main's history after merge
-        show = _git(["show", "--name-only", "HEAD"], main_repo)
         # The merge commit or the preceding commit should contain dirty.txt
         log = _git(["log", "--all", "--name-only", "--pretty=format:"], main_repo)
         assert "dirty.txt" in log.stdout

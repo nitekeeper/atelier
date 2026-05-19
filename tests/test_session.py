@@ -132,7 +132,7 @@ def test_list_sessions_returns_most_recent_first(db_path, project_id):
 
 def test_list_sessions_respects_limit(db_path, project_id):
     for i in range(5):
-        write_session(db_path, project_id, "pm-1", f"design:open", "complete",
+        write_session(db_path, project_id, "pm-1", "design:open", "complete",
                       pm_notes=f"session {i}")
     sessions = list_sessions(db_path, project_id, limit=3)
     assert len(sessions) == 3

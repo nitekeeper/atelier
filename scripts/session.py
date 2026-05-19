@@ -376,12 +376,18 @@ if __name__ == "__main__":
         parser.add_argument("--closed-at")
         args = parser.parse_args(sys.argv[2:])
         kwargs = {}
-        if args.phase:         kwargs["phase"] = args.phase
-        if args.status:        kwargs["status"] = args.status
-        if args.accomplished:  kwargs["accomplished"] = args.accomplished
-        if args.next_action:   kwargs["next_action"] = args.next_action
-        if args.notes:         kwargs["pm_notes"] = args.notes
-        if args.closed_at:     kwargs["closed_at"] = args.closed_at
+        if args.phase:
+            kwargs["phase"] = args.phase
+        if args.status:
+            kwargs["status"] = args.status
+        if args.accomplished:
+            kwargs["accomplished"] = args.accomplished
+        if args.next_action:
+            kwargs["next_action"] = args.next_action
+        if args.notes:
+            kwargs["pm_notes"] = args.notes
+        if args.closed_at:
+            kwargs["closed_at"] = args.closed_at
         print(json.dumps(update_session(db_path, args.session_id, **kwargs),
                          indent=2))
 

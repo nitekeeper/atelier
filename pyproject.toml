@@ -50,4 +50,8 @@ skips = [
     "B404",   # blacklist-import-subprocess — Atelier shells to git by design
     "B603",   # subprocess-without-shell-equals-true — this IS the safe form (no shell)
     "B607",   # start-process-with-partial-path — `git` resolves via PATH; intended
+    "B608",   # hardcoded-sql-expressions — Atelier builds SQL like
+              #   `f"INSERT INTO {table}..."` where `table` is an internal hardcoded
+              #   identifier validated against a fixed set (see scripts/backend_memex.py
+              #   safe_identifier checks). User-supplied values are always parameterized.
 ]

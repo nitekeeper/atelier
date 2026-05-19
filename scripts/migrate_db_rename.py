@@ -41,7 +41,7 @@ def check(directory: Path) -> int:
         return 0
 
     if has_atelier and not has_memex:
-        print(f"Found only atelier.db — migration to memex.db not yet done.")
+        print("Found only atelier.db — migration to memex.db not yet done.")
         print(f"To migrate: copy {atelier} to {memex}, then delete {atelier}.")
         return 0
 

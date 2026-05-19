@@ -9,9 +9,11 @@ content-addressable copy and is orthogonal to the workspace-local
 .ai/meetings/ file that humans browse and grep."""
 
 from __future__ import annotations
+
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
 from scripts import backend, mode_detector
 
 
@@ -248,7 +250,8 @@ def update_meeting(db_path: str, meeting_id: int, **kwargs) -> dict | None:
     c = backend_local._conn()
     sets = ", ".join(f"{k} = ?" for k in updates)
     c.execute(
-        f"UPDATE meeting_minutes SET {sets} WHERE id = ?", tuple(updates.values()) + (meeting_id,)
+        f"UPDATE meeting_minutes SET {sets} WHERE id = ?",  # nosec B608
+        (*tuple(updates.values()), meeting_id),
     )
     c.commit()
     row = c.execute("SELECT * FROM meeting_minutes WHERE id = ?", (meeting_id,)).fetchone()
@@ -341,9 +344,9 @@ def search_meetings(db_path: str, query: str) -> list[dict]:
 
 
 if __name__ == "__main__":
-    import sys
-    import json
     import argparse
+    import json
+    import sys
 
     db_path = ".ai/atelier.db"
     cmd = sys.argv[1]

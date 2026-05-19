@@ -21,7 +21,6 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-
 # ── timestamp helpers ──────────────────────────────────────────────────────
 
 
@@ -383,9 +382,7 @@ def should_prompt(ai_dir: Path) -> bool:
         return False
     if (ai_dir / "atelier.migrated").exists():
         return False
-    if (ai_dir / "atelier.local-only").exists():
-        return False
-    return True
+    return not (ai_dir / "atelier.local-only").exists()
 
 
 def row_summary(local_db: Path) -> dict:
@@ -404,7 +401,7 @@ def row_summary(local_db: Path) -> dict:
             "project_documents",
         ):
             try:
-                row = c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                row = c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # nosec B608
                 summary[table] = int(row[0]) if row else 0
             except sqlite3.OperationalError:
                 summary[table] = 0

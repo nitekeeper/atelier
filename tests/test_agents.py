@@ -9,13 +9,12 @@ coverage lives in the backend_memex / backend dispatch suites.
 """
 
 from __future__ import annotations
+
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from scripts.migrate import apply_migrations
-from scripts.roles import create_role
 from scripts.agents import (
     create_agent,
     delete_agent,
@@ -24,6 +23,8 @@ from scripts.agents import (
     search_agents,
     update_agent,
 )
+from scripts.migrate import apply_migrations
+from scripts.roles import create_role
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 

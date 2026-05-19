@@ -9,6 +9,7 @@ same so the wasted work is benign.
 """
 
 from __future__ import annotations
+
 import json
 from pathlib import Path
 from typing import Literal
@@ -86,9 +87,7 @@ def _memex_plugin_reachable() -> bool:
     if manifest_data.get("name") != "memex":
         return False
     version = _parse_version_tuple(manifest_data.get("version", ""))
-    if version is None or version < _MEMEX_API_FLOOR:
-        return False
-    return True
+    return not (version is None or version < _MEMEX_API_FLOOR)
 
 
 def detect_mode() -> Mode:
@@ -100,9 +99,7 @@ def detect_mode() -> Mode:
     if _cached is not None:
         return _cached
     home = _memex_home()
-    if not home.exists() or not (home / "registry.json").exists():
-        _cached = "local"
-    elif not _memex_plugin_reachable():
+    if not home.exists() or not (home / "registry.json").exists() or not _memex_plugin_reachable():
         _cached = "local"
     else:
         _cached = "memex"

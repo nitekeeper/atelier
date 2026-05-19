@@ -1,12 +1,14 @@
 import os
 import subprocess
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 
 def test_prompt_non_interactive_raises(mocker):
-    import scripts.preflight as pf
     from importlib import reload
+
+    import scripts.preflight as pf
 
     reload(pf)
     mocker.patch("sys.stdin.isatty", return_value=False)
@@ -15,8 +17,9 @@ def test_prompt_non_interactive_raises(mocker):
 
 
 def test_check_linux_tmux_timeout(mocker):
-    import scripts.preflight as pf
     from importlib import reload
+
+    import scripts.preflight as pf
 
     reload(pf)
     mocker.patch("sys.platform", "linux")
@@ -29,6 +32,7 @@ def test_check_linux_tmux_timeout(mocker):
 def test_get_tmux_cmd_linux(mocker):
     mocker.patch("sys.platform", "linux")
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -38,6 +42,7 @@ def test_get_tmux_cmd_linux(mocker):
 def test_get_tmux_cmd_macos(mocker):
     mocker.patch("sys.platform", "darwin")
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -48,6 +53,7 @@ def test_get_tmux_cmd_windows_default(mocker):
     mocker.patch("sys.platform", "win32")
     mocker.patch.dict(os.environ, {}, clear=True)
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -58,6 +64,7 @@ def test_get_tmux_cmd_windows_with_distro(mocker):
     mocker.patch("sys.platform", "win32")
     mocker.patch.dict(os.environ, {"ATELIER_WSL_DISTRO": "Ubuntu"})
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -68,6 +75,7 @@ def test_check_windows_wsl_missing(mocker):
     mocker.patch("sys.platform", "win32")
     mocker.patch("subprocess.run", return_value=MagicMock(returncode=1))
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -79,6 +87,7 @@ def test_check_windows_wsl_not_on_path(mocker):
     mocker.patch("sys.platform", "win32")
     mocker.patch("subprocess.run", side_effect=FileNotFoundError)
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -90,6 +99,7 @@ def test_check_linux_tmux_present(mocker):
     mocker.patch("sys.platform", "linux")
     mocker.patch("subprocess.run", return_value=MagicMock(returncode=0))
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -99,6 +109,7 @@ def test_check_linux_tmux_present(mocker):
 def test_check_linux_tmux_missing_user_accepts(mocker):
     mocker.patch("sys.platform", "linux")
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -118,6 +129,7 @@ def test_check_linux_tmux_missing_user_accepts(mocker):
 def test_check_linux_tmux_missing_user_declines(mocker):
     mocker.patch("sys.platform", "linux")
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -135,6 +147,7 @@ def test_check_macos_tmux_missing_user_accepts(mocker):
         MagicMock(returncode=0),  # brew install succeeds
     ]
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -152,6 +165,7 @@ def test_check_windows_tmux_missing_user_accepts(mocker):
         MagicMock(returncode=0),  # wsl -- apt-get install succeeds
     ]
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -168,6 +182,7 @@ def test_check_windows_wsl_distro_env_var(mocker):
         MagicMock(returncode=0),  # wsl -d Ubuntu -- tmux -V passes
     ]
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -179,6 +194,7 @@ def test_check_windows_wsl_distro_env_var(mocker):
 def test_check_linux_tmux_not_on_path_user_accepts(mocker):
     mocker.patch("sys.platform", "linux")
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -198,6 +214,7 @@ def test_check_linux_tmux_not_on_path_user_accepts(mocker):
 def test_check_linux_tmux_not_on_path_user_declines(mocker):
     mocker.patch("sys.platform", "linux")
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -210,6 +227,7 @@ def test_check_linux_tmux_not_on_path_user_declines(mocker):
 def test_check_macos_tmux_not_on_path_user_accepts(mocker):
     mocker.patch("sys.platform", "darwin")
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -225,6 +243,7 @@ def test_check_macos_tmux_not_on_path_user_accepts(mocker):
 def test_check_macos_tmux_not_on_path_user_declines(mocker):
     mocker.patch("sys.platform", "darwin")
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -237,6 +256,7 @@ def test_check_macos_tmux_not_on_path_user_declines(mocker):
 def test_check_macos_brew_not_installed(mocker):
     mocker.patch("sys.platform", "darwin")
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -252,6 +272,7 @@ def test_check_macos_brew_not_installed(mocker):
 
 def test_detect_package_manager_apt(mocker):
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -265,6 +286,7 @@ def test_detect_package_manager_apt(mocker):
 
 def test_detect_package_manager_dnf(mocker):
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)
@@ -277,6 +299,7 @@ def test_detect_package_manager_dnf(mocker):
 
 def test_detect_package_manager_pacman(mocker):
     from importlib import reload
+
     import scripts.preflight as pf
 
     reload(pf)

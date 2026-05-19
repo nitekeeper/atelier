@@ -11,7 +11,6 @@ from pathlib import Path
 from scripts.git_utils import git as _git
 from scripts.platform_utils import safe_rmtree
 
-
 # ── Public functions ───────────────────────────────────────────────────────
 
 
@@ -149,7 +148,7 @@ def sync_worktree_with_main(worktree_dir: Path) -> str:
 
     Returns a human-readable status string; never raises.
     """
-    from scripts.worktree import get_current_branch, classify_status
+    from scripts.worktree import classify_status, get_current_branch
 
     wt_branch = get_current_branch(worktree_dir)
     status = _git(["status", "--porcelain"], worktree_dir, check=False)
@@ -211,7 +210,7 @@ if __name__ == "__main__":
         print(f"BRANCH={branch}")
 
     elif cmd == "check-destructive":
-        from scripts.destructive_check import get_diff, detect_destructive
+        from scripts.destructive_check import detect_destructive, get_diff
 
         clone = Path(sys.argv[2])
         diff = get_diff(clone)

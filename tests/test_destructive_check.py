@@ -1,14 +1,11 @@
 """Tests for scripts/destructive_check.py"""
 
 import textwrap
-from pathlib import Path
-
-import pytest
 
 from scripts.destructive_check import (
-    detect_destructive,
     _deleted_file_paths,
     _is_imported_by_any_file,
+    detect_destructive,
 )
 
 

@@ -8,12 +8,11 @@ from pathlib import Path
 
 import pytest
 
-
 # ── Git fixtures ───────────────────────────────────────────────────────────
 
 
 def _git(args: list[str], cwd: Path) -> None:
-    subprocess.run(["git"] + args, cwd=cwd, check=True, capture_output=True, encoding="utf-8")
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, encoding="utf-8")
 
 
 @pytest.fixture
@@ -150,7 +149,7 @@ class TestWriteMinutes:
 
 class TestCommitCycle:
     def test_commit_message_contains_required_fields(self, tmp_path, bare_remote, source_repo):
-        from scripts.self_improve import clone_repo, create_branch, commit_cycle
+        from scripts.self_improve import clone_repo, commit_cycle, create_branch
 
         dest = tmp_path / "clone"
         clone_repo(str(bare_remote), dest)
@@ -180,7 +179,7 @@ class TestCommitCycle:
         assert "Dr. Priya Nair" in msg
 
     def test_commit_stages_all_changes(self, tmp_path, bare_remote, source_repo):
-        from scripts.self_improve import clone_repo, create_branch, commit_cycle
+        from scripts.self_improve import clone_repo, commit_cycle, create_branch
 
         dest = tmp_path / "clone"
         clone_repo(str(bare_remote), dest)
@@ -263,11 +262,11 @@ class TestPullMain:
 class TestAutoMergeToMain:
     def test_merges_with_dirty_main_stashes_and_restores(self, tmp_path, bare_remote, source_repo):
         from scripts.self_improve import (
+            auto_merge_to_main,
             clone_repo,
+            commit_cycle,
             create_branch,
             push_branch,
-            auto_merge_to_main,
-            commit_cycle,
         )
 
         dest = tmp_path / "clone"
@@ -292,7 +291,7 @@ class TestAutoMergeToMain:
         assert (source_repo / "wip.txt").read_text() == "work in progress"
 
     def test_merges_branch_into_main_in_source_repo(self, tmp_path, bare_remote, source_repo):
-        from scripts.self_improve import clone_repo, create_branch, push_branch, auto_merge_to_main
+        from scripts.self_improve import auto_merge_to_main, clone_repo, create_branch, push_branch
 
         dest = tmp_path / "clone"
         clone_repo(str(bare_remote), dest)

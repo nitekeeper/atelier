@@ -21,18 +21,17 @@ import pytest
 
 from scripts.migrate import apply_migrations
 from scripts.tasks import (
-    create_task,
-    get_task,
-    update_task,
-    delete_task,
+    _coerce_priority,
     assign_task,
     claim_task,
     complete_task,
+    create_task,
+    delete_task,
+    get_task,
     list_tasks,
     search_tasks,
-    _coerce_priority,
+    update_task,
 )
-
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 

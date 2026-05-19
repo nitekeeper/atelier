@@ -33,11 +33,11 @@ priority surface is advisory; a typo shouldn't crash a task create.
 """
 
 from __future__ import annotations
+
 import logging
 from datetime import datetime, timezone
 
 from scripts import backend, mode_detector
-
 
 _log = logging.getLogger(__name__)
 
@@ -193,7 +193,7 @@ def update_task(db_path: str, task_id: int, **kwargs) -> dict:
     c = backend_local._conn()
     try:
         c.execute(
-            f"UPDATE tasks SET {set_clause} WHERE id = ?",
+            f"UPDATE tasks SET {set_clause} WHERE id = ?",  # nosec B608
             (*updates.values(), task_id),
         )
         c.commit()
@@ -344,7 +344,7 @@ def list_tasks(
     c = backend_local._conn()
     try:
         rows = c.execute(
-            f"SELECT * FROM tasks {where} ORDER BY priority DESC, created_at",
+            f"SELECT * FROM tasks {where} ORDER BY priority DESC, created_at",  # nosec B608
             params,
         ).fetchall()
     finally:
@@ -382,7 +382,7 @@ def search_tasks(
     c = backend_local._conn()
     try:
         rows = c.execute(
-            f"SELECT * FROM tasks {where} ORDER BY priority DESC, created_at",
+            f"SELECT * FROM tasks {where} ORDER BY priority DESC, created_at",  # nosec B608
             params,
         ).fetchall()
     finally:
@@ -391,9 +391,9 @@ def search_tasks(
 
 
 if __name__ == "__main__":
-    import sys
-    import json
     import argparse
+    import json
+    import sys
 
     db_path = ".ai/memex.db"
     cmd = sys.argv[1]

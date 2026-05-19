@@ -1,10 +1,12 @@
 # tests/test_seed_roles.py
 import json
-import pytest
 from pathlib import Path
+
+import pytest
+
 from scripts.migrate import apply_migrations
 from scripts.seed_data import load_role_seed
-from scripts.seed_roles import seed, ROLES
+from scripts.seed_roles import ROLES, seed
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"

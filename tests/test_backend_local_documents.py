@@ -7,6 +7,7 @@ own tables, NOT in project_documents).
 """
 
 from __future__ import annotations
+
 import sqlite3
 from pathlib import Path
 
@@ -14,7 +15,6 @@ import pytest
 
 from scripts import backend_local
 from scripts.migrate import apply_migrations
-
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 

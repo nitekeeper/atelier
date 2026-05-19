@@ -27,7 +27,6 @@ from pathlib import Path
 
 import pytest
 
-
 # Hermetic Memex fixture — vendored stub under tests/fixtures/memex_min/.
 # Trimmed so it exposes only what bootstrap.py actually needs (scripts.db,
 # scripts.registry, scripts.stores, scripts.roles, scripts.agents) plus
@@ -171,7 +170,7 @@ def test_bootstrap_seeds_roles_agents_and_creates_store(memex_install):
     Also asserts the marker payload carries `mode == "memex"`, the
     matching atelier version, and `memex_version`.
     """
-    from scripts.bootstrap import run_bootstrap, _atelier_version
+    from scripts.bootstrap import _atelier_version, run_bootstrap
 
     result = run_bootstrap()
 
@@ -297,7 +296,7 @@ def test_run_bootstrap_rejects_old_memex_via_full_path(memex_install):
     manifest.write_text(json.dumps({"name": "memex", "version": "2.1.0"}))
 
     # Clear caches so the new manifest version is read.
-    from scripts import mode_detector, backend_memex
+    from scripts import backend_memex, mode_detector
 
     mode_detector._clear_cache()
     backend_memex._load_memex_module.cache_clear()
@@ -344,7 +343,7 @@ def test_bootstrap_fails_when_memex_not_initialized(tmp_path, fake_home, monkeyp
     )
     # Note: no registry.json — _refuse_half_installed_memex will raise.
 
-    from scripts import mode_detector, backend_memex
+    from scripts import backend_memex, mode_detector
 
     mode_detector._clear_cache()
     backend_memex._load_memex_module.cache_clear()
@@ -369,7 +368,7 @@ def test_inner_memex_not_initialized_catch_reformats(memex_install, monkeypatch)
     and assert the user-facing message is the clean RuntimeError (not
     the raw MemexNotInitializedError).
     """
-    from scripts import bootstrap, mode_detector, backend_memex
+    from scripts import backend_memex, bootstrap, mode_detector
 
     # Disable the outer half-installed guard so we reach the inner catch.
     monkeypatch.setattr(bootstrap, "_refuse_half_installed_memex", lambda: None)
@@ -439,7 +438,7 @@ def test_bootstrap_local_mode_creates_atelier_db(local_workspace):
     Also asserts the marker payload carries `mode == "local"` and the
     matching atelier version.
     """
-    from scripts.bootstrap import run_bootstrap, _atelier_version
+    from scripts.bootstrap import _atelier_version, run_bootstrap
 
     result = run_bootstrap()
 

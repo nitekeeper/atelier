@@ -1,6 +1,6 @@
 import sqlite3
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 
 MIGRATIONS_DIR: Path = Path(__file__).parent.parent / "migrations"
 

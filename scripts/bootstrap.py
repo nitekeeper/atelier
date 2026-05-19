@@ -35,8 +35,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from scripts import seed_data, mode_detector
-
+from scripts import mode_detector, seed_data
 
 # Atelier Tier 2 writes require Memex v2.2.0+ (caller-built
 # `librarian_output` + `librarian.validate_output`). Below this floor we

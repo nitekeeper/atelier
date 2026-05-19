@@ -10,7 +10,6 @@ import pytest
 from scripts import workflow
 from scripts.migrate import apply_migrations
 
-
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 

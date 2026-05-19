@@ -43,10 +43,10 @@ script lands (Plan 3 / spec §10).
 """
 
 from __future__ import annotations
+
 from collections.abc import Sequence
 from types import ModuleType
 from typing import NoReturn
-
 
 # ── Backend resolution ─────────────────────────────────────────────────────
 

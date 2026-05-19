@@ -107,7 +107,7 @@ def update_agent(db_path: str, agent_id: str, **kwargs) -> dict | None:
     try:
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         c.execute(
-            f"UPDATE agents SET {set_clause} WHERE id = ?",
+            f"UPDATE agents SET {set_clause} WHERE id = ?",  # nosec B608
             (*fields.values(), agent_id),
         )
         c.commit()
@@ -204,9 +204,9 @@ def search_agents(db_path: str, query: str, role_id: int | None = None) -> list[
 
 
 if __name__ == "__main__":
-    import sys
-    import json
     import argparse
+    import json
+    import sys
 
     db_path = ".ai/atelier.db"
     cmd = sys.argv[1]

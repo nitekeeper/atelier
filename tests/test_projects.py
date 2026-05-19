@@ -11,21 +11,22 @@ ignored by the backend.
 """
 
 from __future__ import annotations
+
 from pathlib import Path
 
 import pytest
 
-from scripts.migrate import apply_migrations
-from scripts.roles import create_role
 from scripts.agents import create_agent
+from scripts.migrate import apply_migrations
 from scripts.projects import (
     create_project,
-    get_project,
-    update_project,
     delete_project,
+    get_project,
     list_projects,
     search_projects,
+    update_project,
 )
+from scripts.roles import create_role
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
@@ -141,7 +142,7 @@ def test_slug_parity_with_backend_local():
     via the script is reachable by the slug a direct backend caller
     would generate. If this ever drifts the docstring lies.
     """
-    from scripts import projects, backend_local
+    from scripts import backend_local, projects
 
     for name in (
         "Foo Bar",

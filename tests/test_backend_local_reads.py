@@ -6,6 +6,7 @@ Tests `backend_local.find_documents` / `get_task` / `list_tasks` /
 """
 
 from __future__ import annotations
+
 import sqlite3
 from pathlib import Path
 
@@ -13,7 +14,6 @@ import pytest
 
 from scripts import backend_local
 from scripts.migrate import apply_migrations
-
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 

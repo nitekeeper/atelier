@@ -21,12 +21,12 @@ and Claude continues with reduced context.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
-
 
 # Path to session.py relative to this hook file.
 # hooks/ is at atelier-root/hooks/; scripts/ is at atelier-root/scripts/.
@@ -158,10 +158,8 @@ def main() -> None:
                 print(guidance, flush=True)
 
     # Mark announced — suppress further invocations this session.
-    try:
+    with contextlib.suppress(OSError):
         flag.write_text("announced", encoding="utf-8")
-    except OSError:
-        pass  # Non-fatal
 
 
 if __name__ == "__main__":

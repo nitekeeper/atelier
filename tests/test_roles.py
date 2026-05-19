@@ -9,6 +9,7 @@ coverage lives in the backend_memex / backend dispatch suites.
 """
 
 from __future__ import annotations
+
 from pathlib import Path
 from unittest.mock import patch
 

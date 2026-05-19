@@ -91,7 +91,7 @@ def update_role(db_path: str, role_id: int, **kwargs) -> dict | None:
     try:
         sets = ", ".join(f"{k} = ?" for k in updates)
         c.execute(
-            f"UPDATE roles SET {sets} WHERE id = ?",
+            f"UPDATE roles SET {sets} WHERE id = ?",  # nosec B608
             (*updates.values(), role_id),
         )
         c.commit()
@@ -166,8 +166,8 @@ def search_roles(db_path: str, query: str) -> list[dict]:
 
 
 if __name__ == "__main__":
-    import sys
     import json
+    import sys
 
     db_path = ".ai/atelier.db"
     cmd = sys.argv[1]

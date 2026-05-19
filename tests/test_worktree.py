@@ -6,13 +6,12 @@ from pathlib import Path
 
 import pytest
 
-
 # ── Git helpers ───────────────────────────────────────────────────────────
 
 
 def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git"] + args,
+        ["git", *args],
         cwd=cwd,
         check=True,
         capture_output=True,
@@ -23,7 +22,7 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
 
 def _git_no_check(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git"] + args,
+        ["git", *args],
         cwd=cwd,
         check=False,
         capture_output=True,
@@ -66,7 +65,7 @@ class TestDetectWorktree:
         assert "worktrees" not in git_dir.replace("\\", "/")
 
     def test_linked_worktree_is_detected(self, repo_with_worktree):
-        main_repo, wt_path = repo_with_worktree
+        _main_repo, wt_path = repo_with_worktree
         from scripts.worktree import detect_worktree
 
         is_wt, git_dir = detect_worktree(wt_path)
@@ -85,7 +84,7 @@ class TestGetCurrentBranch:
         assert branch == "main"
 
     def test_returns_worktree_branch_name(self, repo_with_worktree):
-        main_repo, wt_path = repo_with_worktree
+        _main_repo, wt_path = repo_with_worktree
         from scripts.worktree import get_current_branch
 
         branch = get_current_branch(wt_path)
@@ -244,7 +243,7 @@ class TestMergeBack:
 
     def test_detached_head_exits_cleanly(self, repo_with_worktree):
         """Worktree in detached HEAD state should abort with exit code 1."""
-        main_repo, wt_path = repo_with_worktree
+        _main_repo, wt_path = repo_with_worktree
         commit_hash = _git(["rev-parse", "HEAD"], wt_path).stdout.strip()
         _git_no_check(["checkout", commit_hash], wt_path)
 

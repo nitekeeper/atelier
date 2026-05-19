@@ -23,14 +23,13 @@ short-lived nature of write operations.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import sqlite3
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
-
+from typing import Any
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -452,7 +451,7 @@ def upsert_session(
             vals.append(_now())
             vals.append(existing["id"])
             c.execute(
-                f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?",
+                f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?",  # nosec B608
                 vals,
             )
             c.commit()
@@ -547,7 +546,7 @@ def update_task_status(*, task_id: int, status: str, notes: str | None = None) -
             sets.append("completed_at = COALESCE(completed_at, ?)")
             vals.append(now)
         vals.append(task_id)
-        c.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals)
+        c.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals)  # nosec B608
         c.commit()
         row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     finally:
@@ -634,7 +633,7 @@ def find_documents(
         where.append("subdomain = ?")
         params.append(subdomain)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
-    sql = f"SELECT * FROM project_documents {clause} ORDER BY created_at DESC, id DESC LIMIT ?"
+    sql = f"SELECT * FROM project_documents {clause} ORDER BY created_at DESC, id DESC LIMIT ?"  # nosec B608
     params.append(limit)
     c = _conn()
     try:
@@ -703,7 +702,7 @@ def lookup_index_id_by_source_ref(*, source_ref: str) -> int | None:
     try:
         for table in ("project_documents", "tasks", "meeting_minutes"):
             row = c.execute(
-                f"SELECT id FROM {table} WHERE source_ref = ? LIMIT 1",
+                f"SELECT id FROM {table} WHERE source_ref = ? LIMIT 1",  # nosec B608
                 (source_ref,),
             ).fetchone()
             if row is not None:

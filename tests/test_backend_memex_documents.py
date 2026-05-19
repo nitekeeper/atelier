@@ -10,7 +10,8 @@ contract, and retry on DuplicateKeyError per spec §6.4.
 import json as _json
 import sys
 import types
-from datetime import datetime as _datetime, timezone as _tz
+from datetime import datetime as _datetime
+from datetime import timezone as _tz
 
 import pytest
 
@@ -740,10 +741,7 @@ def test_auto_part_of_relation_when_project_id_in_metadata(fake_memex, monkeypat
         backend_memex,
         "_auto_relations",
         lambda md, r: (
-            list(r or [])
-            + [
-                {"rel_type": "part_of", "to_index_id": "proj-idx-1"},
-            ]
+            [*list(r or []), {"rel_type": "part_of", "to_index_id": "proj-idx-1"}]
             if (md or {}).get("project_id")
             else list(r or [])
         ),

@@ -16,6 +16,7 @@ acceptable here because the facade explicitly defers these to v1.2.0
 """
 
 from __future__ import annotations
+
 import re
 import warnings
 from datetime import datetime, timezone
@@ -181,7 +182,7 @@ def update_project(
             try:
                 sets = ", ".join(f"{k} = ?" for k in updates)
                 c.execute(
-                    f"UPDATE projects SET {sets} WHERE id = ?",
+                    f"UPDATE projects SET {sets} WHERE id = ?",  # nosec B608
                     (*updates.values(), project_id),
                 )
                 c.commit()
@@ -277,9 +278,9 @@ def search_projects(db_path: str, query: str) -> list[dict]:
 
 
 if __name__ == "__main__":
-    import sys
-    import json
     import argparse
+    import json
+    import sys
 
     # v1.1.0 default — kept as a literal for signature parity with the
     # other CLI entrypoints, but `db_path` is ignored by every function

@@ -47,7 +47,7 @@ def create_workspace(name: str, project_root: str):
 def list_workspaces() -> list[str]:
     if sys.platform == "win32":
         result = subprocess.run(
-            preflight.get_tmux_cmd() + ["list-sessions", "-F", "#{session_name}"],
+            [*preflight.get_tmux_cmd(), "list-sessions", "-F", "#{session_name}"],
             capture_output=True,
             text=True,
         )
@@ -95,7 +95,7 @@ def create_room(workspace: str, room_name: str):
 def list_rooms(workspace: str) -> list[str]:
     if sys.platform == "win32":
         result = subprocess.run(
-            preflight.get_tmux_cmd() + ["list-windows", "-t", workspace, "-F", "#{window_name}"],
+            [*preflight.get_tmux_cmd(), "list-windows", "-t", workspace, "-F", "#{window_name}"],
             capture_output=True,
             text=True,
         )
@@ -234,8 +234,8 @@ def workspace_root() -> Path:
 
 
 if __name__ == "__main__":
-    import sys
     import argparse
+    import sys
 
     cmd = sys.argv[1]
 

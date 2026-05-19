@@ -16,7 +16,6 @@ import pytest
 
 from scripts.migrate import apply_migrations
 
-
 MIGRATIONS = Path(__file__).parent.parent / "migrations"
 
 
@@ -46,11 +45,11 @@ def populated_local_project(tmp_path, monkeypatch):
     mode_detector._clear_cache()
     monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
 
-    from scripts.roles import create_role
     from scripts.agents import create_agent
-    from scripts.projects import create_project
-    from scripts.tasks import create_task
     from scripts.meetings import create_meeting
+    from scripts.projects import create_project
+    from scripts.roles import create_role
+    from scripts.tasks import create_task
 
     role = create_role(str(db), name="Product Manager", description="PM")
     create_agent(str(db), id="atelier-pm-1", name="PM", role_id=role["id"], profile="pm")

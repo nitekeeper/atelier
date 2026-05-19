@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import sys
 from datetime import datetime, timezone
+
 from scripts import backend
 
 
@@ -87,7 +88,7 @@ def _patch_session(session_id: int, updates: dict) -> dict | None:
     try:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         c.execute(
-            f"UPDATE sessions SET {set_clause} WHERE id = ?",
+            f"UPDATE sessions SET {set_clause} WHERE id = ?",  # nosec B608
             (*updates.values(), session_id),
         )
         c.commit()
@@ -328,7 +329,7 @@ def prune_sessions(db_path: str, project_id: int, keep: int) -> int:
             return 0
         placeholders = ",".join("?" * len(keep_ids))
         cur = c.execute(
-            f"DELETE FROM sessions WHERE project_id = ? AND id NOT IN ({placeholders})",
+            f"DELETE FROM sessions WHERE project_id = ? AND id NOT IN ({placeholders})",  # nosec B608
             (project_id, *keep_ids),
         )
         c.commit()

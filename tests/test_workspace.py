@@ -1,18 +1,20 @@
 # tests/test_workspace.py
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, patch, call
+
 from scripts.workspace import (
-    create_workspace,
-    list_workspaces,
-    join_workspace,
-    leave_workspace,
-    create_room,
-    list_rooms,
-    join_room,
-    close_room,
+    AGENT_TEAMS_ENV,
     agent_join,
     agent_leave,
-    AGENT_TEAMS_ENV,
+    close_room,
+    create_room,
+    create_workspace,
+    join_room,
+    join_workspace,
+    leave_workspace,
+    list_rooms,
+    list_workspaces,
 )
 
 
@@ -216,6 +218,7 @@ def test_create_workspace_windows(mocker):
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
     run_mock = mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=""))
     from importlib import reload
+
     import scripts.workspace as ws
 
     reload(ws)
@@ -240,6 +243,7 @@ def test_list_workspaces_windows(mocker):
         "subprocess.run", return_value=MagicMock(returncode=0, stdout="project-a\nproject-b\n")
     )
     from importlib import reload
+
     import scripts.workspace as ws
 
     reload(ws)
@@ -254,6 +258,7 @@ def test_list_workspaces_windows_empty(mocker):
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
     mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=""))
     from importlib import reload
+
     import scripts.workspace as ws
 
     reload(ws)
@@ -268,6 +273,7 @@ def test_agent_join_windows(mocker):
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
     run_mock = mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="%0\n"))
     from importlib import reload
+
     import scripts.workspace as ws
 
     reload(ws)
@@ -288,6 +294,7 @@ def test_list_workspaces_windows_no_server(mocker):
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
     mocker.patch("subprocess.run", return_value=MagicMock(returncode=1, stdout=""))
     from importlib import reload
+
     import scripts.workspace as ws
 
     reload(ws)
@@ -304,6 +311,7 @@ def test_agent_join_windows_max_agents(mocker):
     pane_ids = "\n".join(f"%{i}" for i in range(5))
     mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=pane_ids))
     from importlib import reload
+
     import scripts.workspace as ws
 
     reload(ws)

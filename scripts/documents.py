@@ -25,13 +25,13 @@ v1.0.13 `type` column is gone in v1.1.0 (replaced by `domain` +
 """
 
 from __future__ import annotations
+
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts import backend
 from scripts.domain_vocabulary import TYPE_TO_DOMAIN
-
 
 _BARE_WORD = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -223,7 +223,7 @@ def update_document(db_path: str, doc_id: int, **kwargs) -> dict | None:
         try:
             sets = ", ".join(f"{k} = ?" for k in changes)
             c.execute(
-                f"UPDATE project_documents SET {sets} WHERE id = ?",
+                f"UPDATE project_documents SET {sets} WHERE id = ?",  # nosec B608
                 (*changes.values(), doc_id),
             )
             c.commit()
@@ -290,7 +290,7 @@ def list_documents(
         clause = ("WHERE " + " AND ".join(conds)) if conds else ""
         c = backend_local._conn()
         try:
-            sql = f"SELECT * FROM project_documents {clause} ORDER BY title"
+            sql = f"SELECT * FROM project_documents {clause} ORDER BY title"  # nosec B608
             raw = c.execute(sql, params).fetchall()
         finally:
             c.close()
@@ -315,9 +315,9 @@ def search_documents(db_path: str, query: str, project_id: int | None = None) ->
 
 
 if __name__ == "__main__":
-    import sys
-    import json
     import argparse
+    import json
+    import sys
 
     db_path = ".ai/memex.db"
     cmd = sys.argv[1]

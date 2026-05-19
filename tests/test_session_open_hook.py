@@ -372,7 +372,8 @@ def _make_project_at_phase(db_path: str, phase: str) -> str:
     v1.1.0 schema instead of routing through them.
     """
     import sqlite3
-    from scripts.migrate import apply_migrations, MIGRATIONS_DIR
+
+    from scripts.migrate import MIGRATIONS_DIR, apply_migrations
 
     apply_migrations(db_path, MIGRATIONS_DIR / "shared")
     apply_migrations(db_path, MIGRATIONS_DIR / "local-only")
@@ -467,7 +468,7 @@ def _hook_env(cwd) -> dict:
 )
 def test_hook_appends_phase_guidance(project_at_phase, phase, expected_skill):
     """For each phase, the hook output mentions the phase and the recommended skill."""
-    db_path, pid, cwd = project_at_phase(phase)
+    _db_path, _pid, cwd = project_at_phase(phase)
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         capture_output=True,
@@ -487,7 +488,7 @@ def test_hook_handles_missing_using_atelier_gracefully(project_at_phase, tmp_pat
     """If run/SKILL.md is missing, hook still announces phase."""
     import shutil
 
-    db_path, pid, cwd = project_at_phase("design:open")
+    _db_path, _pid, cwd = project_at_phase("design:open")
 
     # Create an isolated directory tree in tmp_path with the hook and scripts
     # copied, but NO skills/run/SKILL.md — that's the test condition.

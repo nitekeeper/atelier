@@ -20,8 +20,6 @@ Layout pinned here:
 from contextlib import closing
 from pathlib import Path
 
-import pytest
-
 from scripts.migrate import apply_migrations, get_connection
 
 MIGRATIONS_DIR: Path = Path(__file__).parent.parent / "migrations"

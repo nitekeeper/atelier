@@ -7,10 +7,6 @@
 #           pip-audit -r requirements.txt
 #           pytest tests/
 #   CI:     .github/workflows/ci.yml runs the same.
-#
-# Ruleset starts minimal for v1.1.0 (the codebase has never been linted in CI
-# before; a strict day-one gate would block PRs on incidental drift). Tighten
-# `select` over time as the team agrees on additional categories.
 
 [tool.ruff]
 line-length = 100
@@ -25,33 +21,39 @@ exclude = [
 select = [
     "E",    # pycodestyle errors
     "W",    # pycodestyle warnings
-    "F",    # pyflakes
+    "F",    # pyflakes (unused imports, undefined names)
+    "I",    # isort (import ordering)
+    "B",    # flake8-bugbear (likely bugs)
+    "C4",   # comprehensions
+    "UP",   # pyupgrade (modern syntax)
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
 ]
 ignore = [
     "E501",   # line-too-long — formatter handles wraps it can; long strings get a pass
-    "E402",   # module-level-import-not-at-top — Atelier scripts route some imports through
-              #   _memex_module() context managers; the late imports are intentional.
-    "E731",   # lambda-assignment — test fixtures use this idiom liberally
-    "F401",   # unused-import — re-exports are common at __init__ boundaries
+    "SIM108", # ternary-instead-of-if-else — sometimes hurts readability
+    "B008",   # function-call-in-default-arg — Path() and similar are fine as defaults
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
-    "E741",   # ambiguous variable name — tests reuse `l`, `I`, etc. for brevity
+    "B011",   # assert-false — pytest tests use bare assert
+    "SIM117", # nested-with — sometimes clearer in test setup
 ]
 
 [tool.bandit]
 exclude_dirs = ["tests", ".github", "__pycache__", ".claude"]
-# Atelier shells out to `git` (worktree, session_open hook) and reads/writes
-# SQLite. The subprocess findings below are intentional and uniform across
-# the codebase; blanket-skipping is cleaner than scattering nosec comments.
+# Atelier shells out to `git` (worktree.py, session_open hook) heavily.
+# These subprocess-related findings are intentional and uniform across the
+# codebase; blanket-skipping is cleaner than scattering nosec everywhere.
+#
+# B608 (hardcoded SQL) is NOT blanket-skipped — Atelier builds SQL with
+# f-strings using internal table/column names, but each such site is
+# annotated inline with `# nosec B608` + the safety rationale. A NEW
+# violation introduced by a future commit will be caught by CI.
 skips = [
     "B101",   # assert_used — invariant assertions in production code are intentional
     "B404",   # blacklist-import-subprocess — Atelier shells to git by design
     "B603",   # subprocess-without-shell-equals-true — this IS the safe form (no shell)
     "B607",   # start-process-with-partial-path — `git` resolves via PATH; intended
-    "B608",   # hardcoded-sql-expressions — Atelier builds SQL like
-              #   `f"INSERT INTO {table}..."` where `table` is an internal hardcoded
-              #   identifier validated against a fixed set (see scripts/backend_memex.py
-              #   safe_identifier checks). User-supplied values are always parameterized.
 ]

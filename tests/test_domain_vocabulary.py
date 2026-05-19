@@ -15,7 +15,6 @@ import pytest
 
 from scripts import domain_vocabulary as dv
 
-
 # ── Public surface ──────────────────────────────────────────────────────
 
 

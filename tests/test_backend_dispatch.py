@@ -16,7 +16,7 @@ the surface but Plan 2 defers their implementation to v1.2.0.
 
 from __future__ import annotations
 
-from unittest.mock import create_autospec, patch
+from unittest.mock import patch
 
 import pytest
 

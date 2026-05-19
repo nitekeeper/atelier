@@ -22,7 +22,6 @@ import pytest
 from scripts import workflow
 from scripts.migrate import apply_migrations
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = REPO_ROOT / "migrations"
 
@@ -86,7 +85,7 @@ def project(tmp_path, monkeypatch):
 
 def test_log_bypass_writes_row(project):
     """log_bypass inserts a row and returns a positive integer id."""
-    db_path, pid, fake_home = project
+    db_path, pid, _fake_home = project
     bypass_id = workflow.log_bypass(
         db_path,
         pid,
@@ -113,7 +112,7 @@ def test_log_bypass_writes_row(project):
 
 def test_log_bypass_records_distinct_audit_events(project):
     """Each invocation is a distinct audit event — no idempotency window in v1.1.0."""
-    db_path, pid, fake_home = project
+    db_path, pid, _fake_home = project
     first = workflow.log_bypass(
         db_path,
         pid,
@@ -140,7 +139,7 @@ def test_log_bypass_records_distinct_audit_events(project):
 
 def test_log_bypass_writes_created_at(project):
     """v1.1.0 column `created_at` (renamed from `bypassed_at`) is populated."""
-    db_path, pid, fake_home = project
+    db_path, pid, _fake_home = project
     bypass_id = workflow.log_bypass(
         db_path,
         pid,

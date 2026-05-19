@@ -13,6 +13,7 @@ batch. Once those siblings land, the seed helper can switch to calling
 """
 
 from __future__ import annotations
+
 import sqlite3
 from pathlib import Path
 
@@ -20,11 +21,11 @@ import pytest
 
 from scripts.documents import (
     create_document,
-    get_document,
-    update_document,
     delete_document,
+    get_document,
     list_documents,
     search_documents,
+    update_document,
 )
 from scripts.migrate import apply_migrations
 

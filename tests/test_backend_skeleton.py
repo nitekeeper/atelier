@@ -27,7 +27,6 @@ import pytest
 
 from scripts import backend, backend_local, mode_detector
 
-
 EXPECTED_METHODS = [
     # Document-shaped writes — Tier 2
     "write_project",
@@ -65,153 +64,165 @@ EXPECTED_METHODS = [
 # kwargs so signature drift is caught.
 METHOD_KWARGS: dict[str, list[dict]] = {
     "write_project": [
-        dict(workspace_id=1, slug="proj", name="Proj", description="d", created_by="a"),
+        {"workspace_id": 1, "slug": "proj", "name": "Proj", "description": "d", "created_by": "a"},
     ],
     "write_document": [
         # Required-only.
-        dict(
-            workspace_id=1,
-            project_id=1,
-            domain="design",
-            subdomain=None,
-            title="t",
-            body="b",
-            metadata={},
-            caller_agent_id="a",
-        ),
+        {
+            "workspace_id": 1,
+            "project_id": 1,
+            "domain": "design",
+            "subdomain": None,
+            "title": "t",
+            "body": "b",
+            "metadata": {},
+            "caller_agent_id": "a",
+        },
         # All optionals exercised: source_url + relations.
-        dict(
-            workspace_id=1,
-            project_id=1,
-            domain="design",
-            subdomain="x",
-            title="t",
-            body="b",
-            metadata={"k": "v"},
-            caller_agent_id="a",
-            source_url="https://example.test/doc",
-            relations=[{"target_id": 1, "kind": "part_of"}],
-        ),
+        {
+            "workspace_id": 1,
+            "project_id": 1,
+            "domain": "design",
+            "subdomain": "x",
+            "title": "t",
+            "body": "b",
+            "metadata": {"k": "v"},
+            "caller_agent_id": "a",
+            "source_url": "https://example.test/doc",
+            "relations": [{"target_id": 1, "kind": "part_of"}],
+        },
     ],
     "write_task": [
         # Required-only.
-        dict(
-            workspace_id=1, project_id=1, title="t", description="d", subdomain=None, created_by="a"
-        ),
+        {
+            "workspace_id": 1,
+            "project_id": 1,
+            "title": "t",
+            "description": "d",
+            "subdomain": None,
+            "created_by": "a",
+        },
         # All optionals: assigned_to, priority, notes, relations.
-        dict(
-            workspace_id=1,
-            project_id=1,
-            title="t",
-            description="d",
-            subdomain="x",
-            created_by="a",
-            assigned_to="b",
-            priority=5,
-            notes="n",
-            relations=[{"target_id": 2, "kind": "blocks"}],
-        ),
+        {
+            "workspace_id": 1,
+            "project_id": 1,
+            "title": "t",
+            "description": "d",
+            "subdomain": "x",
+            "created_by": "a",
+            "assigned_to": "b",
+            "priority": 5,
+            "notes": "n",
+            "relations": [{"target_id": 2, "kind": "blocks"}],
+        },
     ],
     "write_meeting": [
         # Required-only.
-        dict(
-            workspace_id=1,
-            project_id=1,
-            title="t",
-            date="2026-05-16",
-            summary="s",
-            decisions="d",
-            subdomain=None,
-            created_by="a",
-        ),
+        {
+            "workspace_id": 1,
+            "project_id": 1,
+            "title": "t",
+            "date": "2026-05-16",
+            "summary": "s",
+            "decisions": "d",
+            "subdomain": None,
+            "created_by": "a",
+        },
         # All optionals: relations.
-        dict(
-            workspace_id=1,
-            project_id=1,
-            title="t",
-            date="2026-05-16",
-            summary="s",
-            decisions="d",
-            subdomain="x",
-            created_by="a",
-            relations=[{"target_id": 3, "kind": "part_of"}],
-        ),
+        {
+            "workspace_id": 1,
+            "project_id": 1,
+            "title": "t",
+            "date": "2026-05-16",
+            "summary": "s",
+            "decisions": "d",
+            "subdomain": "x",
+            "created_by": "a",
+            "relations": [{"target_id": 3, "kind": "part_of"}],
+        },
     ],
     "upsert_session": [
         # Required-only.
-        dict(project_id=1, agent_id="a"),
+        {"project_id": 1, "agent_id": "a"},
         # All optionals: phase, current_tasks, accomplished, next_action,
         # status, pm_notes.
-        dict(
-            project_id=1,
-            agent_id="a",
-            phase="design:open",
-            current_tasks="t1",
-            accomplished="acc",
-            next_action="next",
-            status="done",
-            pm_notes="n",
-        ),
+        {
+            "project_id": 1,
+            "agent_id": "a",
+            "phase": "design:open",
+            "current_tasks": "t1",
+            "accomplished": "acc",
+            "next_action": "next",
+            "status": "done",
+            "pm_notes": "n",
+        },
     ],
     "transition_phase": [
         # Required-only.
-        dict(project_id=1, to_phase="plan:open", agent_id="a"),
+        {"project_id": 1, "to_phase": "plan:open", "agent_id": "a"},
         # Optional bypass_reason.
-        dict(project_id=1, to_phase="plan:open", agent_id="a", bypass_reason="urgent fix"),
+        {"project_id": 1, "to_phase": "plan:open", "agent_id": "a", "bypass_reason": "urgent fix"},
     ],
     "update_task_status": [
         # Required-only.
-        dict(task_id=1, status="in-progress"),
+        {"task_id": 1, "status": "in-progress"},
         # Optional notes.
-        dict(task_id=1, status="done", notes="shipped"),
+        {"task_id": 1, "status": "done", "notes": "shipped"},
     ],
     "record_phase_bypass": [
-        dict(project_id=1, from_phase="x", to_phase="y", reason="r", agent_id="a"),
+        {"project_id": 1, "from_phase": "x", "to_phase": "y", "reason": "r", "agent_id": "a"},
     ],
     "find_or_create_workspace": [
         # Required-only.
-        dict(identity="repo:x", slug="x", name="X"),
+        {"identity": "repo:x", "slug": "x", "name": "X"},
         # Optional description.
-        dict(identity="repo:x", slug="x", name="X", description="first-create description"),
+        {"identity": "repo:x", "slug": "x", "name": "X", "description": "first-create description"},
     ],
     "find_workspace_by_identity": [
-        dict(identity="repo:x"),
+        {"identity": "repo:x"},
     ],
     "list_workspaces": [
-        dict(),
+        {},
     ],
     "find_project": [
-        dict(workspace_id=1, slug="proj"),
+        {"workspace_id": 1, "slug": "proj"},
     ],
     "list_projects": [
-        dict(workspace_id=1),
+        {"workspace_id": 1},
     ],
     "find_documents": [
         # Required-only.
-        dict(query="q"),
+        {"query": "q"},
         # All optionals: workspace_id, project_id, domain, subdomain, limit.
-        dict(query="q", workspace_id=1, project_id=1, domain="design", subdomain="x", limit=25),
+        {
+            "query": "q",
+            "workspace_id": 1,
+            "project_id": 1,
+            "domain": "design",
+            "subdomain": "x",
+            "limit": 25,
+        },
     ],
     "get_task": [
-        dict(task_id=1),
+        {"task_id": 1},
     ],
     "list_tasks": [
         # Required-only.
-        dict(project_id=1),
+        {"project_id": 1},
         # Optional status.
-        dict(project_id=1, status="done"),
+        {"project_id": 1, "status": "done"},
     ],
     "get_document": [
-        dict(doc_id=1),
+        {"doc_id": 1},
     ],
     "lookup_index_id_by_source_ref": [
-        dict(source_ref="atelier:tasks:1"),
+        {"source_ref": "atelier:tasks:1"},
     ],
     "find_or_create_role": [
-        dict(name="Product Manager", description="PM"),
+        {"name": "Product Manager", "description": "PM"},
     ],
     "find_or_create_agent": [
-        dict(agent_id="atelier-pm-1", name="PM", role_id=1, profile="pm"),
+        {"agent_id": "atelier-pm-1", "name": "PM", "role_id": 1, "profile": "pm"},
     ],
 }
 

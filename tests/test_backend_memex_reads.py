@@ -14,7 +14,6 @@ Cross-plan helpers:
 
 import json as _json
 import sqlite3
-import sys
 import types
 from unittest.mock import patch
 

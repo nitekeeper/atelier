@@ -1,21 +1,20 @@
 # tests/test_meetings.py
 import sqlite3
-import pytest
 from pathlib import Path
-from scripts.migrate import apply_migrations
-from scripts.roles import create_role
+
+import pytest
+
 from scripts.agents import create_agent
 from scripts.meetings import (
-    create_meeting,
-    get_meeting,
-    update_meeting,
-    delete_meeting,
-    list_meetings,
-    search_meetings,
     add_participant,
-    remove_participant,
+    create_meeting,
+    delete_meeting,
+    get_meeting,
     get_participants,
+    search_meetings,
 )
+from scripts.migrate import apply_migrations
+from scripts.roles import create_role
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 

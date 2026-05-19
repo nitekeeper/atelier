@@ -6,12 +6,11 @@ import pytest
 
 from scripts.migrate import apply_migrations
 from scripts.session import (
-    write_session,
-    get_session,
-    read_latest,
     list_sessions,
-    update_session,
     prune_sessions,
+    read_latest,
+    update_session,
+    write_session,
 )
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
@@ -185,8 +184,8 @@ def test_prune_sessions_memex_mode_routes_through_memex_module(monkeypatch):
     ``stores`` module via ``backend_memex._memex_module("stores")`` —
     NOT via ``from scripts import stores`` (which does not exist).
     """
-    from scripts import mode_detector, backend_memex
     import scripts.session as session_module
+    from scripts import backend_memex, mode_detector
 
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
 

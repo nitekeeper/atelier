@@ -2,6 +2,7 @@
 re-running after a fix completes cleanly."""
 
 from pathlib import Path
+
 import pytest
 
 
@@ -19,9 +20,9 @@ def project_with_data(tmp_path, monkeypatch):
     apply_migrations(str(db), MIGRATIONS / "shared")
     apply_migrations(str(db), MIGRATIONS / "local-only")
     monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
-    from scripts.roles import create_role
     from scripts.agents import create_agent
     from scripts.projects import create_project
+    from scripts.roles import create_role
     from scripts.tasks import create_task
 
     r = create_role(str(db), name="PM", description="PM")

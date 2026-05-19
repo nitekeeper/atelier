@@ -33,7 +33,6 @@ from types import ModuleType
 
 from scripts import domain_vocabulary
 
-
 # ── Memex plugin location + import bootstrap ───────────────────────────────
 
 
@@ -163,7 +162,7 @@ def _scripts_db_shim(plugin_root: Path):
             sys.modules.pop("scripts.db", None)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
     """Load `<plugin_root>/scripts/<dotted-path>.py` (or the matching
     package `__init__.py`) as an isolated module, sidestepping the
@@ -372,10 +371,8 @@ def _next_seq(
     used: set[int] = set()
     for row in existing:
         suffix = row["key"][len(prefix) :]
-        try:
+        with contextlib.suppress(ValueError):
             used.add(int(suffix))
-        except ValueError:
-            pass
     n = 1
     while n in used:
         n += 1
@@ -899,9 +896,9 @@ def _memex_core_query(*, store: str, table: str, where: dict | None = None) -> l
     safe_table = memex_stores.safe_identifier(table)
     if where:
         clauses = " AND ".join(f"{k} = ?" for k in where)
-        sql = f"SELECT * FROM {safe_table} WHERE {clauses}"
+        sql = f"SELECT * FROM {safe_table} WHERE {clauses}"  # nosec B608
         return memex_stores.query(store, sql, tuple(where.values()))
-    return memex_stores.query(store, f"SELECT * FROM {safe_table}", ())
+    return memex_stores.query(store, f"SELECT * FROM {safe_table}", ())  # nosec B608
 
 
 # ── Operational state writes ───────────────────────────────────────────────

@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
 from unittest.mock import patch
+
 import pytest
+
 from scripts import mode_detector
 from scripts.mode_detector import _parse_version_tuple
 

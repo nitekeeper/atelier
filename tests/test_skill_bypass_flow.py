@@ -19,7 +19,6 @@ import pytest
 from scripts import workflow
 from scripts.migrate import apply_migrations
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = REPO_ROOT / "migrations"
 WORKFLOW_CLI = [sys.executable, str(REPO_ROOT / "scripts" / "workflow.py")]
@@ -93,7 +92,7 @@ def _cli_env(project) -> dict:
 
 def _check_gate_cli(project, skill):
     result = subprocess.run(
-        WORKFLOW_CLI + [project["db"], "check-gate", str(project["project_id"]), skill],
+        [*WORKFLOW_CLI, project["db"], "check-gate", str(project["project_id"]), skill],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -106,8 +105,8 @@ def _check_gate_cli(project, skill):
 
 def _log_bypass_cli(project, from_phase, to_phase, reason, agent_id):
     result = subprocess.run(
-        WORKFLOW_CLI
-        + [
+        [
+            *WORKFLOW_CLI,
             project["db"],
             "log-bypass",
             str(project["project_id"]),

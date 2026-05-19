@@ -1,23 +1,33 @@
 """Tests for scripts/worktree.py — merge-back flow."""
+
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-
 # ── Git helpers ───────────────────────────────────────────────────────────
+
 
 def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git"] + args, cwd=cwd, check=True,
-        capture_output=True, text=True, encoding="utf-8",
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
 
 
 def _git_no_check(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git"] + args, cwd=cwd, check=False,
-        capture_output=True, text=True, encoding="utf-8",
+        ["git", *args],
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
 
 
@@ -45,16 +55,19 @@ def repo_with_worktree(tmp_path, main_repo):
 
 # ── detect_worktree ───────────────────────────────────────────────────────
 
+
 class TestDetectWorktree:
     def test_main_repo_is_not_a_worktree(self, main_repo):
         from scripts.worktree import detect_worktree
+
         is_wt, git_dir = detect_worktree(main_repo)
         assert is_wt is False
         assert "worktrees" not in git_dir.replace("\\", "/")
 
     def test_linked_worktree_is_detected(self, repo_with_worktree):
-        main_repo, wt_path = repo_with_worktree
+        _main_repo, wt_path = repo_with_worktree
         from scripts.worktree import detect_worktree
+
         is_wt, git_dir = detect_worktree(wt_path)
         assert is_wt is True
         assert "worktrees" in git_dir.replace("\\", "/")
@@ -62,24 +75,29 @@ class TestDetectWorktree:
 
 # ── get_current_branch ────────────────────────────────────────────────────
 
+
 class TestGetCurrentBranch:
     def test_returns_branch_name_in_main_repo(self, main_repo):
         from scripts.worktree import get_current_branch
+
         branch = get_current_branch(main_repo)
         assert branch == "main"
 
     def test_returns_worktree_branch_name(self, repo_with_worktree):
-        main_repo, wt_path = repo_with_worktree
+        _main_repo, wt_path = repo_with_worktree
         from scripts.worktree import get_current_branch
+
         branch = get_current_branch(wt_path)
         assert branch == "claude/wt-1"
 
 
 # ── classify_status ────────────────────────────────────────────────────────
 
+
 class TestClassifyStatus:
     def test_empty_input_returns_empty_buckets(self):
         from scripts.worktree import classify_status
+
         dirty, claude, other = classify_status("")
         assert dirty == []
         assert claude == []
@@ -87,6 +105,7 @@ class TestClassifyStatus:
 
     def test_dirty_tracked_only(self):
         from scripts.worktree import classify_status
+
         out = " M src/foo.py\nA  new.txt\nMM index.html\n"
         dirty, claude, other = classify_status(out)
         assert len(dirty) == 3
@@ -95,6 +114,7 @@ class TestClassifyStatus:
 
     def test_untracked_claude_isolated_from_other(self):
         from scripts.worktree import classify_status
+
         out = "?? .claude/state.json\n?? .claude/foo/bar.txt\n?? notes.txt\n"
         dirty, claude, other = classify_status(out)
         assert dirty == []
@@ -104,6 +124,7 @@ class TestClassifyStatus:
 
     def test_mixed_all_three_buckets(self):
         from scripts.worktree import classify_status
+
         out = " M src/foo.py\n?? .claude/x.json\n?? scratch.tmp\n"
         dirty, claude, other = classify_status(out)
         assert len(dirty) == 1
@@ -113,10 +134,12 @@ class TestClassifyStatus:
 
 # ── parse_main_worktree ───────────────────────────────────────────────────
 
+
 class TestParseMainWorktree:
     def test_returns_main_repo_path_and_branch(self, repo_with_worktree):
         main_repo, wt_path = repo_with_worktree
         from scripts.worktree import parse_main_worktree
+
         path, branch = parse_main_worktree(wt_path)
         # Normalize separators for comparison
         assert Path(path).resolve() == main_repo.resolve()
@@ -124,12 +147,14 @@ class TestParseMainWorktree:
 
     def test_from_main_repo_returns_itself(self, main_repo):
         from scripts.worktree import parse_main_worktree
+
         path, branch = parse_main_worktree(main_repo)
         assert Path(path).resolve() == main_repo.resolve()
         assert branch == "main"
 
 
 # ── merge_back ────────────────────────────────────────────────────────────
+
 
 class TestMergeBack:
     def test_clean_merge_succeeds(self, repo_with_worktree):
@@ -140,6 +165,7 @@ class TestMergeBack:
         _git(["commit", "-m", "add feature"], wt_path)
 
         from scripts.worktree import merge_back
+
         merge_back(wt_path)
 
         # Branch merged into main
@@ -153,6 +179,7 @@ class TestMergeBack:
         _git(["commit", "-m", "add f"], wt_path)
 
         from scripts.worktree import merge_back
+
         merge_back(wt_path)
 
         wt_list = _git_no_check(["worktree", "list"], main_repo)
@@ -165,6 +192,7 @@ class TestMergeBack:
         _git(["commit", "-m", "add g"], wt_path)
 
         from scripts.worktree import merge_back
+
         merge_back(wt_path)
 
         branches = _git(["branch"], main_repo)
@@ -175,6 +203,7 @@ class TestMergeBack:
         main_repo, wt_path = repo_with_worktree
 
         from scripts.worktree import merge_back
+
         merge_back(wt_path)
 
         # Worktree should be gone
@@ -187,16 +216,17 @@ class TestMergeBack:
         (wt_path / "dirty.txt").write_text("uncommitted\n")
 
         from scripts.worktree import merge_back
+
         merge_back(wt_path)
 
         # dirty.txt should appear in main's history after merge
-        show = _git(["show", "--name-only", "HEAD"], main_repo)
         # The merge commit or the preceding commit should contain dirty.txt
         log = _git(["log", "--all", "--name-only", "--pretty=format:"], main_repo)
         assert "dirty.txt" in log.stdout
 
     def test_not_a_worktree_exits_cleanly(self, main_repo):
         from scripts.worktree import merge_back
+
         # Should print a message and return without error
         merge_back(main_repo)  # must not raise
 
@@ -206,17 +236,19 @@ class TestMergeBack:
         (main_repo / "dirty_main.txt").write_text("oops\n")
 
         from scripts.worktree import merge_back
+
         with pytest.raises(SystemExit) as exc_info:
             merge_back(wt_path)
         assert exc_info.value.code == 1
 
     def test_detached_head_exits_cleanly(self, repo_with_worktree):
         """Worktree in detached HEAD state should abort with exit code 1."""
-        main_repo, wt_path = repo_with_worktree
+        _main_repo, wt_path = repo_with_worktree
         commit_hash = _git(["rev-parse", "HEAD"], wt_path).stdout.strip()
         _git_no_check(["checkout", commit_hash], wt_path)
 
         from scripts.worktree import merge_back
+
         with pytest.raises(SystemExit) as exc_info:
             merge_back(wt_path)
         assert exc_info.value.code == 1
@@ -233,6 +265,7 @@ class TestMergeBack:
         _git(["commit", "-m", "wt adds conflict.txt"], wt_path)
 
         from scripts.worktree import merge_back
+
         with pytest.raises(SystemExit) as exc_info:
             merge_back(wt_path)
         assert exc_info.value.code == 1
@@ -248,19 +281,22 @@ class TestMergeBack:
 
 # ── CLI ───────────────────────────────────────────────────────────────────
 
+
 class TestCLI:
     def test_unknown_command_exits_1(self):
         result = subprocess.run(
-            ["python", "scripts/worktree.py", "bogus"],
-            capture_output=True, text=True,
+            [sys.executable, "scripts/worktree.py", "bogus"],
+            capture_output=True,
+            text=True,
             env={**__import__("os").environ, "PYTHONPATH": "."},
         )
         assert result.returncode == 1
 
     def test_no_command_exits_1(self):
         result = subprocess.run(
-            ["python", "scripts/worktree.py"],
-            capture_output=True, text=True,
+            [sys.executable, "scripts/worktree.py"],
+            capture_output=True,
+            text=True,
             env={**__import__("os").environ, "PYTHONPATH": "."},
         )
         assert result.returncode == 1

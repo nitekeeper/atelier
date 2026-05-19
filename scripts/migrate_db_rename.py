@@ -9,6 +9,7 @@ Exit codes:
     0 — no ambiguity (at most one DB file found)
     1 — both atelier.db and memex.db detected; manual resolution required
 """
+
 from __future__ import annotations
 
 import sys
@@ -19,6 +20,7 @@ def _db_info(path: Path) -> dict:
     size = path.stat().st_size
     try:
         import sqlite3
+
         conn = sqlite3.connect(str(path))
         table_count = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
@@ -41,13 +43,15 @@ def check(directory: Path) -> int:
         return 0
 
     if has_atelier and not has_memex:
-        print(f"Found only atelier.db — migration to memex.db not yet done.")
+        print("Found only atelier.db — migration to memex.db not yet done.")
         print(f"To migrate: copy {atelier} to {memex}, then delete {atelier}.")
         return 0
 
     if has_memex and not has_atelier:
         info = _db_info(memex)
-        print(f"OK: memex.db present ({info['size_bytes']} bytes, {info['tables']} tables). No atelier.db. Nothing to do.")
+        print(
+            f"OK: memex.db present ({info['size_bytes']} bytes, {info['tables']} tables). No atelier.db. Nothing to do."
+        )
         return 0
 
     # Both exist

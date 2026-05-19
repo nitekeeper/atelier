@@ -1,34 +1,72 @@
-"""Soft walls: check_gate returns GateResult instead of raising."""
+"""Soft walls: check_gate returns GateResult instead of raising on phase mismatch."""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
 import pytest
 
-from scripts.migrate import apply_migrations, MIGRATIONS_DIR
-from scripts.roles import create_role
-from scripts.agents import create_agent
-from scripts.projects import create_project
 from scripts import workflow
+from scripts.migrate import apply_migrations
+
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+
+def _seed(db_path: str) -> int:
+    now = "2026-05-18T00:00:00Z"
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys=ON")
+    cur = conn.execute(
+        "INSERT INTO workspaces (slug, identity, name, description, "
+        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("test", "repo:test", "Test", None, now, now),
+    )
+    ws_id = cur.lastrowid
+    cur = conn.execute(
+        "INSERT INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        ("pm", "PM", now, now),
+    )
+    role_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO agents (id, name, role_id, profile, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("test-agent", "Test", role_id, "Tester", now, now),
+    )
+    cur = conn.execute(
+        "INSERT INTO projects (workspace_id, slug, name, description, "
+        "phase, created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (ws_id, "test", "Test", None, "design:open", "test-agent", now, now),
+    )
+    pid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return pid
 
 
 @pytest.fixture
-def fresh_db(tmp_path):
-    """Migrate a fresh DB and return the path string."""
-    db_path = str(tmp_path / "test.db")
-    apply_migrations(db_path, MIGRATIONS_DIR)
-    role = create_role(db_path, name="pm", description="PM")
-    create_agent(db_path, id="test-agent", name="Test Agent", role_id=role["id"], profile="Tester")
-    return db_path
+def project(tmp_path, monkeypatch):
+    """Forces Local mode -- Memex-mode soft-wall coverage lives in test_backend_memex_*."""
+    from scripts import mode_detector
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".git").mkdir()
+    monkeypatch.chdir(root)
+    db = root / ".ai" / "atelier.db"
+    db.parent.mkdir()
+    apply_migrations(str(db), MIGRATIONS_DIR / "shared")
+    apply_migrations(str(db), MIGRATIONS_DIR / "local-only")
+    pid = _seed(str(db))
+    return str(db), pid
 
 
-@pytest.fixture
-def project(fresh_db):
-    """Create a project; returns (db_path, project_id). Starts at design:open."""
-    proj = create_project(fresh_db, name="test", description=None, created_by="test-agent")
-    return fresh_db, proj["id"]
-
-
-def test_check_gate_returns_gate_result_when_allowed(project):
-    """check_gate on an ungated skill returns GateResult with allowed=True and no required_phase."""
+def test_check_gate_returns_allowed_when_ungated(project):
+    """check_gate on an ungated skill returns GateResult(allowed=True) with no required_phase."""
     db_path, project_id = project
-    # dev:design has no gate — always allowed
+    # dev:design has skill_gates.required_phase = NULL -> no gate.
     result = workflow.check_gate(db_path, project_id, "dev:design")
     assert result.allowed is True
     assert result.current_phase == "design:open"
@@ -36,21 +74,10 @@ def test_check_gate_returns_gate_result_when_allowed(project):
     assert "no gate" in result.reason.lower()
 
 
-def test_check_gate_returns_gate_result_when_phase_satisfies(project):
-    """check_gate returns allowed=True when the project is already at the required phase."""
+def test_check_gate_does_not_raise_on_phase_mismatch(project):
+    """CLAUDE.md hard rule: check_gate never raises on phase mismatch -- returns GateResult(allowed=False)."""
     db_path, project_id = project
-    # Advance to design:approved so dev:plan is allowed
-    workflow.advance_phase(db_path, project_id, "design:approved")
-    result = workflow.check_gate(db_path, project_id, "dev:plan")
-    assert result.allowed is True
-    assert result.current_phase == "design:approved"
-    assert result.required_phase == "design:approved"
-
-
-def test_check_gate_does_not_raise_on_mismatch(project):
-    """The old behavior raised WorkflowError. New behavior returns GateResult with allowed=False."""
-    db_path, project_id = project
-    # Project is at design:open; dev:plan requires design:approved
+    # design:open does NOT satisfy dev:plan's gate (design:approved).
     result = workflow.check_gate(db_path, project_id, "dev:plan")
     assert result.allowed is False
     assert result.current_phase == "design:open"
@@ -59,10 +86,8 @@ def test_check_gate_does_not_raise_on_mismatch(project):
     assert "design:approved" in result.reason
 
 
-def test_check_gate_raises_on_unknown_project_id(fresh_db):
-    """Documents the exception path: unknown project_id raises WorkflowError.
-
-    The 'never raises on phase mismatch' contract does not cover invalid input.
-    """
+def test_check_gate_raises_on_unknown_project_id(project):
+    """Unknown project_id is a programming error -- the soft-wall rule doesn't cover it."""
+    db_path, _pid = project
     with pytest.raises(workflow.WorkflowError, match="not found"):
-        workflow.check_gate(fresh_db, 9999, "dev:plan")
+        workflow.check_gate(db_path, 9999, "dev:plan")

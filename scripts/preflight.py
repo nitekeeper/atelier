@@ -4,6 +4,7 @@ On Windows, workspace commands run tmux via WSL. On macOS/Linux, tmux runs
 natively. This module centralizes that decision so callers can ask for the
 right tmux invocation without branching on platform themselves.
 """
+
 import os
 import subprocess
 import sys
@@ -28,15 +29,14 @@ def _wsl_base_cmd() -> list[str]:
 def get_tmux_cmd() -> list[str]:
     """Return the command prefix used to invoke tmux on the current platform."""
     if sys.platform == "win32":
-        return _wsl_base_cmd() + ["tmux"]
+        return [*_wsl_base_cmd(), "tmux"]
     return ["tmux"]
 
 
 def _prompt(msg: str) -> bool:
     if not sys.stdin.isatty():
         raise PreflightError(
-            f"{msg} — non-interactive environment detected. "
-            "Install tmux manually and re-run."
+            f"{msg} — non-interactive environment detected. Install tmux manually and re-run."
         )
     answer = input(f"{msg} (y/n): ").strip().lower()
     return answer == "y"
@@ -59,9 +59,7 @@ def _install_tmux_linux() -> None:
         elif pm == "pacman":
             subprocess.run(["sudo", "pacman", "-S", "--noconfirm", "tmux"], check=True)
         else:
-            raise PreflightError(
-                "Could not detect package manager. Install tmux manually."
-            )
+            raise PreflightError("Could not detect package manager. Install tmux manually.")
     except subprocess.CalledProcessError as e:
         raise PreflightError(f"Failed to install tmux: {e}") from e
 
@@ -69,13 +67,13 @@ def _install_tmux_linux() -> None:
 def _check_windows() -> None:
     try:
         result = subprocess.run(["wsl", "--status"], capture_output=True, timeout=10)
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         raise PreflightError(
             "Workspace commands require WSL on Windows. "
             "Please install WSL first: https://aka.ms/wsl"
-        )
-    except subprocess.TimeoutExpired:
-        raise PreflightError("WSL check timed out. Ensure WSL is running and try again.")
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        raise PreflightError("WSL check timed out. Ensure WSL is running and try again.") from e
     if result.returncode != 0:
         raise PreflightError(
             "Workspace commands require WSL on Windows. "
@@ -83,21 +81,17 @@ def _check_windows() -> None:
         )
     wsl_cmd = _wsl_base_cmd()
     try:
-        result = subprocess.run(wsl_cmd + ["tmux", "-V"], capture_output=True, timeout=10)
-    except subprocess.TimeoutExpired:
-        raise PreflightError("tmux check in WSL timed out.")
+        result = subprocess.run([*wsl_cmd, "tmux", "-V"], capture_output=True, timeout=10)
+    except subprocess.TimeoutExpired as e:
+        raise PreflightError("tmux check in WSL timed out.") from e
     if result.returncode != 0:
         if _prompt("tmux is not installed in your WSL distro. Install it now? (uses apt-get)"):
             try:
-                subprocess.run(
-                    wsl_cmd + ["sudo", "apt-get", "install", "-y", "tmux"], check=True
-                )
+                subprocess.run([*wsl_cmd, "sudo", "apt-get", "install", "-y", "tmux"], check=True)
             except subprocess.CalledProcessError as e:
                 raise PreflightError(f"Failed to install tmux in WSL: {e}") from e
         else:
-            raise PreflightError(
-                "tmux is required. Install it manually: sudo apt-get install tmux"
-            )
+            raise PreflightError("tmux is required. Install it manually: sudo apt-get install tmux")
 
 
 def _check_macos() -> None:
@@ -112,16 +106,14 @@ def _check_macos() -> None:
         if _prompt("tmux is not installed. Install it now?"):
             try:
                 subprocess.run(["brew", "install", "tmux"], check=True)
-            except FileNotFoundError:
+            except FileNotFoundError as e:
                 raise PreflightError(
                     "Homebrew not found. Install tmux manually: https://brew.sh"
-                )
+                ) from e
             except subprocess.CalledProcessError as e:
                 raise PreflightError(f"Failed to install tmux via brew: {e}") from e
         else:
-            raise PreflightError(
-                "tmux is required. Install it manually: brew install tmux"
-            )
+            raise PreflightError("tmux is required. Install it manually: brew install tmux")
 
 
 def _check_linux() -> None:
@@ -136,9 +128,7 @@ def _check_linux() -> None:
         if _prompt("tmux is not installed. Install it now?"):
             _install_tmux_linux()
         else:
-            raise PreflightError(
-                "tmux is required. Install it with your package manager."
-            )
+            raise PreflightError("tmux is required. Install it with your package manager.")
 
 
 def check() -> None:

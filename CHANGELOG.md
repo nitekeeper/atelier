@@ -1,5 +1,77 @@
 # Changelog
 
+## v1.1.0 — 2026-05-18
+
+**Memex v2 integration.** Atelier now writes through Memex v2 when
+installed, with a slim project-local fallback otherwise.
+
+**Memex compatibility:** Requires Memex **v2.2.0+** (API floor —
+caller-built `librarian_output` landed in v2.2.0). Strongly recommended:
+**v2.5.0+** (auto-bootstrap eliminates manual `python -m scripts.install`),
+**v2.5.1+** (atelier can drop client-side `__*` namespace filtering).
+Bootstrap refuses to run against Memex installs older than v2.2.0.
+
+**Typed exceptions surfaced by memex.** Atelier callers may now see the
+following typed exceptions propagated from memex:
+
+- `librarian.DuplicateKeyError` — raised on key collision during
+  `write_entry` (memex v2.3.0). Atelier's migration replay handles this
+  via a client-side Index lookup before every write.
+- `embeddings.EmbeddingUnavailable` — raised when embeddings can't be
+  produced (oversized input, missing API key, provider error) (memex
+  v2.4.1). Atelier surfaces the reason and falls back to FTS-only.
+- `data_steward.OrphanNotFoundError` — raised when attempting to operate
+  on an `index_id` that isn't present in the documents table (memex
+  v2.4.0).
+- `db.MemexNotInitializedError` — raised when `~/.memex/registry.json`
+  is missing (memex v2.5.0). Atelier's `migrate_to_memex` catches and
+  re-raises with operator guidance ("Run `memex:run` once before
+  migrating").
+- `db.MemexHomeInvalidError` — raised when `MEMEX_HOME` is set to an
+  invalid path (memex v2.5.0).
+
+### Added
+- Dual-mode persistence facade (`scripts/backend.py`) — auto-selects
+  between Memex Core and project-local SQLite.
+- `scripts/backend_memex.py` — Tier 2 writes through
+  `librarian.write_entry()` with caller-built `librarian_output` (no LLM
+  dispatch for Atelier's structured domains); Tier 1 state mutations via
+  Memex Core direct.
+- `scripts/backend_local.py` — slim SQLite with FTS5 over a local
+  `documents` table; raw bodies archived to `.ai/raw/`.
+- `scripts/bootstrap.py` — idempotent Memex-mode bootstrap (seeds
+  Atelier roles + shipped agents into `~/.memex/agents.db`; creates
+  the `atelier` store; enforces Memex v2.2.0+ API floor; piggybacks
+  on memex v2.5.0+ auto-bootstrap when available).
+- `scripts/migrate_to_memex.py` — one-shot per-project replay from
+  Local to Memex; crash-safe (no marker without full success).
+- `scripts/atelier_entrypoint.py:startup_check()` — pre-flight for the
+  four pre-existing user-facing skills (load, save, ingest, run); handles
+  bootstrap + migration prompt. `/atelier:migrate` is excluded from
+  pre-flight to avoid circular logic (it IS the migration path).
+- `scripts/domain_vocabulary.py` — fixed Atelier domain set
+  (`project` / `task` / `meeting` / `project_doc` / `adr`); validated
+  on every Tier 2 write.
+- `templates/roles.json` + `templates/agents/*.json` — Atelier-shipped
+  role + agent seed data, used by both modes.
+- `migrations/shared/` + `migrations/local-only/` — split so Memex mode
+  consumes only schema-without-roles-or-agents (Memex's agents.db
+  owns those tables). `migrations/shared/006_index_ids.sql` adds
+  `index_id` columns required by `librarian.write_entry`.
+- 8 new internal procedures under `internal/{memex,local,bootstrap-memex,
+  migrate-local-to-memex}/` plus `internal/memex/domain-vocabulary.md`.
+
+### Changed
+- `scripts/{projects,tasks,documents,meetings,session,workflow,roles,
+  agents}.py` rewired to call `backend.*` instead of opening SQLite
+  directly. Public signatures unchanged.
+- `CLAUDE.md` no longer requires Memex to be installed.
+
+### Removed
+- `scripts/db.py` — module's only consumer (the connection helper) is
+  now inline in `scripts/migrate.py`.
+- `.ai/memex.db` hard-dependency check.
+
 ## v0.2.0 — 2026-05-15
 
 ### Added

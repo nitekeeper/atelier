@@ -10,6 +10,22 @@ Session-open command. Reads the most recent session from the DB and surfaces rel
 
 Call `load` at the start of every session, before any other action.
 
+## Pre-flight (always first)
+
+Run `from scripts.atelier_entrypoint import startup_check; startup_check()`.
+
+Branch on the returned `action`:
+
+- **`proceed-local`** — Memex is not installed. Continue with the rest of
+  this skill's recipe; all writes go to the project-local `.ai/atelier.db`.
+- **`proceed-memex`** — Memex is installed and bootstrapped. Continue;
+  all writes go through Memex.
+- **`prompt-migration`** — Memex is installed but this project still
+  has a local DB. Read `internal/migrate-local-to-memex/SKILL.md` and
+  follow its prompt protocol. After the user answers, restart the
+  pre-flight (`startup_check()` will now return `proceed-memex` or
+  `proceed-local` depending on the user's choice).
+
 ## Procedure
 
 1. **Identify the active project.**

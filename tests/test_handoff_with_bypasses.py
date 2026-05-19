@@ -1,7 +1,6 @@
 """Verify dev-handoff retro queries phase_bypasses and surfaces patterns."""
-from pathlib import Path
 
-import pytest
+from pathlib import Path
 
 INTERNAL_DIR = Path(__file__).resolve().parent.parent / "internal"
 
@@ -29,8 +28,6 @@ def test_handoff_handles_no_bypasses_gracefully():
     path = INTERNAL_DIR / "dev-handoff" / "SKILL.md"
     text = path.read_text(encoding="utf-8")
     # Look for a phrase indicating empty handling
-    assert (
-        "No phase bypasses" in text
-        or "no bypasses" in text.lower()
-        or "0 bypass" in text
-    ), "dev-handoff must describe what to write when there are no bypasses"
+    assert "No phase bypasses" in text or "no bypasses" in text.lower() or "0 bypass" in text, (
+        "dev-handoff must describe what to write when there are no bypasses"
+    )

@@ -1,4 +1,5 @@
 """Verify dev skills' step 1 follows the GateResult-aware pattern."""
+
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,7 @@ def test_step_1_check_gate_uses_db_path_arg(skill):
     text = path.read_text(encoding="utf-8")
     # Find the check-gate line(s) and verify <db_path> appears before check-gate
     import re
+
     matches = re.findall(r"workflow\.py\s+(\S+)\s+check-gate", text)
     assert matches, f"{skill}: no check-gate invocation found"
     for arg in matches:

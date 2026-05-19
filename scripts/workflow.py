@@ -1,18 +1,26 @@
 # scripts/workflow.py
-"""DB-backed phase state machine.
+"""Phase-gate workflow — routes writes through the backend facade.
 
-Phases and valid transitions are stored in the phases and phase_transitions
-tables (seeded by migration 003). This replaces the hardcoded VALID_TRANSITIONS
-and PHASE_GATES dicts.
+`transition_phase` and `record_phase_bypass` go through
+`scripts.backend.*` (mode-dispatched between Memex and Local). Phase
+catalog reads (the `phases`, `phase_transitions`, `skill_gates`,
+`projects.phase` columns) still query the workspace DB directly:
+the catalog is static, mode-symmetric, and read-only on the hot path.
+
+Soft-wall semantics (CLAUDE.md hard rule): `check_gate` is ADVISORY —
+it returns a `GateResult` and NEVER raises on phase mismatch. It may
+raise `WorkflowError` for an unknown `project_id` (a programming
+error, not a soft-wall concern). `advance_phase` validates the
+transition graph and raises `WorkflowError` on an invalid transition.
 """
+
 from __future__ import annotations
 
 import json
 import sys
-from contextlib import closing
 from dataclasses import dataclass
-from scripts.db import get_connection
-from scripts.projects import update_project
+
+from scripts import backend, mode_detector
 
 
 @dataclass(frozen=True)
@@ -23,6 +31,7 @@ class GateResult:
     `allowed=False` means a soft wall is hit; caller should ask user
     to confirm bypass and then call `log_bypass`.
     """
+
     allowed: bool
     current_phase: str
     required_phase: str | None
@@ -35,54 +44,80 @@ class GateResult:
 
 
 class WorkflowError(Exception):
-    pass
+    """Raised on invalid phase transitions or unknown project_id.
+
+    NOT raised on phase-mismatch in `check_gate` — that returns a
+    `GateResult(allowed=False)` per spec §3 (soft walls)."""
+
+
+# ── Catalog reads (static, mode-symmetric) ─────────────────────────────────
+
+
+def _catalog_query(sql: str, params: tuple = ()) -> list[dict]:
+    """SELECT-only read against the workspace DB.
+
+    Memex mode delegates to `memex_stores.query("atelier", ...)`; Local
+    mode opens a connection against `<workspace-root>/.ai/atelier.db`
+    via `backend_local._conn()`. Both targets share the same v1.1.0
+    schema, so the same SQL works against either."""
+    if mode_detector.detect_mode() == "memex":
+        from scripts import backend_memex
+
+        memex_stores = backend_memex._memex_module("stores")
+        rows = memex_stores.query("atelier", sql, params)
+        return [dict(r) for r in rows]
+    from scripts import backend_local
+
+    c = backend_local._conn()
+    try:
+        rows = [dict(r) for r in c.execute(sql, params).fetchall()]
+    finally:
+        c.close()
+    return rows
 
 
 def get_phase(db_path: str, project_id: int) -> str:
-    """Return the current phase of a project."""
-    conn = get_connection(db_path)
-    try:
-        row = conn.execute(
-            "SELECT phase FROM projects WHERE id = ?", (project_id,)
-        ).fetchone()
-        if row is None:
-            raise WorkflowError(f"Project {project_id} not found")
-        return row[0]
-    finally:
-        conn.close()
+    """Return the current phase of a project.
+
+    `db_path` is retained for back-compat; the backend determines storage
+    via mode detection. Raises `WorkflowError` if the project is missing."""
+    rows = _catalog_query("SELECT phase FROM projects WHERE id = ?", (project_id,))
+    if not rows:
+        raise WorkflowError(f"Project {project_id} not found")
+    return rows[0]["phase"]
 
 
 def get_valid_transitions(db_path: str, from_phase: str) -> list[str]:
-    """Return list of phases reachable from from_phase."""
-    conn = get_connection(db_path)
-    try:
-        rows = conn.execute(
-            "SELECT to_phase FROM phase_transitions WHERE from_phase = ?",
-            (from_phase,),
-        ).fetchall()
-        return [row[0] for row in rows]
-    finally:
-        conn.close()
+    """Return list of phases reachable from `from_phase`."""
+    rows = _catalog_query(
+        "SELECT to_phase FROM phase_transitions WHERE from_phase = ?", (from_phase,)
+    )
+    return [r["to_phase"] for r in rows]
 
 
 def is_allow_from_any(db_path: str, phase: str) -> bool:
     """Return True if the phase can be entered from any current phase."""
-    conn = get_connection(db_path)
-    try:
-        row = conn.execute(
-            "SELECT allow_from_any FROM phases WHERE name = ?", (phase,)
-        ).fetchone()
-        return bool(row and row[0])
-    finally:
-        conn.close()
+    rows = _catalog_query("SELECT allow_from_any FROM phases WHERE name = ?", (phase,))
+    return bool(rows and rows[0]["allow_from_any"])
 
 
-def advance_phase(db_path: str, project_id: int, new_phase: str) -> str:
-    """Advance project to new_phase, enforcing valid transitions.
+# ── Writes (through the backend facade) ────────────────────────────────────
 
-    Phases with allow_from_any=True (e.g. diagnose:open) bypass the
-    transition check and can be entered from any current phase.
-    """
+
+def advance_phase(
+    db_path: str, project_id: int, new_phase: str, agent_id: str = "atelier-system"
+) -> str:
+    """Advance `project_id` to `new_phase`, enforcing valid transitions.
+
+    Phases with `allow_from_any=True` (e.g. `diagnose:open`) bypass the
+    transition graph and can be entered from any current phase. The DB
+    write goes through `backend.transition_phase` so Memex- and Local-
+    mode both follow the same write path.
+
+    Raises `WorkflowError` on an invalid transition. The transition
+    graph check is intentionally done here (not inside the backend) so
+    Local + Memex backends stay "dumb writes" — they trust the caller
+    (spec §3 / `backend_local.transition_phase` docstring)."""
     current = get_phase(db_path, project_id)
     if not is_allow_from_any(db_path, new_phase):
         allowed = get_valid_transitions(db_path, current)
@@ -91,33 +126,30 @@ def advance_phase(db_path: str, project_id: int, new_phase: str) -> str:
                 f"Invalid transition: '{current}' → '{new_phase}'. "
                 f"Allowed: {allowed or ['none (terminal state)']}"
             )
-    update_project(db_path, project_id, phase=new_phase)
+    backend.transition_phase(
+        project_id=project_id,
+        to_phase=new_phase,
+        agent_id=agent_id,
+    )
     return new_phase
 
 
 def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
     """Check whether `skill` is in-phase for `project_id`.
 
-    Returns a GateResult describing the outcome. Does NOT raise on a phase mismatch.
-    Callers decide whether to proceed (typically: confirm with user, log bypass,
-    then proceed).
+    Returns a GateResult describing the outcome. Does NOT raise on a
+    phase mismatch. Callers decide whether to proceed (typically:
+    confirm with user, log bypass, then proceed).
 
-    May raise WorkflowError if `project_id` does not exist (programming error,
-    not a soft-wall concern — calling skills should validate the project exists
-    before invoking check_gate).
-    """
-    conn = get_connection(db_path)
-    try:
-        row = conn.execute(
-            "SELECT required_phase FROM skill_gates WHERE skill = ?", (skill,)
-        ).fetchone()
-    finally:
-        conn.close()
-
+    May raise WorkflowError if `project_id` does not exist (programming
+    error, not a soft-wall concern — calling skills should validate the
+    project exists before invoking check_gate)."""
     current = get_phase(db_path, project_id)
 
+    gate_rows = _catalog_query("SELECT required_phase FROM skill_gates WHERE skill = ?", (skill,))
+
     # No row, or row's required_phase is NULL -> no gate
-    if row is None or row[0] is None:
+    if not gate_rows or gate_rows[0]["required_phase"] is None:
         return GateResult(
             allowed=True,
             current_phase=current,
@@ -125,7 +157,7 @@ def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
             reason="No gate configured for this skill",
         )
 
-    required = row[0]
+    required = gate_rows[0]["required_phase"]
     if current == required:
         return GateResult(
             allowed=True,
@@ -139,8 +171,9 @@ def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
         current_phase=current,
         required_phase=required,
         reason=(
-            f"Project is at '{current}', this skill normally requires '{required}'. "
-            "Bypass is available — confirm with user before proceeding."
+            f"Project is at '{current}', this skill normally requires "
+            f"'{required}'. Bypass is available — confirm with user "
+            f"before proceeding."
         ),
     )
 
@@ -148,60 +181,75 @@ def check_gate(db_path: str, project_id: int, skill: str) -> GateResult:
 def log_bypass(
     db_path: str,
     project_id: int,
-    skill: str,
-    current_phase: str,
-    required_phase: str,
-    agent_id: str | None = None,
-    note: str | None = None,
+    from_phase: str,
+    to_phase: str,
+    reason: str,
+    agent_id: str,
 ) -> int:
-    """Log a soft-wall bypass to phase_bypasses.
+    """Log a soft-wall bypass through `backend.record_phase_bypass`.
 
-    Idempotent: if a row with the same (project, skill, current_phase,
-    required_phase) was written within the last 60 seconds, returns that
-    row's id instead of inserting a new one.
+    Signature matches the v1.1.0 schema (`from_phase`, `to_phase`,
+    `reason`, `agent_id` — all NOT NULL). The pre-v1.1.0
+    `(skill, current_phase, required_phase, note)` shape is gone; the
+    bypass row records the attempted transition, not the gated skill.
 
-    Race condition note: the idempotency check uses a SELECT-then-INSERT
-    pattern. Under concurrent access, two callers could both pass the SELECT
-    before either INSERTs, resulting in duplicate rows. This race is
-    intentionally tolerated — soft-wall bypass logging is a rare, low-stakes
-    event and deduplication is best-effort. The window check prevents the
-    common case of accidental double-invocation from the same caller.
-    """
-    with closing(get_connection(db_path)) as conn:
-        existing = conn.execute(
-            """SELECT id FROM phase_bypasses
-               WHERE project_id = ? AND skill = ?
-                 AND current_phase = ? AND required_phase = ?
-                 AND bypassed_at >= datetime('now', '-60 seconds')
-               LIMIT 1""",
-            (project_id, skill, current_phase, required_phase),
-        ).fetchone()
-        if existing is not None:
-            return existing[0]
+    Returns the new row id. Each call is a distinct audit event — no
+    idempotency window (the v1.0.13 60-second dedup window is dropped
+    in v1.1.0 because the backend is the single source of truth and
+    the column it keyed off (`bypassed_at`) no longer exists)."""
+    row = backend.record_phase_bypass(
+        project_id=project_id,
+        from_phase=from_phase,
+        to_phase=to_phase,
+        reason=reason,
+        agent_id=agent_id,
+    )
+    return int(row["id"])
 
-        cursor = conn.execute(
-            """INSERT INTO phase_bypasses
-                 (project_id, skill, current_phase, required_phase, agent_id, note)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (project_id, skill, current_phase, required_phase, agent_id, note),
-        )
-        conn.commit()
-        assert cursor.lastrowid is not None, "INSERT returned no rowid"
-        return cursor.lastrowid
+
+# ── CLI ────────────────────────────────────────────────────────────────────
+
+
+def _parse_kv_flags(argv: list[str], names: tuple[str, ...]) -> dict[str, str]:
+    """Parse `--flag value` pairs from argv. Unknown flags exit 1."""
+    out: dict[str, str] = {}
+    i = 0
+    while i < len(argv):
+        flag = argv[i]
+        if flag in names:
+            if i + 1 >= len(argv):
+                print(f"{flag} requires a value", file=sys.stderr)
+                sys.exit(1)
+            out[flag.lstrip("-")] = argv[i + 1]
+            i += 2
+        else:
+            print(f"Unknown argument: {flag}", file=sys.stderr)
+            sys.exit(1)
+    return out
 
 
 if __name__ == "__main__":
-    # Usage: workflow.py <db_path> <command> [args...]
-    # db_path defaults to .ai/memex.db when invoked without it.
-    # All CLI tests pass it explicitly.
-    if len(sys.argv) >= 3 and not sys.argv[1].startswith("-") and sys.argv[2] in (
-        "get-phase", "advance", "check-gate", "force-phase", "transitions", "log-bypass"
+    # Usage: workflow.py [<db_path>] <command> [args...]
+    # db_path defaults to .ai/atelier.db when omitted; it is accepted but
+    # not consumed (the backend determines storage via mode detection).
+    if (
+        len(sys.argv) >= 3
+        and not sys.argv[1].startswith("-")
+        and sys.argv[2]
+        in (
+            "get-phase",
+            "advance",
+            "check-gate",
+            "force-phase",
+            "transitions",
+            "log-bypass",
+        )
     ):
         db_path = sys.argv[1]
         cmd = sys.argv[2]
         _argv_offset = 3
     else:
-        db_path = ".ai/memex.db"
+        db_path = ".ai/atelier.db"
         cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
         _argv_offset = 2
 
@@ -212,33 +260,47 @@ if __name__ == "__main__":
     elif cmd == "advance":
         project_id = int(sys.argv[_argv_offset])
         new_phase = sys.argv[_argv_offset + 1]
+        flags = _parse_kv_flags(sys.argv[_argv_offset + 2 :], ("--agent",))
+        agent_id = flags.get("agent", "atelier-system")
         try:
-            result = advance_phase(db_path, project_id, new_phase)
+            result = advance_phase(db_path, project_id, new_phase, agent_id)
             print(f"Phase advanced to: {result}")
         except WorkflowError as e:
             print(f"Error: {e}")
             sys.exit(1)
 
     # CLI exit code: ALWAYS 0 for check-gate, regardless of allowed=False.
-    # This is a deliberate breaking change from the prior contract where
-    # gate-not-met → exit 1. Consumers must parse the JSON `allowed` field.
-    # Documented in CHANGELOG via Task 14.
+    # Consumers must parse the JSON `allowed` field.
     elif cmd == "check-gate":
         project_id = int(sys.argv[_argv_offset])
         skill = sys.argv[_argv_offset + 1]
         result = check_gate(db_path, project_id, skill)
-        print(json.dumps({
-            "allowed": result.allowed,
-            "current_phase": result.current_phase,
-            "required_phase": result.required_phase,
-            "reason": result.reason,
-        }, sort_keys=True))
-        sys.exit(0)  # always 0 -- "not allowed" is no longer an error
+        print(
+            json.dumps(
+                {
+                    "allowed": result.allowed,
+                    "current_phase": result.current_phase,
+                    "required_phase": result.required_phase,
+                    "reason": result.reason,
+                },
+                sort_keys=True,
+            )
+        )
+        sys.exit(0)
 
     elif cmd == "force-phase":
         project_id = int(sys.argv[_argv_offset])
         new_phase = sys.argv[_argv_offset + 1]
-        update_project(db_path, project_id, phase=new_phase)
+        flags = _parse_kv_flags(sys.argv[_argv_offset + 2 :], ("--agent",))
+        agent_id = flags.get("agent", "atelier-system")
+        # `force-phase` skips the transition graph but still routes
+        # through the backend for the actual write — matches the rest
+        # of the module's "all writes through the facade" rule.
+        backend.transition_phase(
+            project_id=project_id,
+            to_phase=new_phase,
+            agent_id=agent_id,
+        )
         print(f"Phase forced to: {new_phase}")
 
     elif cmd == "transitions":
@@ -248,30 +310,22 @@ if __name__ == "__main__":
 
     elif cmd == "log-bypass":
         project_id = int(sys.argv[_argv_offset])
-        skill = sys.argv[_argv_offset + 1]
-        current_phase = sys.argv[_argv_offset + 2]
-        required_phase = sys.argv[_argv_offset + 3]
-        agent_id = None
-        note = None
-        i = _argv_offset + 4
-        while i < len(sys.argv):
-            if sys.argv[i] in ("--agent", "--note"):
-                if i + 1 >= len(sys.argv):
-                    print(f"{sys.argv[i]} requires a value", file=sys.stderr)
-                    sys.exit(1)
-                flag_name = sys.argv[i]
-                flag_value = sys.argv[i + 1]
-                if flag_name == "--agent":
-                    agent_id = flag_value
-                else:
-                    note = flag_value
-                i += 2
-            else:
-                print(f"Unknown argument: {sys.argv[i]}", file=sys.stderr)
-                sys.exit(1)
+        from_phase = sys.argv[_argv_offset + 1]
+        to_phase = sys.argv[_argv_offset + 2]
+        flags = _parse_kv_flags(
+            sys.argv[_argv_offset + 3 :],
+            ("--reason", "--agent"),
+        )
+        if "reason" not in flags or "agent" not in flags:
+            print("log-bypass requires --reason and --agent", file=sys.stderr)
+            sys.exit(1)
         bypass_id = log_bypass(
-            db_path, project_id, skill, current_phase, required_phase,
-            agent_id=agent_id, note=note,
+            db_path,
+            project_id,
+            from_phase,
+            to_phase,
+            reason=flags["reason"],
+            agent_id=flags["agent"],
         )
         print(json.dumps({"bypass_id": bypass_id}, sort_keys=True))
         sys.exit(0)

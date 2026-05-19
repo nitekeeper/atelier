@@ -1,4 +1,5 @@
 """Tests for scripts/platform_utils.py."""
+
 import os
 import stat
 import sys

@@ -1,0 +1,59 @@
+# Atelier has no Python package metadata (it ships as a Claude Code plugin,
+# not a pip-installable distribution). This file exists solely to host shared
+# tool configuration so local runs and CI agree on the rule set.
+#
+#   Local:  ruff check --fix . && ruff format .
+#           bandit -c pyproject.toml -r scripts hooks internal
+#           pip-audit -r requirements.txt
+#           pytest tests/
+#   CI:     .github/workflows/ci.yml runs the same.
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [
+    ".git",
+    "__pycache__",
+    ".claude/worktrees",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (unused imports, undefined names)
+    "I",    # isort (import ordering)
+    "B",    # flake8-bugbear (likely bugs)
+    "C4",   # comprehensions
+    "UP",   # pyupgrade (modern syntax)
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",   # line-too-long — formatter handles wraps it can; long strings get a pass
+    "SIM108", # ternary-instead-of-if-else — sometimes hurts readability
+    "B008",   # function-call-in-default-arg — Path() and similar are fine as defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "B011",   # assert-false — pytest tests use bare assert
+    "SIM117", # nested-with — sometimes clearer in test setup
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".github", "__pycache__", ".claude"]
+# Atelier shells out to `git` (worktree.py, session_open hook) heavily.
+# These subprocess-related findings are intentional and uniform across the
+# codebase; blanket-skipping is cleaner than scattering nosec everywhere.
+#
+# B608 (hardcoded SQL) is NOT blanket-skipped — Atelier builds SQL with
+# f-strings using internal table/column names, but each such site is
+# annotated inline with `# nosec B608` + the safety rationale. A NEW
+# violation introduced by a future commit will be caught by CI.
+skips = [
+    "B101",   # assert_used — invariant assertions in production code are intentional
+    "B404",   # blacklist-import-subprocess — Atelier shells to git by design
+    "B603",   # subprocess-without-shell-equals-true — this IS the safe form (no shell)
+    "B607",   # start-process-with-partial-path — `git` resolves via PATH; intended
+]

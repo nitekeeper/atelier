@@ -1,12 +1,22 @@
 # tests/test_workspace.py
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, patch, call
+
 from scripts.workspace import (
-    create_workspace, list_workspaces, join_workspace, leave_workspace,
-    create_room, list_rooms, join_room, close_room,
-    agent_join, agent_leave,
-    AGENT_TEAMS_ENV
+    AGENT_TEAMS_ENV,
+    agent_join,
+    agent_leave,
+    close_room,
+    create_room,
+    create_workspace,
+    join_room,
+    join_workspace,
+    leave_workspace,
+    list_rooms,
+    list_workspaces,
 )
+
 
 @pytest.fixture(autouse=True)
 def mock_preflight(mocker):
@@ -14,7 +24,9 @@ def mock_preflight(mocker):
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["tmux"])
     mocker.patch("sys.platform", "linux")
 
+
 # ── workspace tests ──────────────────────────────────────────────────────────
+
 
 def test_create_workspace_creates_tmux_session(mocker):
     mock_server = MagicMock()
@@ -28,9 +40,10 @@ def test_create_workspace_creates_tmux_session(mocker):
     mock_server.new_session.assert_called_once_with(
         session_name="my-project",
         start_directory="/home/user/project",
-        environment={AGENT_TEAMS_ENV: "1"}
+        environment={AGENT_TEAMS_ENV: "1"},
     )
     assert session.name == "my-project"
+
 
 def test_create_workspace_creates_main_room(mocker):
     mock_server = MagicMock()
@@ -42,6 +55,7 @@ def test_create_workspace_creates_main_room(mocker):
 
     mock_session.new_window.assert_called_once_with(window_name="main")
 
+
 def test_list_workspaces_returns_session_names(mocker):
     mock_server = MagicMock()
     s1, s2 = MagicMock(), MagicMock()
@@ -51,6 +65,7 @@ def test_list_workspaces_returns_session_names(mocker):
 
     names = list_workspaces()
     assert names == ["project-a", "project-b"]
+
 
 def test_join_workspace_attaches_to_session(mocker):
     mock_server = MagicMock()
@@ -65,6 +80,7 @@ def test_join_workspace_attaches_to_session(mocker):
     mock_session.attach_session.assert_called_once()
     assert session.name == "my-project"
 
+
 def test_join_workspace_raises_if_not_found(mocker):
     mock_server = MagicMock()
     mock_server.find_where.return_value = None
@@ -72,6 +88,7 @@ def test_join_workspace_raises_if_not_found(mocker):
 
     with pytest.raises(ValueError, match="Workspace 'unknown' not found"):
         join_workspace("unknown")
+
 
 def test_leave_workspace_detaches(mocker):
     mock_server = MagicMock()
@@ -82,7 +99,9 @@ def test_leave_workspace_detaches(mocker):
     leave_workspace("my-project")
     mock_session.detach_session.assert_called_once()
 
+
 # ── room tests ───────────────────────────────────────────────────────────────
+
 
 def test_create_room_adds_window(mocker):
     mock_server = MagicMock()
@@ -98,6 +117,7 @@ def test_create_room_adds_window(mocker):
     mock_session.new_window.assert_called_once_with(window_name="standup")
     assert window.name == "standup"
 
+
 def test_list_rooms_returns_window_names(mocker):
     mock_server = MagicMock()
     mock_session = MagicMock()
@@ -109,6 +129,7 @@ def test_list_rooms_returns_window_names(mocker):
 
     rooms = list_rooms("my-project")
     assert rooms == ["main", "standup"]
+
 
 def test_join_room_selects_window(mocker):
     mock_server = MagicMock()
@@ -123,6 +144,7 @@ def test_join_room_selects_window(mocker):
     mock_session.find_where.assert_called_once_with({"window_name": "standup"})
     mock_window.select_window.assert_called_once()
 
+
 def test_join_room_raises_if_not_found(mocker):
     mock_server = MagicMock()
     mock_session = MagicMock()
@@ -132,6 +154,7 @@ def test_join_room_raises_if_not_found(mocker):
 
     with pytest.raises(ValueError, match="Room 'ghost' not found"):
         join_room(workspace="my-project", room_name="ghost")
+
 
 def test_close_room_kills_window(mocker):
     mock_server = MagicMock()
@@ -144,12 +167,15 @@ def test_close_room_kills_window(mocker):
     close_room(workspace="my-project", room_name="standup")
     mock_window.kill_window.assert_called_once()
 
+
 def test_close_main_room_raises(mocker):
     mocker.patch("scripts.workspace._get_server")
     with pytest.raises(ValueError, match="Cannot close the main room"):
         close_room(workspace="my-project", room_name="main")
 
+
 # ── agent desk tests ─────────────────────────────────────────────────────────
+
 
 def test_agent_join_creates_pane(mocker):
     mock_server = MagicMock()
@@ -167,6 +193,7 @@ def test_agent_join_creates_pane(mocker):
     mock_pane.send_keys.assert_called_once_with("claude")
     assert pane == mock_pane
 
+
 def test_agent_leave_closes_pane(mocker):
     mock_server = MagicMock()
     mock_session = MagicMock()
@@ -181,7 +208,9 @@ def test_agent_leave_closes_pane(mocker):
     agent_leave(workspace="my-project", room_name="main", pane_id="%3")
     mock_pane.kill_pane.assert_called_once()
 
+
 # ── Windows path tests ────────────────────────────────────────────────────────
+
 
 def test_create_workspace_windows(mocker):
     mocker.patch("sys.platform", "win32")
@@ -189,29 +218,34 @@ def test_create_workspace_windows(mocker):
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
     run_mock = mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=""))
     from importlib import reload
+
     import scripts.workspace as ws
+
     reload(ws)
 
     ws.create_workspace(name="my-project", project_root="/home/user/project")
 
     all_args = [c.args[0] for c in run_mock.call_args_list]
-    assert any("new-session" in a and "my-project" in a and "/home/user/project" in a for a in all_args), \
-        "new-session not called with correct args"
-    assert any("setenv" in a and "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" in a for a in all_args), \
+    assert any(
+        "new-session" in a and "my-project" in a and "/home/user/project" in a for a in all_args
+    ), "new-session not called with correct args"
+    assert any("setenv" in a and "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" in a for a in all_args), (
         "setenv not called for agent teams env var"
-    assert any("new-window" in a and "main" in a for a in all_args), \
-        "new-window -n main not called"
+    )
+    assert any("new-window" in a and "main" in a for a in all_args), "new-window -n main not called"
 
 
 def test_list_workspaces_windows(mocker):
     mocker.patch("sys.platform", "win32")
     mocker.patch("scripts.preflight.check")
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
-    mocker.patch("subprocess.run", return_value=MagicMock(
-        returncode=0, stdout="project-a\nproject-b\n"
-    ))
+    mocker.patch(
+        "subprocess.run", return_value=MagicMock(returncode=0, stdout="project-a\nproject-b\n")
+    )
     from importlib import reload
+
     import scripts.workspace as ws
+
     reload(ws)
 
     names = ws.list_workspaces()
@@ -224,7 +258,9 @@ def test_list_workspaces_windows_empty(mocker):
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
     mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=""))
     from importlib import reload
+
     import scripts.workspace as ws
+
     reload(ws)
 
     names = ws.list_workspaces()
@@ -235,11 +271,11 @@ def test_agent_join_windows(mocker):
     mocker.patch("sys.platform", "win32")
     mocker.patch("scripts.preflight.check")
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
-    run_mock = mocker.patch("subprocess.run", return_value=MagicMock(
-        returncode=0, stdout="%0\n"
-    ))
+    run_mock = mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="%0\n"))
     from importlib import reload
+
     import scripts.workspace as ws
+
     reload(ws)
 
     ws.agent_join(workspace="my-project", room_name="main", agent_id="dev-1")
@@ -258,7 +294,9 @@ def test_list_workspaces_windows_no_server(mocker):
     mocker.patch("scripts.preflight.get_tmux_cmd", return_value=["wsl", "--", "tmux"])
     mocker.patch("subprocess.run", return_value=MagicMock(returncode=1, stdout=""))
     from importlib import reload
+
     import scripts.workspace as ws
+
     reload(ws)
 
     names = ws.list_workspaces()
@@ -273,7 +311,9 @@ def test_agent_join_windows_max_agents(mocker):
     pane_ids = "\n".join(f"%{i}" for i in range(5))
     mocker.patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=pane_ids))
     from importlib import reload
+
     import scripts.workspace as ws
+
     reload(ws)
 
     with pytest.raises(ValueError, match="Maximum 5 agents per room reached"):

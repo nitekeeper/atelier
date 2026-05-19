@@ -1,4 +1,5 @@
 """Atelier self-improvement cycle — git infrastructure CLI."""
+
 from __future__ import annotations
 
 import re
@@ -10,8 +11,8 @@ from pathlib import Path
 from scripts.git_utils import git as _git
 from scripts.platform_utils import safe_rmtree
 
-
 # ── Public functions ───────────────────────────────────────────────────────
+
 
 def get_remote_url(repo_dir: Path) -> str:
     """Return the origin remote URL of the production repo."""
@@ -105,8 +106,15 @@ def auto_merge_to_main(repo_dir: Path, branch: str) -> None:
     _git(["checkout", "main"], repo_dir)
     _git(["pull", "origin", "main"], repo_dir)
 
-    stash_result = _git(["stash", "push", "--include-untracked", "-m", "auto-stash before self-improve merge"], repo_dir, check=False)
-    stashed = stash_result.stdout.strip().startswith("Saved working directory") and stash_result.returncode == 0
+    stash_result = _git(
+        ["stash", "push", "--include-untracked", "-m", "auto-stash before self-improve merge"],
+        repo_dir,
+        check=False,
+    )
+    stashed = (
+        stash_result.stdout.strip().startswith("Saved working directory")
+        and stash_result.returncode == 0
+    )
 
     try:
         _git(["merge", "--no-ff", f"origin/{branch}", "-m", f"Merge {branch} into main"], repo_dir)
@@ -115,7 +123,9 @@ def auto_merge_to_main(repo_dir: Path, branch: str) -> None:
         if stashed:
             pop_result = _git(["stash", "pop"], repo_dir, check=False)
             if pop_result.returncode != 0:
-                print(f"WARNING: stash pop failed in {repo_dir} — working directory may contain uncommitted changes")
+                print(
+                    f"WARNING: stash pop failed in {repo_dir} — working directory may contain uncommitted changes"
+                )
 
 
 def cleanup_experiment(experiment_dir: Path) -> None:
@@ -138,7 +148,7 @@ def sync_worktree_with_main(worktree_dir: Path) -> str:
 
     Returns a human-readable status string; never raises.
     """
-    from scripts.worktree import get_current_branch, classify_status
+    from scripts.worktree import classify_status, get_current_branch
 
     wt_branch = get_current_branch(worktree_dir)
     status = _git(["status", "--porcelain"], worktree_dir, check=False)
@@ -200,7 +210,8 @@ if __name__ == "__main__":
         print(f"BRANCH={branch}")
 
     elif cmd == "check-destructive":
-        from scripts.destructive_check import get_diff, detect_destructive
+        from scripts.destructive_check import detect_destructive, get_diff
+
         clone = Path(sys.argv[2])
         diff = get_diff(clone)
         issues = detect_destructive(diff, clone)
@@ -252,8 +263,7 @@ if __name__ == "__main__":
 
     else:
         print(
-            "Commands: clone, check-destructive, run-tests, commit, "
-            "push-merge, cleanup, pull",
+            "Commands: clone, check-destructive, run-tests, commit, push-merge, cleanup, pull",
             file=sys.stderr,
         )
         sys.exit(1)

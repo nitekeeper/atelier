@@ -1,4 +1,5 @@
 """Validates skills/run/SKILL.md is parseable and complete."""
+
 import re
 from pathlib import Path
 
@@ -6,7 +7,11 @@ import pytest
 import yaml
 
 SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "run" / "SKILL.md"
-MIGRATION_003 = Path(__file__).resolve().parent.parent / "migrations" / "003_phases.sql"
+# Phases live inline in v1.1.0's single-file schema migration (spec §11.2 / Plan 1
+# Task 5). v1.0.13's migrations/003_phases.sql was deleted in the clean-cut redesign.
+MIGRATION_003 = (
+    Path(__file__).resolve().parent.parent / "migrations" / "shared" / "001_v110_schema.sql"
+)
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +70,9 @@ def test_phase_guidance_table_has_all_phases(skill_data):
     """Every phase in migration 003 must appear in the phase guidance table."""
     _, body = skill_data
     phase_section_match = re.search(
-        r"## Phase guidance\r?\n(.*?)(?=\r?\n## )", body, re.DOTALL,
+        r"## Phase guidance\r?\n(.*?)(?=\r?\n## )",
+        body,
+        re.DOTALL,
     )
     assert phase_section_match is not None, "Phase guidance section not found or improperly closed"
     phase_block = phase_section_match.group(1)

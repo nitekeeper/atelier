@@ -117,7 +117,7 @@ Cycles run sequentially. A failure in one cycle does not block the next.
 
 10. Set up the isolated clone and feature branch:
 ```
-python scripts/self_improve.py clone <cycle_n>
+python3 scripts/self_improve.py clone <cycle_n>
 ```
 The command prints `CLONE_DIR=<path>` and `BRANCH=<name>`. Record both.
 
@@ -130,7 +130,7 @@ The command prints `CLONE_DIR=<path>` and `BRANCH=<name>`. Record both.
 
 13. Check for destructive changes:
 ```
-python scripts/self_improve.py check-destructive <clone_dir>
+python3 scripts/self_improve.py check-destructive <clone_dir>
 ```
 - Exit 0: no destructive changes — proceed.
 - Exit 1: review the JSON output. For each destructive change, ask the user:
@@ -143,14 +143,14 @@ python scripts/self_improve.py check-destructive <clone_dir>
 
 14. Run the full test suite in the clone:
 ```
-python scripts/self_improve.py run-tests <clone_dir>
+python3 scripts/self_improve.py run-tests <clone_dir>
 ```
 - **Pass (exit 0):** proceed to step 15.
 - **Fail (exit 1):** ABORT. Do NOT execute step 15 or 16. The branch is NOT pushed. Append to minutes: `## Outcome\nFAILED — tests did not pass`. Proceed directly to step 17.
 
 15. Commit all changes:
 ```
-python scripts/self_improve.py commit <clone_dir> <cycle_n> "<subject>" "<d1>|<d2>" "<p1>|<p2>" <test_count> "docs/self-improve/YYYY-MM-DD-cycle-N-minutes.md"
+python3 scripts/self_improve.py commit <clone_dir> <cycle_n> "<subject>" "<d1>|<d2>" "<p1>|<p2>" <test_count> "docs/self-improve/YYYY-MM-DD-cycle-N-minutes.md"
 ```
 
 Where:
@@ -164,15 +164,15 @@ Where:
 16. Push and merge:
 ```
 # If all changes are non-destructive (or all approved):
-python scripts/self_improve.py push-merge <clone_dir> <branch>
+python3 scripts/self_improve.py push-merge <clone_dir> <branch>
 
 # If any destructive change is awaiting approval (skip auto-merge):
-python scripts/self_improve.py push-merge <clone_dir> <branch> skip
+python3 scripts/self_improve.py push-merge <clone_dir> <branch> skip
 ```
 
 17. Clean up:
 ```
-python scripts/self_improve.py cleanup
+python3 scripts/self_improve.py cleanup
 ```
 
 18. The `push-merge` command automatically pulls main after a successful auto-merge. No additional pull step is needed.

@@ -14,7 +14,7 @@ Requires `review:changes-requested`.
 
 1. **Check the phase gate:**
    ```
-   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:receive-review
+   python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:receive-review
    ```
    Parse JSON output. Apply standard bypass-confirm-log flow if `allowed` is `false`.
 
@@ -38,7 +38,7 @@ Requires `review:changes-requested`.
    - State the disputed claim precisely.
    - Provide evidence (test output, spec reference, language documentation, benchmark).
    - Propose a resolution.
-   - Log the pushback in the session notes via `python atelier/scripts/session.py update <session_id> --notes "<item: disputed claim / evidence / resolution>"`.
+   - Log the pushback in the session notes via `python3 atelier/scripts/session.py update <session_id> --notes "<item: disputed claim / evidence / resolution>"`.
 
    **Distinction — factual vs. preference disputes:**
    - *Factual dispute:* reviewer claims the code is incorrect, unsafe, or misses a requirement. Push back with evidence if wrong.
@@ -60,7 +60,7 @@ Requires `review:changes-requested`.
 
 8. **Advance phase and request re-review:**
    ```
-   python atelier/scripts/workflow.py <db_path> advance <project_id> review:open
+   python3 atelier/scripts/workflow.py <db_path> advance <project_id> review:open
    ```
    Notify the reviewer: "Changes implemented for all accepted items. Push-back items logged. Ready for re-review."
 

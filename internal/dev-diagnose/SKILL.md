@@ -22,7 +22,7 @@ If you patched the code before writing the regression test: revert the patch, wr
 
 1. Check the phase gate:
    ```
-   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:diagnose
+   python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:diagnose
    ```
    Parse the JSON output `{"allowed": bool, "current_phase": str, "required_phase": str|null, "reason": str}`.
    For this skill `allowed` is always `true` (no gate configured). Record `current_phase` for later use, then proceed to the next step.
@@ -32,14 +32,14 @@ If you patched the code before writing the regression test: revert the patch, wr
 
 2. Write a session entry to record the diagnose entry and save the interrupted phase:
    ```
-   python atelier/scripts/session.py write <project_id> <agent_id> diagnose:open in-progress \
+   python3 atelier/scripts/session.py write <project_id> <agent_id> diagnose:open in-progress \
      --pre-diagnose-phase <pre_diagnose_phase> \
      --notes "Entering diagnose: <one-line bug description>"
    ```
 
 3. Advance phase:
    ```
-   python atelier/scripts/workflow.py <db_path> advance <project_id> diagnose:open
+   python3 atelier/scripts/workflow.py <db_path> advance <project_id> diagnose:open
    ```
 
 4. Determine if the bug is reproducible deterministically.
@@ -52,7 +52,7 @@ If you patched the code before writing the regression test: revert the patch, wr
 6. Identify the affected layer:
    - Design error → after fix, restore to `design:open`
    - Implementation error → fix in current branch, restore to `<pre_diagnose_phase>`
-   - Review miss → write a session note via `python atelier/scripts/session.py write <project_id> <agent_id> <pre_diagnose_phase> in-progress --notes "Review miss: <what was missed>"`, then restore to `<pre_diagnose_phase>`
+   - Review miss → write a session note via `python3 atelier/scripts/session.py write <project_id> <agent_id> <pre_diagnose_phase> in-progress --notes "Review miss: <what was missed>"`, then restore to `<pre_diagnose_phase>`
 
 7. Fix the root cause. Not the symptom.
 
@@ -76,18 +76,18 @@ If you patched the code before writing the regression test: revert the patch, wr
 
 11. Advance to resolved:
     ```
-    python atelier/scripts/workflow.py <db_path> advance <project_id> diagnose:resolved
+    python3 atelier/scripts/workflow.py <db_path> advance <project_id> diagnose:resolved
     ```
 
 12. Read the latest session to retrieve the pre_diagnose_phase:
     ```
-    python atelier/scripts/session.py read-latest <project_id>
+    python3 atelier/scripts/session.py read-latest <project_id>
     ```
     Extract the `pre_diagnose_phase` field from the output.
 
 13. Restore the project to the interrupted phase:
     ```
-    python atelier/scripts/workflow.py <db_path> force-phase <project_id> <pre_diagnose_phase>
+    python3 atelier/scripts/workflow.py <db_path> force-phase <project_id> <pre_diagnose_phase>
     ```
     Confirm: "Bug resolved. Regression test added. Restored to <pre_diagnose_phase>. Ready to resume."
 

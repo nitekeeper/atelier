@@ -14,17 +14,17 @@ Requires `plan:approved`.
 
 1. **Check the phase gate:**
    ```
-   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:subagent
+   python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:subagent
    ```
    Apply standard bypass-confirm-log flow if `allowed` is `false`.
 
 2. **Load the plan.** Read the plan document:
    ```
-   python atelier/scripts/documents.py list --project_id <project_id>
+   python3 atelier/scripts/documents.py list --project_id <project_id>
    ```
    Open the plan file. List all tasks:
    ```
-   python atelier/scripts/tasks.py list --project_id <project_id> --status pending
+   python3 atelier/scripts/tasks.py list --project_id <project_id> --status pending
    ```
    Work tasks in order. If any task is tagged `[DESTRUCTIVE]` in its description, note it — these require explicit human confirmation before dispatch (step 4b).
 
@@ -35,8 +35,8 @@ Requires `plan:approved`.
 
    **a. Claim:**
    ```
-   python atelier/scripts/tasks.py claim <task_id> subagent-implementer
-   python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:red
+   python3 atelier/scripts/tasks.py claim <task_id> subagent-implementer
+   python3 atelier/scripts/workflow.py <db_path> advance <project_id> tdd:red
    ```
 
    **b. Destructive gate.** If the task is tagged `[DESTRUCTIVE]`: pause and ask:
@@ -50,7 +50,7 @@ Requires `plan:approved`.
 
    **d. Advance to review:**
    ```
-   python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:clean
+   python3 atelier/scripts/workflow.py <db_path> advance <project_id> tdd:clean
    ```
 
    **e. Stage 1 — Spec compliance review.** Dispatch a spec-reviewer subagent using `spec-reviewer-prompt.md`. Provide: the plan task, the diff of changes made.
@@ -63,7 +63,7 @@ Requires `plan:approved`.
 
    **g. Complete:**
    ```
-   python atelier/scripts/tasks.py complete <task_id>
+   python3 atelier/scripts/tasks.py complete <task_id>
    ```
 
    **h. Human checkpoint (if task 10 reached).** Pause:

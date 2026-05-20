@@ -17,22 +17,22 @@ Manages rooms (tmux windows) within a workspace. Rooms are created dynamically. 
 
 ### room:create
 1. Ask: "Workspace name?" / "Room name (e.g. 'standup', 'auth-sprint', 'security-review')?"
-2. Run: `python atelier/scripts/workspace.py room:create <workspace> <room_name>`
+2. Run: `python3 atelier/scripts/workspace.py room:create <workspace> <room_name>`
 3. Confirm: "Room '[room_name]' created in workspace '[workspace]'."
 
 ### room:join
 1. Ask: "Workspace name?" / "Room name?"
-2. Run: `python atelier/scripts/workspace.py room:join <workspace> <room_name>`
+2. Run: `python3 atelier/scripts/workspace.py room:join <workspace> <room_name>`
 3. Confirm: "Joined room '[room_name]'."
 
 ### room:list
 1. Ask: "Workspace name?"
-2. Run: `python atelier/scripts/workspace.py room:list <workspace>`
+2. Run: `python3 atelier/scripts/workspace.py room:list <workspace>`
 3. Display the list of rooms.
 
 ### room:close
 1. Ask: "Workspace name?" / "Room name?"
-2. Run: `python atelier/scripts/workspace.py room:close <workspace> <room_name>`
+2. Run: `python3 atelier/scripts/workspace.py room:close <workspace> <room_name>`
 3. Confirm: "Room '[room_name]' closed."
 
 ## Hard rules

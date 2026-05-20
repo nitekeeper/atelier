@@ -14,7 +14,7 @@ No gate — requires only that a project exists. Run `project:read <project_id>`
 
 1. Check the phase gate:
    ```
-   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:design
+   python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:design
    ```
    Parse the JSON output `{"allowed": bool, "current_phase": str, "required_phase": str|null, "reason": str}`.
    For this skill `allowed` is always `true` (no gate configured). Record `current_phase` for later use, then proceed to the next step.
@@ -45,9 +45,9 @@ No gate — requires only that a project exists. Run `project:read <project_id>`
 
 5. Write the design document to a file (e.g. `docs/design/<project-slug>-design.md`).
 
-6. Register the document: `python atelier/scripts/documents.py create <project_id> design "<title>" "<filename>" "<agent_id>"`
+6. Register the document: `python3 atelier/scripts/documents.py create <project_id> design "<title>" "<filename>" "<agent_id>"`
 
-7. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> design:approved`
+7. Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> design:approved`
 
 8. Confirm: "Design document approved. Phase advanced to design:approved. Ready for `internal/dev-plan/SKILL.md`."
 

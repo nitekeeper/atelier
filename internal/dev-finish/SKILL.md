@@ -14,7 +14,7 @@ Requires `qa:approved`.
 
 1. **Check the phase gate:**
    ```
-   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:finish
+   python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:finish
    ```
    Parse JSON output. If `allowed` is `false`, apply standard bypass-confirm-log flow before continuing.
 
@@ -24,14 +24,14 @@ Requires `qa:approved`.
    |---|---|---|
    | Tests green | `pytest -v` | 0 failures — show full summary line |
    | Working tree clean | `git status --short` | No output |
-   | No open assigned tasks | `python atelier/scripts/tasks.py list --project_id <project_id> --status assigned` | Empty list |
+   | No open assigned tasks | `python3 atelier/scripts/tasks.py list --project_id <project_id> --status assigned` | Empty list |
    | CI status | `gh run list --limit 1 --json status,conclusion` | `"conclusion": "success"` — show the output |
 
    If any check fails: stop. State what failed and what must be resolved. Do not advance phase.
 
 3. **Advance phase:**
    ```
-   python atelier/scripts/workflow.py <db_path> advance <project_id> handoff:open
+   python3 atelier/scripts/workflow.py <db_path> advance <project_id> handoff:open
    ```
 
 4. **Present integration options** — ask the user to choose:
@@ -46,7 +46,7 @@ Requires `qa:approved`.
    **Option (a) — Merge to main:**
    Ask: "Confirm merge of `<branch>` into `<base>`? (yes/no)" Wait for yes before running:
    ```
-   python atelier/scripts/worktree.py merge-back
+   python3 atelier/scripts/worktree.py merge-back
    ```
    On non-zero exit: follow printed recovery instructions. Do not advance to `handoff:complete`.
 
@@ -66,14 +66,14 @@ Requires `qa:approved`.
 
 5. **Write session record and advance to complete:**
    ```
-   python atelier/scripts/session.py write <project_id> <agent_id> handoff:open complete \
+   python3 atelier/scripts/session.py write <project_id> <agent_id> handoff:open complete \
      --accomplished "<what was integrated>" \
      --next-action "Project complete — start a new project for follow-on work" \
      [--notes "<abandon reason or PR URL>"]
    ```
    Then advance:
    ```
-   python atelier/scripts/workflow.py <db_path> advance <project_id> handoff:complete
+   python3 atelier/scripts/workflow.py <db_path> advance <project_id> handoff:complete
    ```
 
 6. **Retro — surface phase bypasses:**

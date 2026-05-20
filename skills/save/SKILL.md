@@ -56,7 +56,7 @@ Branch on the returned `action`:
 3. **Merge back, remove worktree, delete branch.**
    Run:
    ```
-   python atelier/scripts/worktree.py merge-back
+   python3 atelier/scripts/worktree.py merge-back
    ```
    This script:
    - Verifies the main workspace is on the expected base branch and clean.
@@ -70,9 +70,9 @@ Branch on the returned `action`:
 
 4. **Determine context.**
    You need four values before calling `session.py write`. If you ran `load` this session they are in working memory. If not:
-   - `project_id`: run `python atelier/scripts/projects.py list` and select the active project.
+   - `project_id`: run `python3 atelier/scripts/projects.py list` and select the active project.
      **If the output is empty (`[]` or no rows):** stop. Tell the user: "No projects found in `.ai/memex.db`. Create a project first with `projects.py create` or confirm you are in the correct target directory." Do not proceed to step 5.
-   - `agent_id`: run `python atelier/scripts/agents.py list` and identify your own agent record by name. Ask the user if your record is ambiguous or missing.
+   - `agent_id`: run `python3 atelier/scripts/agents.py list` and identify your own agent record by name. Ask the user if your record is ambiguous or missing.
    - `phase`: read from the project record returned by `projects.py list` (`phase` column).
    - `status`: determine from session state — `in-progress`, `blocked`, or `complete`.
 
@@ -92,7 +92,7 @@ Branch on the returned `action`:
 6. **Write the session.**
    Run:
    ```
-   python atelier/scripts/session.py write <project_id> <agent_id> <phase> <status> \
+   python3 atelier/scripts/session.py write <project_id> <agent_id> <phase> <status> \
      --current-tasks "<current_tasks>" \
      --accomplished "<accomplished>" \
      --next-action "<next_action>" \

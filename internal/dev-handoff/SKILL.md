@@ -14,7 +14,7 @@ None — callable from any phase.
 
 1. Check the phase gate:
    ```
-   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:handoff
+   python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:handoff
    ```
    Parse the JSON output `{"allowed": bool, "current_phase": str, "required_phase": str|null, "reason": str}`.
    For this skill `allowed` is always `true` (no gate configured). Record `current_phase` for later use, then proceed to the next step.
@@ -22,12 +22,12 @@ None — callable from any phase.
 
    Determine current project state:
    ```
-   python atelier/scripts/tasks.py list --project_id <project_id>
+   python3 atelier/scripts/tasks.py list --project_id <project_id>
    ```
 
 2. Write session state:
    ```
-   python atelier/scripts/session.py write <project_id> <agent_id> <current_phase> <status> \
+   python3 atelier/scripts/session.py write <project_id> <agent_id> <current_phase> <status> \
      --accomplished "<what was completed this session>" \
      --next-action "<exact first action for the next session>" \
      [--notes "<pm notes for the next session>"] \

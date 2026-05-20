@@ -1,7 +1,7 @@
 """Detect coexisting atelier.db and memex.db and report migration status.
 
 Usage:
-    python scripts/migrate_db_rename.py [<directory>]
+    python3 scripts/migrate_db_rename.py [<directory>]
 
 Default directory: .ai/
 

@@ -22,7 +22,7 @@ If you wrote implementation before the test: delete it. Not "keep as reference."
 
 1. Check the phase gate:
    ```
-   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:tdd
+   python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:tdd
    ```
    Parse the JSON output: `{"allowed": bool, "current_phase": str, "required_phase": str, "reason": str}`.
 
@@ -34,17 +34,17 @@ If you wrote implementation before the test: delete it. Not "keep as reference."
 
    - On **yes**: run:
      ```
-     python atelier/scripts/workflow.py <db_path> log-bypass <project_id> dev:tdd <current_phase> <required_phase>
+     python3 atelier/scripts/workflow.py <db_path> log-bypass <project_id> dev:tdd <current_phase> <required_phase>
      ```
      Optionally append `--agent <agent_id>` and `--note "<reason>"`. Then proceed to the next step.
    - On **no**: stop. Tell the user:
-     > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
+     > *"Advance to `<required_phase>` first (run `python3 atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
-2. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:red`
+2. Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> tdd:red`
 
 3. Read the plan document:
    ```
-   python atelier/scripts/documents.py list --project_id <project_id>
+   python3 atelier/scripts/documents.py list --project_id <project_id>
    ```
    Open the plan. Work one task at a time in order.
 
@@ -62,7 +62,7 @@ If you wrote implementation before the test: delete it. Not "keep as reference."
 
 ### Green cycle
 
-6. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:green`
+6. Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> tdd:green`
 
 7. Write the minimal implementation to make the test pass.
    - Minimal means: the simplest code that passes the test, no more.
@@ -82,7 +82,7 @@ If you wrote implementation before the test: delete it. Not "keep as reference."
 
 ### Clean cycle
 
-10. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:clean`
+10. Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> tdd:clean`
 
 11. Refactor the implementation:
     - Remove duplication.
@@ -105,7 +105,7 @@ If you wrote implementation before the test: delete it. Not "keep as reference."
 ### Repeat or advance
 
 14. If more tasks remain in the plan:
-    - Advance phase back to red: `python atelier/scripts/workflow.py <db_path> advance <project_id> tdd:red`
+    - Advance phase back to red: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> tdd:red`
     - Return to step 4 for the next task.
 
 15. When all plan tasks are complete:

@@ -271,7 +271,7 @@ def _refuse_half_installed_memex() -> None:
         return  # bootstrapped — proceed to mode dispatch
     raise RuntimeError(
         "Memex is not bootstrapped. Run `memex:run` once to trigger "
-        "Step 0.2 auto-bootstrap (or run `python -m scripts.install` "
+        "Step 0.2 auto-bootstrap (or run `python3 -m scripts.install` "
         "inside the Memex plugin), then re-run Atelier bootstrap."
     )
 
@@ -398,7 +398,7 @@ def _run_bootstrap_memex() -> dict:
         except memex_db.MemexNotInitializedError as exc:
             raise RuntimeError(
                 "Memex is not bootstrapped. Run `memex:run` once to trigger "
-                "Step 0.2 auto-bootstrap (or run `python -m scripts.install` "
+                "Step 0.2 auto-bootstrap (or run `python3 -m scripts.install` "
                 "inside the Memex plugin), then re-run Atelier bootstrap."
             ) from exc
 

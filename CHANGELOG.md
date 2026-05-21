@@ -1,5 +1,60 @@
 # Changelog
 
+## v1.2.0 — 2026-05-20
+
+**Memex-mode bug fixes + bootstrap wiring.** Resolves a class of
+`workspace_id`-related crashes that surfaced once atelier started writing
+through Memex v2 in production, and wires atelier's bootstrap into
+memex's new `ensure_internal_agents()` invariant.
+
+**Memex compatibility:** Best-effort soft dependency on Memex **v2.6.0+**
+(for `ensure_internal_agents()`). Older memex versions log a warning and
+continue — no crash, no behaviour change beyond the dropped invariant
+restore. Memex v2.2.0+ API floor from v1.1.0 is unchanged.
+
+### Added
+- `scripts/bootstrap.py:_run_bootstrap_memex` now calls memex's new
+  `ensure_internal_agents()` API after seeding atelier's roster into
+  `~/.memex/agents.db`, restoring memex's internal-agent invariant
+  after each touch of the shared `agents.db`. Soft-imported — older
+  memex versions (pre-2.6.0) log a warning and continue. Refs: #9, #12.
+
+### Fixed
+- **memex-mode `workspace_id` propagation across 4 write paths.**
+  `scripts/projects.py:_resolve_workspace_id` was queried
+  unconditionally against `backend_local`, crashing in memex mode with
+  `OperationalError: no such table: workspaces`. `backend_memex`'s
+  `upsert_session` / `write_document` / `write_meeting` built INSERT
+  payloads omitting `workspace_id` while the target tables
+  (`sessions`, `project_documents`, `meeting_minutes`) declare
+  `workspace_id NOT NULL` — the first memex-mode write to any of these
+  would crash with `IntegrityError`. All four paths are now
+  mode-aware and inject `workspace_id` correctly. Refs: #6 bugs 1–2
+  (+ latent 3–4), #8.
+
+### Internal
+- Extracted shared `workspace_resolution` module to eliminate the
+  duplicated `_resolve_singleton_workspace_id` helpers that PR #8
+  introduced across four scripts. Refs: #10, #11.
+- `_atelier_version()` fallback sentinel bumped `1.1.0` → `1.2.0`
+  (the v1.1.1 release missed this bump; caught up here).
+
+### Migration notes
+- None — pure bug fixes; existing API surface unchanged. Memex
+  callers benefit automatically once memex is upgraded to v2.6.0+.
+
+## v1.1.1 — 2026-05-18
+
+### Fixed
+- `_scripts_db_shim` no longer recurses into `_load_memex_module`
+  when memex imports back into `scripts.*` during bootstrap — the
+  shim's reentrancy guard now short-circuits on second entry.
+- Documentation and lint guard: replaced bare `python` invocations
+  with `python3` in docs; added a lint guard to keep them out of
+  future docs.
+- Replaced `try/except/pass` with `contextlib.suppress` per ruff
+  SIM105.
+
 ## v1.1.0 — 2026-05-18
 
 **Memex v2 integration.** Atelier now writes through Memex v2 when

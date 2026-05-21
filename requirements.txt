@@ -1,2 +1,2 @@
-libtmux>=0.28
+libtmux>=0.57.1
 PyYAML>=6.0.3

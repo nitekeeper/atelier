@@ -59,10 +59,10 @@ EXCLUSION_SUBSTRINGS = (
     "PYTHONPATH",
     "pythonic",
     "python_path",
-    "Python ",      # prose: "Python 3.11+", "Python is"
-    "Python.",      # prose: "Python."
-    "Python,",      # prose: "Python, ..."
-    "python3",      # already correct
+    "Python ",  # prose: "Python 3.11+", "Python is"
+    "Python.",  # prose: "Python."
+    "Python,",  # prose: "Python, ..."
+    "python3",  # already correct
     "cpython",
     "micropython",
     "#!/usr/bin/env python3",

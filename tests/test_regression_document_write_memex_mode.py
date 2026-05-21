@@ -64,14 +64,18 @@ def test_write_document_in_memex_mode_populates_workspace_id():
             )
         return {"row_id": 99, "index_id": librarian_output["index_id"], **payload}
 
-    # Bypass librarian validation / embedding / slug-resolution paths so
-    # the test stays hermetic (no ~/.memex/config.json required).
+    # Bypass librarian validation / embedding / slug-resolution / key-seq
+    # paths so the test stays hermetic (no ~/.memex/config.json required).
+    # _next_seq scans the memex `index.documents` store, which loads the
+    # memex `stores` module via _memex_plugin_root() — that requires
+    # ~/.memex/config.json on disk and fails on bare CI runners.
     with (
         patch.object(backend_memex, "_memex_core_query", side_effect=fake_query),
         patch.object(backend_memex, "_memex_write_entry", side_effect=fake_write_entry),
         patch.object(backend_memex, "_memex_validate_output", side_effect=lambda x: x),
         patch.object(backend_memex, "_try_embed", return_value=None),
         patch.object(backend_memex, "_resolve_project_slug", return_value="p"),
+        patch.object(backend_memex, "_next_seq", return_value=1),
     ):
         try:
             backend_memex.write_document(
@@ -123,6 +127,7 @@ def test_write_document_in_memex_mode_falls_back_to_project_lookup_when_metadata
         patch.object(backend_memex, "_memex_validate_output", side_effect=lambda x: x),
         patch.object(backend_memex, "_try_embed", return_value=None),
         patch.object(backend_memex, "_resolve_project_slug", return_value="p"),
+        patch.object(backend_memex, "_next_seq", return_value=1),
     ):
         backend_memex.write_document(
             domain="design",

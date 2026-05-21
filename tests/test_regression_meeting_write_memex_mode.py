@@ -56,6 +56,7 @@ def test_write_meeting_in_memex_mode_populates_workspace_id():
         patch.object(backend_memex, "_memex_validate_output", side_effect=lambda x: x),
         patch.object(backend_memex, "_try_embed", return_value=None),
         patch.object(backend_memex, "_resolve_project_slug", return_value="p"),
+        patch.object(backend_memex, "_next_seq", return_value=1),
     ):
         try:
             backend_memex.write_meeting(
@@ -105,6 +106,7 @@ def test_write_meeting_in_memex_mode_workspace_level_meeting_no_project_id():
         patch.object(backend_memex, "_memex_validate_output", side_effect=lambda x: x),
         patch.object(backend_memex, "_try_embed", return_value=None),
         patch.object(backend_memex, "_resolve_project_slug", return_value="(no-project)"),
+        patch.object(backend_memex, "_next_seq", return_value=1),
     ):
         backend_memex.write_meeting(
             title="All-Hands",

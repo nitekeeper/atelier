@@ -57,7 +57,7 @@ Add to your project's `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "python /path/to/atelier/hooks/session_start.py"
+            "command": "python3 /path/to/atelier/hooks/session_start.py"
           }
         ]
       }

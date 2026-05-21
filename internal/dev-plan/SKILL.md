@@ -14,7 +14,7 @@ Requires `design:approved`.
 
 1. Check the phase gate:
    ```
-   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:plan
+   python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:plan
    ```
    Parse the JSON output: `{"allowed": bool, "current_phase": str, "required_phase": str, "reason": str}`.
 
@@ -26,17 +26,17 @@ Requires `design:approved`.
 
    - On **yes**: run:
      ```
-     python atelier/scripts/workflow.py <db_path> log-bypass <project_id> dev:plan <current_phase> <required_phase>
+     python3 atelier/scripts/workflow.py <db_path> log-bypass <project_id> dev:plan <current_phase> <required_phase>
      ```
      Optionally append `--agent <agent_id>` and `--note "<reason>"`. Then proceed to the next step.
    - On **no**: stop. Tell the user:
-     > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
+     > *"Advance to `<required_phase>` first (run `python3 atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
-2. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> plan:open`
+2. Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> plan:open`
 
 3. Read the approved design document for the project:
    ```
-   python atelier/scripts/documents.py list --project_id <project_id>
+   python3 atelier/scripts/documents.py list --project_id <project_id>
    ```
    This returns JSON with all documents. Extract the `filename` field for the design document (type: "design") and read that file. Do not plan without reading the approved design.
 
@@ -60,11 +60,11 @@ Requires `design:approved`.
 
 5. Register the plan document:
    ```
-   python atelier/scripts/documents.py create <project_id> plan "<title>" "<filename>" "<agent_id>"
+   python3 atelier/scripts/documents.py create <project_id> plan "<title>" "<filename>" "<agent_id>"
    ```
 
 6. When plan is approved by the human:
-   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> plan:approved`
+   - Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> plan:approved`
    - Confirm: "Plan approved. Phase: plan:approved. Ready to begin dev:tdd."
 
 ## Hard rules

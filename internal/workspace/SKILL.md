@@ -17,21 +17,21 @@ Manages tmux workspaces. Each workspace is a tmux session with Claude Code agent
 
 ### workspace:create
 1. Ask: "Workspace name (use project name, e.g. 'auth-service')?" / "Project root path?"
-2. Run: `python atelier/scripts/workspace.py workspace:create <name> --root <path>`
+2. Run: `python3 atelier/scripts/workspace.py workspace:create <name> --root <path>`
 3. Confirm: "Workspace '[name]' created. Main room is ready. You are now in the workspace."
 
 ### workspace:list
-1. Run: `python atelier/scripts/workspace.py workspace:list`
+1. Run: `python3 atelier/scripts/workspace.py workspace:list`
 2. Display the list of active workspaces.
 
 ### workspace:join
 1. Ask: "Workspace name?"
-2. Run: `python atelier/scripts/workspace.py workspace:join <name>`
+2. Run: `python3 atelier/scripts/workspace.py workspace:join <name>`
 3. Confirm: "Joined workspace '[name]'."
 
 ### workspace:leave
 1. Ask: "Workspace name?"
-2. Run: `python atelier/scripts/workspace.py workspace:leave <name>`
+2. Run: `python3 atelier/scripts/workspace.py workspace:leave <name>`
 3. Confirm: "Left workspace '[name]'."
 
 ## Hard rules

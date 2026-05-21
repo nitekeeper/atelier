@@ -19,30 +19,30 @@ Manages documents attached to projects — design docs, implementation plans, te
 
 ### doc:create
 1. Ask: "Project ID?" / "Document type (e.g. design, implementation-plan, test-report, security-report, qa-report)?" / "Title?" / "Filename (path to the markdown file)?" / "Your agent ID?"
-2. Run: `python atelier/scripts/documents.py create <project_id> "<type>" "<title>" "<filename>" "<created_by>"`
+2. Run: `python3 atelier/scripts/documents.py create <project_id> "<type>" "<title>" "<filename>" "<created_by>"`
 3. Confirm: "Document registered: [title] (id: [id])"
 
 ### doc:read
 1. Ask: "Document ID?"
-2. Run: `python atelier/scripts/documents.py get <id>`
+2. Run: `python3 atelier/scripts/documents.py get <id>`
 3. Display all fields.
 
 ### doc:update
 1. Ask: "Document ID?" and "What to update?"
-2. Run: `python atelier/scripts/documents.py update <id> [--title "..."] [--type "..."] [--filename "..."]`
+2. Run: `python3 atelier/scripts/documents.py update <id> [--title "..."] [--type "..."] [--filename "..."]`
 3. Confirm: "Document updated."
 
 ### doc:delete
 1. Ask: "Document ID? Note: this removes the DB record only, not the file."
-2. Run: `python atelier/scripts/documents.py delete <id>`
+2. Run: `python3 atelier/scripts/documents.py delete <id>`
 3. Confirm: "Document record removed."
 
 ### doc:list
 1. Ask: "Filter by project ID? Filter by type? (both optional)"
-2. Run: `python atelier/scripts/documents.py list [--project_id N] [--type "<type>"]`
+2. Run: `python3 atelier/scripts/documents.py list [--project_id N] [--type "<type>"]`
 3. Display results as a table: id | project_id | type | title | filename
 
 ### doc:search
 1. Ask: "Search query?" and "Filter by project ID? (optional)"
-2. Run: `python atelier/scripts/documents.py search "<query>" [--project_id N]`
+2. Run: `python3 atelier/scripts/documents.py search "<query>" [--project_id N]`
 3. Display matching documents as a table.

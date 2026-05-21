@@ -15,7 +15,7 @@ Install: add to .claude/settings.json:
       "SessionStart": [
         {"matcher": "", "hooks": [
           {"type": "command",
-           "command": "python /path/to/atelier/hooks/session_start.py"}
+           "command": "python3 /path/to/atelier/hooks/session_start.py"}
         ]}
       ]
     }

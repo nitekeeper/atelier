@@ -63,12 +63,12 @@ Wait for an explicit user response. Default to (a) if the user says "yes" withou
 
 Every dev skill's step 1 follows this pattern:
 
-1. Call `python atelier/scripts/workflow.py <db_path> check-gate <project_id> <skill>`. Parse the JSON output. The fields are: `allowed` (bool), `current_phase` (str), `required_phase` (str | null), `reason` (str).
+1. Call `python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> <skill>`. Parse the JSON output. The fields are: `allowed` (bool), `current_phase` (str), `required_phase` (str | null), `reason` (str).
 2. **If `allowed` is true:** proceed with the skill's procedure.
 3. **If `allowed` is false:**
    - Display to the user: *"Project is at `<current_phase>`. This skill normally requires `<required_phase>`. Proceed anyway? (yes / no)"*
-   - On **yes:** call `python atelier/scripts/workflow.py <db_path> log-bypass <project_id> <skill> <current_phase> <required_phase>` (optionally with `--agent <agent_id>` and `--note "<reason>"`), then proceed with the skill's procedure.
-   - On **no:** stop. Tell the user: *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
+   - On **yes:** call `python3 atelier/scripts/workflow.py <db_path> log-bypass <project_id> <skill> <current_phase> <required_phase>` (optionally with `--agent <agent_id>` and `--note "<reason>"`), then proceed with the skill's procedure.
+   - On **no:** stop. Tell the user: *"Advance to `<required_phase>` first (run `python3 atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
 Bypass entries are recorded in the `phase_bypasses` table and surfaced by `internal/dev-handoff/SKILL.md` during retrospective.
 

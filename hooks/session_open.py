@@ -9,7 +9,7 @@ Install as a PreToolUse hook in .claude/settings.json. Example:
       "PreToolUse": [
         {"matcher": "", "hooks": [
           {"type": "command",
-           "command": "python /path/to/atelier/hooks/session_open.py"}
+           "command": "python3 /path/to/atelier/hooks/session_open.py"}
         ]}
       ]
     }

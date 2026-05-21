@@ -290,7 +290,9 @@ def test_create_meeting_cli_participants_writes_md_block(tmp_path, monkeypatch):
             "HOME": str(clone_dir),
         },
     )
-    assert result.returncode == 0, f"CLI exited non-zero:\nstdout={result.stdout}\nstderr={result.stderr}"
+    assert result.returncode == 0, (
+        f"CLI exited non-zero:\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
 
     # The .md file must carry the Participants block with both agent IDs.
     md_file = meetings_dir / "2026-05-21-test-meeting.md"

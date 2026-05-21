@@ -378,10 +378,16 @@ if __name__ == "__main__":
         parser.add_argument("--workspace-id", type=int, default=None)
         parser.add_argument("--subdomain", default=None)
         # --participants writes the .ai/meetings/*.md Participants block only; DB linkage uses add-participant
-        parser.add_argument("--participants", default=None, help="Comma-separated agent IDs, e.g. pm-1,dev-1")
+        parser.add_argument(
+            "--participants", default=None, help="Comma-separated agent IDs, e.g. pm-1,dev-1"
+        )
         parser.add_argument("--project-id", type=int, default=None)
         args = parser.parse_args(sys.argv[2:])
-        participants = [p.strip() for p in args.participants.split(",") if p.strip()] if args.participants else None
+        participants = (
+            [p.strip() for p in args.participants.split(",") if p.strip()]
+            if args.participants
+            else None
+        )
         result = create_meeting(
             db_path,
             Path(args.meetings_dir),

@@ -401,7 +401,7 @@ def row_summary(local_db: Path) -> dict:
             "project_documents",
         ):
             try:
-                row = c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # nosec B608
+                row = c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # nosec B608 — `table` is drawn from a hardcoded internal list above, not user input; SQL injection is not possible here
                 summary[table] = int(row[0]) if row else 0
             except sqlite3.OperationalError:
                 summary[table] = 0

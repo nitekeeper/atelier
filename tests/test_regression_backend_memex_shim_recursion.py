@@ -85,8 +85,7 @@ def _build_fake_memex_plugin(plugin_root):
     # `scripts.*` at top level; the recursion still triggers because the
     # shim itself unconditionally re-enters `_load_memex_module("paths")`.
     (scripts_dir / "paths.py").write_text(
-        "from pathlib import Path\n"
-        "DB_DIR = Path(__file__).resolve().parent.parent / 'db'\n"
+        "from pathlib import Path\nDB_DIR = Path(__file__).resolve().parent.parent / 'db'\n"
     )
 
     # 3. registry.py — exercises the registry-injection bootstrap branch.
@@ -144,9 +143,7 @@ def _assert_scripts_keys_restored(pre: dict) -> None:
             f"shim leaked: {key!r} presence changed across the load "
             f"(pre={was_present}, post={post_present})"
         )
-        assert post_value is prior, (
-            f"shim leaked: {key!r} identity changed across the load"
-        )
+        assert post_value is prior, f"shim leaked: {key!r} identity changed across the load"
 
 
 def test_scripts_db_shim_does_not_recurse_on_paths_load(tmp_path, monkeypatch):

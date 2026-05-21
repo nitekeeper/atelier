@@ -7,3 +7,6 @@ __pycache__/
 .ai/meetings/
 .superpowers/
 .worktrees/
+# Dist bundle body — only dist/v*/manifest.json is tracked (built by scripts.release)
+dist/v*/
+!dist/v*/manifest.json

@@ -40,17 +40,48 @@ def _resolve_workspace_id() -> int:
 
     v1.1.0 schema requires `workspace_id NOT NULL` on `projects`. The
     workspaces script + multi-workspace lookups land in v1.2.0; until
-    then we resolve the singleton workspace row (or seed one if absent)
-    so the write doesn't violate the FK. Local mode only — Memex mode
-    folds workspace identity into the librarian_output, which the
-    backend handles.
+    then we resolve the singleton workspace row (or seed one in local
+    mode if absent) so the write doesn't violate the FK.
 
-    Note: this opens its own `_conn()` and `create_project` opens a
-    second one inside `backend.write_project`. The double-open is
+    Mode-aware:
+    - Local mode: opens `backend_local._conn()` and reads / seeds the
+      singleton row in the local SQLite `workspaces` table.
+    - Memex mode: queries the memex atelier store via
+      `backend_memex._memex_core_query`. The atelier bootstrap (see
+      `scripts/atelier_entrypoint.py`) provisions the singleton
+      workspace row keyed on `_WORKSPACE_SLUG`, so no seeding is needed
+      here; the regression for issue #6 bug #1 covers the "memex mode
+      must not touch the local workspaces table" guarantee. The
+      slug-less fallback below catches a bootstrap-race window where
+      the workspace row exists but the slug is not yet what we expect
+      (e.g. mid-rename); if both queries return empty we surface a
+      `RuntimeError` rather than silently inserting.
+
+    Note: in local mode this opens its own `_conn()` and `create_project`
+    opens a second one inside `backend.write_project`. The double-open is
     intentional — WAL mode handles concurrent reads on the same DB
     fine, and folding the resolution into the facade is a v1.2.0 task
     (it requires the workspaces script to land first).
     """
+    if mode_detector.detect_mode() == "memex":
+        from scripts import backend_memex
+
+        # Single-workspace deployment (spec §6.7); identified by
+        # `_WORKSPACE_SLUG`. Fall back to the first row if the slug is
+        # absent for any reason — the workspaces table is bootstrapped
+        # before any project create call lands here.
+        rows = backend_memex._memex_core_query(
+            store="atelier", table="workspaces", where={"slug": backend_memex._WORKSPACE_SLUG}
+        )
+        if not rows:
+            rows = backend_memex._memex_core_query(store="atelier", table="workspaces")
+        if not rows:
+            raise RuntimeError(
+                "memex atelier store has no workspace row; "
+                "run atelier bootstrap before create_project"
+            )
+        return int(rows[0]["id"])
+
     from scripts import backend_local
 
     c = backend_local._conn()

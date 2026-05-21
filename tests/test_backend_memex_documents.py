@@ -233,6 +233,10 @@ def test_write_document_builds_librarian_output_and_writes(fake_memex, monkeypat
     )
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
     monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
+    # Stub workspace_id derivation (issue #6 bug #3) — metadata here
+    # does not pre-populate workspace_id, so write_document falls
+    # back to the project lookup.
+    monkeypatch.setattr(backend_memex, "_workspace_id_for_project", lambda pid: 5)
 
     result = backend_memex.write_document(
         domain="project_doc",
@@ -281,6 +285,8 @@ def test_write_document_folds_source_url_into_metadata(fake_memex, monkeypatch):
     monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: None)
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
     monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
+    # Stub workspace_id derivation (issue #6 bug #3).
+    monkeypatch.setattr(backend_memex, "_workspace_id_for_project", lambda pid: 5)
 
     backend_memex.write_document(
         domain="adr",
@@ -399,6 +405,9 @@ def test_write_meeting_targets_meeting_minutes(fake_memex, monkeypatch):
     monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: None)
     monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
     monkeypatch.setattr(backend_memex, "_auto_relations", lambda md, r: list(r or []))
+    # Stub workspace_id derivation (issue #6 bug #4) — no project_id
+    # so write_meeting falls back to the singleton-workspace lookup.
+    monkeypatch.setattr(backend_memex, "_resolve_singleton_workspace_id", lambda: 1)
 
     backend_memex.write_meeting(
         title="Kickoff",

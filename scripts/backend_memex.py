@@ -722,10 +722,20 @@ def write_document(
     if source_url:
         metadata["source_url"] = source_url
     now = _now()
+    project_id = metadata.get("project_id")
+    # project_documents.workspace_id is NOT NULL. The facade
+    # `backend.write_document` folds workspace_id into adapted_metadata
+    # (backend.py:147) but the memex librarian does NOT promote
+    # metadata→payload. Pull it out of metadata when present, else
+    # derive it from the owning project row. See issue #6 bug #3.
+    workspace_id = metadata.get("workspace_id")
+    if workspace_id is None:
+        workspace_id = _workspace_id_for_project(project_id)
     payload = {
         "title": title,
         "filename": metadata.get("filename", _slug(title) + ".md"),
-        "project_id": metadata.get("project_id"),
+        "project_id": project_id,
+        "workspace_id": workspace_id,
         "type": domain,
         "created_by": caller_agent_id,
         "created_at": now,
@@ -834,12 +844,23 @@ def write_meeting(
     """
     body = f"# {title}\n\nDate: {date}\n\n## Summary\n\n{summary}\n\n## Decisions\n\n{decisions}\n"
     now = _now()
+    # meeting_minutes.workspace_id is NOT NULL but project_id is
+    # nullable (schema line 122 — workspace-level meetings). For
+    # project-scoped meetings, derive workspace_id from the project
+    # row; for workspace-level meetings (project_id=None), fall back
+    # to the singleton-workspace lookup. See issue #6 bug #4.
+    if project_id is not None:
+        workspace_id = _workspace_id_for_project(project_id)
+    else:
+        workspace_id = _resolve_singleton_workspace_id()
     payload = {
         "title": title,
         "date": date,
         "filename": f"{date}-{_slug(title)}.md",
         "summary": summary,
         "decisions": decisions,
+        "workspace_id": workspace_id,
+        "project_id": project_id,
         "created_by": created_by,
         "created_at": now,
         "updated_at": now,
@@ -965,6 +986,49 @@ def _memex_core_query(*, store: str, table: str, where: dict | None = None) -> l
     return memex_stores.query(store, f"SELECT * FROM {safe_table}", ())  # nosec B608
 
 
+# ── Workspace-id resolution helpers ────────────────────────────────────────
+
+
+def _workspace_id_for_project(project_id: int | None) -> int:
+    """Derive `workspace_id` from `project_id` via the memex projects
+    row. Mirrors `backend_local._workspace_id_for_project` so memex
+    mode produces the same operator signal on an unknown project id
+    (clean `ValueError` instead of SQLite's downstream NOT NULL
+    `IntegrityError`). See issue #6 bugs #2-#4.
+    """
+    if project_id is None:
+        raise ValueError("project_id is required to derive workspace_id")
+    rows = _memex_core_query(store="atelier", table="projects", where={"id": project_id})
+    if not rows or rows[0].get("workspace_id") is None:
+        raise ValueError(f"project_id={project_id} not found — cannot derive workspace_id")
+    return int(rows[0]["workspace_id"])
+
+
+def _resolve_singleton_workspace_id() -> int:
+    """Resolve the singleton workspace id in memex mode without taking
+    a dependency on `scripts.projects._resolve_workspace_id` (that
+    would create a circular import — projects.py already imports
+    backend_memex). Used by writes that have no `project_id` to derive
+    workspace_id from (e.g. workspace-level meetings).
+
+    Slug-first, with a slug-less fallback for bootstrap-race robustness.
+
+    Raises `RuntimeError` (not `ValueError`) when no workspace row
+    exists, because that's an environment-bootstrap failure rather than
+    caller-input error — distinct signal from `_workspace_id_for_project`
+    which raises `ValueError` on a bad caller-supplied project_id.
+    """
+    rows = _memex_core_query(store="atelier", table="workspaces", where={"slug": _WORKSPACE_SLUG})
+    if not rows:
+        rows = _memex_core_query(store="atelier", table="workspaces")
+    if not rows:
+        raise RuntimeError(
+            "memex atelier store has no workspace row; "
+            "run atelier bootstrap before writing workspace-level rows"
+        )
+    return int(rows[0]["id"])
+
+
 # ── Operational state writes ───────────────────────────────────────────────
 
 
@@ -1011,6 +1075,19 @@ def upsert_session(
             store="atelier", table="sessions", row_id=existing[0]["id"], changes=payload
         )
     payload.update({"project_id": project_id, "agent_id": agent_id})
+    # sessions.workspace_id is NOT NULL (migrations/shared/001_v110_schema.sql).
+    # Local mode populates it via scripts/projects._resolve_workspace_id on
+    # the caller side; memex mode has no equivalent until now. Fold the
+    # owning project's workspace_id into the insert payload so the NOT NULL
+    # constraint is satisfied. Mirrors backend_local._workspace_id_for_project
+    # so an unknown project_id raises a clean ValueError rather than
+    # downstream SQLite IntegrityError. See issue #6 bug #2.
+    # Guard is forward-compat: payload is built from a fixed key set
+    # above that never includes workspace_id today, but a new kwarg
+    # later could surface it from the caller — keep the check so an
+    # explicit caller-supplied value wins over the derived one.
+    if "workspace_id" not in payload:
+        payload["workspace_id"] = _workspace_id_for_project(project_id)
     return _memex_core_insert(store="atelier", table="sessions", row=payload)
 
 

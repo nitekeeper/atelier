@@ -31,12 +31,22 @@ def mock_core():
 
 def test_upsert_session_inserts_when_new(mock_core):
     """No in-progress session for (project_id, agent_id) → INSERT path."""
-    mock_core["query"].return_value = []
+
+    # Query is called twice in the INSERT branch:
+    #   1) sessions lookup (existing in-progress) → must be empty
+    #   2) projects lookup to derive workspace_id (issue #6 bug #2)
+    def query_side_effect(*, store, table, where=None):
+        if table == "projects":
+            return [{"id": 1, "workspace_id": 5, "slug": "myproj"}]
+        return []
+
+    mock_core["query"].side_effect = query_side_effect
     mock_core["insert"].return_value = {
         "id": 1,
         "project_id": 1,
         "agent_id": "atelier-pm-1",
         "phase": "design:open",
+        "workspace_id": 5,
     }
     r = backend_memex.upsert_session(
         project_id=1,
@@ -55,6 +65,8 @@ def test_upsert_session_inserts_when_new(mock_core):
     # And the row body must carry the identity columns we used for lookup.
     assert kwargs["row"]["project_id"] == 1
     assert kwargs["row"]["agent_id"] == "atelier-pm-1"
+    # NOT NULL workspace_id is derived from the project lookup.
+    assert kwargs["row"]["workspace_id"] == 5
 
 
 def test_upsert_session_updates_when_existing(mock_core):

@@ -31,7 +31,7 @@ Branch on the returned `action`:
 1. **Identify the active project.**
    Run (from the target project root):
    ```
-   python atelier/scripts/projects.py list
+   python3 atelier/scripts/projects.py list
    ```
    (DB: `.ai/memex.db`)
 
@@ -42,7 +42,7 @@ Branch on the returned `action`:
 2. **Read the latest session.**
    Run:
    ```
-   python atelier/scripts/session.py read-latest <project_id>
+   python3 atelier/scripts/session.py read-latest <project_id>
    ```
    (DB: `.ai/memex.db`)
 

@@ -6,7 +6,7 @@ catalog evolves). Re-running is safe — `backend.find_or_create_role` and
 `backend.find_or_create_agent` skip existing entries by name/id.
 
 Usage:
-    python scripts/seed_roles.py [db_path]
+    python3 scripts/seed_roles.py [db_path]
     db_path defaults to .ai/atelier.db
 """
 

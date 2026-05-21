@@ -15,14 +15,14 @@ Manages agent desks (tmux panes) within a room. Each pane is one agent's desk ru
 
 ### agent:join
 1. Ask: "Workspace name?" / "Room name?" / "Agent ID (from the agents registry, e.g. 'dev-1')?"
-2. Check: verify the agent exists — `python atelier/scripts/agents.py get <agent_id>`
-3. Run: `python atelier/scripts/workspace.py agent:join <workspace> <room_name> <agent_id>`
+2. Check: verify the agent exists — `python3 atelier/scripts/agents.py get <agent_id>`
+3. Run: `python3 atelier/scripts/workspace.py agent:join <workspace> <room_name> <agent_id>`
 4. Confirm: "Agent '[agent_id]' is now at their desk in room '[room_name]'. Claude Code launched in pane [pane_id]."
 5. Note the pane ID for future `internal/agent/SKILL.md` (`leave`) calls.
 
 ### agent:leave
 1. Ask: "Workspace name?" / "Room name?" / "Pane ID (e.g. %3)?"
-2. Run: `python atelier/scripts/workspace.py agent:leave <workspace> <room_name> <pane_id>`
+2. Run: `python3 atelier/scripts/workspace.py agent:leave <workspace> <room_name> <pane_id>`
 3. Confirm: "Agent's desk (pane [pane_id]) closed."
 
 ## Hard rules

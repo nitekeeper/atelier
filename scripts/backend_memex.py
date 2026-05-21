@@ -33,6 +33,18 @@ from types import ModuleType
 
 from scripts import domain_vocabulary
 
+# Modules that the shim itself injects under `sys.modules['scripts.*']`.
+# `_load_memex_module` MUST NOT wrap their exec in `_scripts_db_shim` —
+# doing so re-enters the shim while it is still computing these very
+# modules, which produces the infinite recursion documented in
+# `tests/test_regression_backend_memex_shim_recursion.py`.
+#
+# Must stay in sync with `_scripts_db_shim`'s eager-load list (the three
+# `_load_memex_module(...)` calls in its body). If you add or remove one
+# there, update this set.
+_SHIM_BOOTSTRAP: frozenset[str] = frozenset({"db", "paths", "registry"})
+
+
 # ── Memex plugin location + import bootstrap ───────────────────────────────
 
 
@@ -116,13 +128,22 @@ def _scripts_db_shim(plugin_root: Path):
       - `from scripts.paths import DB_DIR`       → `scripts.paths`
 
     All three are loaded via `_load_memex_module` (file-path loader, cached)
-    before any injection, so the lru_cache absorbs the spec/exec cost on the
-    first call and subsequent shim activations are free. Loading order:
-      1. `db`       — stdlib-only, no `scripts.*` deps; loaded without a shim.
-      2. `paths`    — stdlib-only; nested `_scripts_db_shim` is a no-op.
-      3. `registry` — depends on `scripts.db`; nested shim injects db
-                      temporarily during its own exec then restores — correct
-                      because db was already cached in step 1.
+    before any injection. Crucially, each of `db` / `paths` / `registry`
+    lives in `_SHIM_BOOTSTRAP` and is loaded through the bootstrap branch
+    in `_load_memex_module` — that branch does NOT re-enter
+    `_scripts_db_shim`. Re-entering the shim while it was still computing
+    these modules is exactly the infinite recursion this design avoids
+    (see `tests/test_regression_backend_memex_shim_recursion.py`). Loading
+    order from the shim's perspective:
+      1. `db`       — stdlib-only, exec'd directly.
+      2. `paths`    — stdlib-only, exec'd directly.
+      3. `registry` — `_load_memex_module`'s bootstrap branch temporarily
+                      injects Memex's `db` into `sys.modules['scripts.db']`
+                      for the duration of registry's exec, then restores
+                      the pre-injection state.
+
+    Must stay in sync with `_SHIM_BOOTSTRAP` — if you add or remove an
+    eager-load call below, update that set in lockstep.
 
     Restoration is unconditional and per-key: for each injected key we
     snapshot the pre-shim state (present/absent + value) and restore it on
@@ -189,15 +210,22 @@ def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
     `lru_cache` decorator keeps each `(plugin_root, dotted)` pair from
     paying the spec/exec cost more than once per process.
 
-    For every Memex module EXCEPT `db` itself, the loader wraps
-    `exec_module` in `_scripts_db_shim` so source-level
+    For every Memex module EXCEPT those in `_SHIM_BOOTSTRAP` (`db`,
+    `paths`, `registry`), the loader wraps `exec_module` in
+    `_scripts_db_shim` so source-level
     `from scripts.db import get_connection` statements (present in
     `roles.py`, `agents/__init__.py`, `stores.py`, `meetings.py`, …)
     resolve against Memex's bundled `scripts/db.py`. The shim is
     scoped to the exec call and the prior `sys.modules` state is
-    restored on exit — no permanent global pollution. `db` is special-
-    cased so the shim can bootstrap itself (Memex's `db.py` imports
-    only stdlib, so it needs no shim).
+    restored on exit — no permanent global pollution. The three
+    `_SHIM_BOOTSTRAP` modules are special-cased so the shim can
+    bootstrap itself without re-entering `_scripts_db_shim` (which
+    would recurse forever, since the shim itself eagerly loads exactly
+    those three modules). `db` and `paths` are stdlib-only; `registry`
+    needs `scripts.db` exposed in `sys.modules` for its top-level
+    `from scripts.db import memex_home`, so the bootstrap branch
+    snapshots `sys.modules['scripts.db']`, injects the Memex `db`
+    module for the registry exec, and restores on exit.
 
     Tests that want to inject a stub module should call
     `_load_memex_module.cache_clear()` and then either pre-populate the
@@ -221,10 +249,31 @@ def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
             # find their siblings. We do NOT shadow the real
             # `scripts.<name>` entries.
             sys.modules[mod_name] = module
-            if dotted == "db":
-                # Bootstrap: loading the shim's own dependency. Memex's
-                # db.py is stdlib-only, so no `scripts.db` shim needed.
-                spec.loader.exec_module(module)
+            if dotted in _SHIM_BOOTSTRAP:
+                # Bootstrap path for the three modules the shim itself
+                # injects (db, paths, registry). Must NOT re-enter
+                # `_scripts_db_shim` — that path is the recursion sink.
+                # db and paths are stdlib-only; registry only needs
+                # `scripts.db` in sys.modules for its top-level
+                # `from scripts.db import memex_home` to bind.
+                # Verified against memex/2.5.1/scripts/registry.py line 13;
+                # revisit if Memex registry.py grows additional `scripts.*` imports.
+                if dotted == "registry":
+                    memex_db = _load_memex_module(plugin_root, "db")
+                    _saved_db = (
+                        "scripts.db" in sys.modules,
+                        sys.modules.get("scripts.db"),
+                    )
+                    sys.modules["scripts.db"] = memex_db
+                    try:
+                        spec.loader.exec_module(module)
+                    finally:
+                        if _saved_db[0]:
+                            sys.modules["scripts.db"] = _saved_db[1]  # type: ignore[assignment]
+                        else:
+                            sys.modules.pop("scripts.db", None)
+                else:
+                    spec.loader.exec_module(module)
             else:
                 with _scripts_db_shim(plugin_root):
                     spec.loader.exec_module(module)

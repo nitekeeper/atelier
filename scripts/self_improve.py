@@ -182,13 +182,13 @@ def sync_worktree_with_main(worktree_dir: Path) -> str:
 
 if __name__ == "__main__":
     # Usage patterns:
-    #   python scripts/self_improve.py clone <cycle_n>
-    #   python scripts/self_improve.py check-destructive <clone_dir>
-    #   python scripts/self_improve.py run-tests <clone_dir>
-    #   python scripts/self_improve.py commit <clone_dir> <cycle_n> <subject> <decisions> <participants> <n_tests> <minutes_path>
-    #   python scripts/self_improve.py push-merge <clone_dir> <branch> [skip]
-    #   python scripts/self_improve.py cleanup [<experiment_dir>]
-    #   python scripts/self_improve.py pull
+    #   python3 scripts/self_improve.py clone <cycle_n>
+    #   python3 scripts/self_improve.py check-destructive <clone_dir>
+    #   python3 scripts/self_improve.py run-tests <clone_dir>
+    #   python3 scripts/self_improve.py commit <clone_dir> <cycle_n> <subject> <decisions> <participants> <n_tests> <minutes_path>
+    #   python3 scripts/self_improve.py push-merge <clone_dir> <branch> [skip]
+    #   python3 scripts/self_improve.py cleanup [<experiment_dir>]
+    #   python3 scripts/self_improve.py pull
 
     import json
 

@@ -14,7 +14,7 @@ Requires `tdd:clean`.
 
 1. Check the phase gate:
    ```
-   python atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:review
+   python3 atelier/scripts/workflow.py <db_path> check-gate <project_id> dev:review
    ```
    Parse the JSON output: `{"allowed": bool, "current_phase": str, "required_phase": str, "reason": str}`.
 
@@ -26,17 +26,17 @@ Requires `tdd:clean`.
 
    - On **yes**: run:
      ```
-     python atelier/scripts/workflow.py <db_path> log-bypass <project_id> dev:review <current_phase> <required_phase>
+     python3 atelier/scripts/workflow.py <db_path> log-bypass <project_id> dev:review <current_phase> <required_phase>
      ```
      Optionally append `--agent <agent_id>` and `--note "<reason>"`. Then proceed to the next step.
    - On **no**: stop. Tell the user:
-     > *"Advance to `<required_phase>` first (run `python atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
+     > *"Advance to `<required_phase>` first (run `python3 atelier/scripts/workflow.py <db_path> advance <project_id> <required_phase>`), or pick a different skill."*
 
-2. Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> review:open`
+2. Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> review:open`
 
 3. Read the plan and design documents:
    ```
-   python atelier/scripts/documents.py list --project_id <project_id>
+   python3 atelier/scripts/documents.py list --project_id <project_id>
    ```
    This returns JSON with all documents. Extract the `filename` fields for both the plan and design documents. Read both files — the review must check against both for spec compliance and implementation quality.
 
@@ -54,17 +54,17 @@ Requires `tdd:clean`.
    | 8 | No duplication that belongs in a shared helper |
 
 5. **If changes are required:**
-   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> review:changes-requested`
+   - Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> review:changes-requested`
    - List each issue precisely: file, line range, what is wrong, what the fix should be.
    - The engineer fixes the issues, re-runs tests, and re-requests review.
    - On re-review (the REVIEWER runs this): advance back to `review:open` first:
      ```
-     python atelier/scripts/workflow.py <db_path> advance <project_id> review:open
+     python3 atelier/scripts/workflow.py <db_path> advance <project_id> review:open
      ```
      Then repeat the review checklist.
 
 6. **If approved:**
-   - Advance phase: `python atelier/scripts/workflow.py <db_path> advance <project_id> review:approved`
+   - Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> review:approved`
    - Confirm: "Code review approved. Phase: review:approved. Ready for dev:security."
 
 ## Hard rules

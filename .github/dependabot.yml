@@ -1,0 +1,35 @@
+# Dependabot — keeps deps and pinned Actions SHAs current; opens PRs for known CVEs.
+# https://docs.github.com/en/code-security/dependabot
+#
+# When reviewing Actions-ecosystem PRs: verify the new SHA corresponds to
+# a legitimate upstream release tag (not an arbitrary commit) before merging.
+
+version: 2
+updates:
+  # Runtime + dev Python deps (requirements.txt, requirements-dev.txt).
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: deps
+      include: scope
+
+  # GitHub Actions SHA pins in .github/workflows/*.yml.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "deps(actions)"
+      include: scope

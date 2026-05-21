@@ -46,7 +46,9 @@ _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 def _parse_version(s: str) -> tuple[int, int, int]:
     if not _VERSION_RE.match(s):
         raise ValueError(f"version must look like X.Y.Z (got {s!r}). Do not include a leading 'v'.")
-    return tuple(int(p) for p in s.split("."))  # type: ignore[return-value]
+    # regex guard ensures 3-part version; explicit unpack makes return type visible to mypy
+    major, minor, patch = (int(p) for p in s.split("."))
+    return (major, minor, patch)
 
 
 def _read_plugin_json() -> dict:

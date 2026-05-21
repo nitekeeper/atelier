@@ -390,10 +390,8 @@ def search_tasks(
     dispatch in Local mode.
     """
     if mode_detector.detect_mode() == "memex":
-        raise NotImplementedError(
-            "search_tasks is not supported in Memex mode yet "
-            "(Memex-side task FTS lands with the v1.2 task domain)."
-        )
+        # Memex-side task FTS lands with the v1.2 task domain; return empty rather than crash callers.
+        return []
     from scripts import backend_local
 
     pattern = f"%{query}%"

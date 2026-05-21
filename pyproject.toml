@@ -41,6 +41,9 @@ ignore = [
     "SIM117", # nested-with — sometimes clearer in test setup
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.bandit]
 exclude_dirs = ["tests", ".github", "__pycache__", ".claude"]
 # Atelier shells out to `git` (worktree.py, session_open hook) heavily.

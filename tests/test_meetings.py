@@ -1,5 +1,7 @@
 # tests/test_meetings.py
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -223,3 +225,89 @@ def test_search_meetings(db_path, meetings_dir, agent_id, workspace_id):
     results = search_meetings(db_path, query="roadmap")
     assert len(results) == 1
     assert results[0]["title"] == "Sprint Planning"
+
+
+def test_create_meeting_cli_participants_writes_md_block(tmp_path, monkeypatch):
+    """CLI --participants flag populates the .md Participants block; does not insert
+    meeting_participants rows (by design — use add-participant for DB linkage)."""
+    REPO_ROOT = Path(__file__).parent.parent
+    MIGRATIONS_DIR = REPO_ROOT / "migrations"
+
+    # Set up a fake git workspace with a fully migrated DB.
+    clone_dir = tmp_path / "myproj"
+    clone_dir.mkdir()
+    (clone_dir / ".git").mkdir()
+    db = clone_dir / ".ai" / "atelier.db"
+    db.parent.mkdir()
+    apply_migrations(str(db), MIGRATIONS_DIR / "shared")
+    apply_migrations(str(db), MIGRATIONS_DIR / "local-only")
+
+    # Seed a workspace row so the NOT NULL workspace_id FK is satisfied.
+    now = "2026-05-21T00:00:00Z"
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        "INSERT INTO workspaces (slug, identity, name, description, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("myproj", "repo:myproj", "MyProj", "test workspace", now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    meetings_dir = clone_dir / ".ai" / "meetings"
+    meetings_dir.mkdir(parents=True, exist_ok=True)
+
+    # Retrieve the seeded workspace_id so we can pass --workspace-id to the CLI.
+    conn2 = sqlite3.connect(str(db))
+    ws_id = conn2.execute("SELECT id FROM workspaces LIMIT 1").fetchone()[0]
+    conn2.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "meetings.py"),
+            "create",
+            "Test Meeting",
+            "2026-05-21",
+            "A summary",
+            "A decision",
+            "tester",
+            "--meetings-dir",
+            str(meetings_dir),
+            "--workspace-id",
+            str(ws_id),
+            "--participants",
+            "pm-1,dev-1",
+        ],
+        cwd=str(clone_dir),
+        capture_output=True,
+        text=True,
+        env={
+            "PYTHONPATH": str(REPO_ROOT),
+            "PATH": __import__("os").environ.get("PATH", ""),
+            # Force local mode by pointing HOME at the (empty) tmp clone dir so
+            # mode_detector._memex_plugin_reachable() sees no ~/.memex/config.json.
+            "HOME": str(clone_dir),
+        },
+    )
+    assert result.returncode == 0, (
+        f"CLI exited non-zero:\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+    # The .md file must carry the Participants block with both agent IDs.
+    md_file = meetings_dir / "2026-05-21-test-meeting.md"
+    assert md_file.exists(), "meeting .md file was not written"
+    content = md_file.read_text(encoding="utf-8")
+    assert "## Participants" in content, "Participants heading missing from .md"
+    assert "pm-1" in content, "pm-1 missing from .md Participants block"
+    assert "dev-1" in content, "dev-1 missing from .md Participants block"
+
+    # By design: CLI create does NOT insert rows into meeting_participants.
+    # Use `add-participant` for DB linkage.
+    conn = sqlite3.connect(str(db))
+    rows = conn.execute("SELECT * FROM meeting_participants").fetchall()
+    conn.close()
+    assert rows == [], (
+        f"meeting_participants should be empty after CLI create (got {rows}); "
+        "use add-participant for DB linkage"
+    )

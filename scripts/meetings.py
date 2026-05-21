@@ -376,13 +376,18 @@ if __name__ == "__main__":
         parser.add_argument("created_by")
         parser.add_argument("--meetings-dir", default=".ai/meetings")
         parser.add_argument("--workspace-id", type=int, default=None)
+        parser.add_argument("--subdomain", default=None)
+        # --participants writes the .ai/meetings/*.md Participants block only; DB linkage uses add-participant
+        parser.add_argument(
+            "--participants", default=None, help="Comma-separated agent IDs, e.g. pm-1,dev-1"
+        )
         parser.add_argument("--project-id", type=int, default=None)
-        # TODO(N3): expose --subdomain (str) and --participants
-        # (comma-separated agent ids) on this CLI surface. The Python
-        # API already accepts them; the CLI wrapper just doesn't plumb
-        # them through yet. Low priority — most callers use the Python
-        # API directly via skill files.
         args = parser.parse_args(sys.argv[2:])
+        participants = (
+            [p.strip() for p in args.participants.split(",") if p.strip()]
+            if args.participants
+            else None
+        )
         result = create_meeting(
             db_path,
             Path(args.meetings_dir),
@@ -392,6 +397,8 @@ if __name__ == "__main__":
             decisions=args.decisions,
             created_by=args.created_by,
             workspace_id=args.workspace_id,
+            subdomain=args.subdomain,
+            participants=participants,
             project_id=args.project_id,
         )
         print(json.dumps(result, indent=2))

@@ -30,7 +30,7 @@ _INCLUDE_DIRS = [
     "templates",
     "migrations",
 ]
-_INCLUDE_FILES = ["pyproject.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+_INCLUDE_FILES = ["pyproject.toml", "README.md", "CHANGELOG.md", "LICENSE", "requirements.txt"]
 
 
 def _hash_file(path: Path) -> str:
@@ -124,6 +124,16 @@ Atelier registers a small set of top-level skills (`atelier:run`,
 `atelier:save`, `atelier:load`, `atelier:ingest`, `atelier:migrate`).
 The bulk of its 19+ internal procedures live at
 `internal/<name>/SKILL.md` and are reached on demand from `atelier:run`.
+
+## Manual install (advanced)
+
+If installing from a GitHub Release zip (`gh release download v{version}`)
+instead of agora:
+
+1. Unzip into `~/.claude/plugins/cache/local/atelier/{version}/`.
+2. Restart Claude Code, or invoke `/plugin reload atelier`.
+
+This bypasses agora's marketplace metadata; updates are manual.
 """
     (version_dir / "INSTALL.md").write_text(install_md, encoding="utf-8")
     files_manifest.append(

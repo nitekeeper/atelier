@@ -77,7 +77,12 @@ def _update_pyproject(new: str) -> str:
         # pyproject.toml may legitimately omit a version field (atelier's
         # original pyproject.toml is config-only). Treat missing as a no-op
         # rather than a hard error so atelier doesn't have to grow a
-        # pyproject version unless it wants one.
+        # pyproject version unless it wants one. Log to stderr so a future
+        # mid-cycle addition of a version field doesn't drift silently.
+        print(
+            "info: pyproject.toml has no [project] version field — skipped",
+            file=sys.stderr,
+        )
         return ""
     old = match.group(2)
     new_content = content[: match.start(2)] + new + content[match.end(2) :]

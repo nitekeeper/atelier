@@ -413,6 +413,17 @@ def _run_bootstrap_memex() -> dict:
         # templates/agents/ directory (~61 personas), one record per .json.
         _seed_agents_memex(memex_agents, agents_db, role_map)
 
+        # Restore memex's internal-agent invariant. Atelier has just
+        # written to ~/.memex/agents.db (memex's private DB) — by contract
+        # the post-touch caller must re-verify memex's own 5 internal
+        # agents (librarian-1, reference-librarian-1, archivist-1, dba-1,
+        # data-steward-1) are present. Memex exposes this as a public
+        # hook from v2.6.0+. Soft-import for backward-compat: on older
+        # memex versions the API isn't there yet — atelier continues
+        # without crashing, preserving prior behavior. (Refs:
+        # nitekeeper/atelier#9, nitekeeper/memex#20.)
+        _ensure_memex_internal_agents(agents_db)
+
         # Provision the atelier store via the public registry + stores
         # API. `registry.json` is a flat `{name: record}` map per
         # memex/scripts/registry.py.
@@ -498,6 +509,57 @@ def _seed_agents_memex(memex_agents, agents_db: str, role_map: dict[str, int]) -
             # then swallow.
             if memex_agents.get_agent(agents_db, a["agent_id"]) is None:
                 raise
+
+
+def _ensure_memex_internal_agents(agents_db: str) -> None:
+    """Call `memex.scripts.install.ensure_internal_agents(agents_db)` to
+    restore memex's 5 internal-agent invariant after atelier seeds its
+    own roster into the same `~/.memex/agents.db`.
+
+    MUST be called from inside `_memex_scripts_context`, where
+    `sys.modules["scripts"]` resolves to memex's package — that's what
+    makes `from scripts.install import ensure_internal_agents` land on
+    memex's module rather than atelier's.
+
+    Soft-import: `scripts.install.ensure_internal_agents` is a v2.6.0+
+    public hook (memex PR #20). On older memex versions the module or
+    symbol may be absent — in that case we log a structured warning to
+    stderr and return without crashing. Atelier's own bootstrap still
+    completes; the user can recover by running `python3 -m scripts.install`
+    from the memex plugin root after upgrading.
+
+    Any other failure inside `ensure_internal_agents` (e.g.
+    `InternalAgentsMissingError` from a corrupted DB) is also surfaced
+    to stderr but does NOT abort atelier bootstrap — atelier's own
+    seeding has already landed by this point and the marker write that
+    follows is the only side effect we still owe the caller. Aborting
+    here would only re-trigger this same code path on the next run.
+    """
+    try:
+        from scripts.install import ensure_internal_agents  # type: ignore[attr-defined]
+    except ImportError:
+        # memex < 2.6.0 — no public hook. Pre-#9 behavior preserved.
+        print(
+            "atelier.bootstrap: memex.scripts.install.ensure_internal_agents "
+            "unavailable (memex < 2.6.0); skipping internal-agent restore. "
+            "If memex's 5 internal agents are missing, recover via "
+            "`python3 -m scripts.install` from the memex plugin root.",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        ensure_internal_agents(agents_db)
+    except Exception as exc:
+        # InternalAgentsMissingError or anything else. We log and
+        # continue so the marker write still happens; aborting here
+        # would just retry the same failing call on the next invocation.
+        print(
+            f"atelier.bootstrap: ensure_internal_agents({agents_db}) failed: "
+            f"{type(exc).__name__}: {exc}. Bootstrap will continue; recover "
+            f"via `python3 -m scripts.install` from the memex plugin root.",
+            file=sys.stderr,
+        )
 
 
 # ── Local-mode body ───────────────────────────────────────────────────────────

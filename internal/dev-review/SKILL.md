@@ -66,6 +66,7 @@ Requires `tdd:clean`.
      ```
      python3 atelier/scripts/workflow.py <db_path> advance <project_id> review:open
      ```
+     If the advance command exits non-zero (e.g., `WorkflowError: invalid transition`), do NOT silently continue. Surface the error to the user, run `python3 atelier/scripts/workflow.py <db_path> show <project_id>` to capture the project's actual current phase, and ask: "Re-review advance failed. Project is in phase: <current>. How should I proceed?" Wait for the user's direction before retrying.
      Then repeat the review checklist.
 
 6. **If approved:**

@@ -6,6 +6,11 @@ description: Use when review feedback has been posted — evaluates each item, p
 
 Implementer-side review processing. Reads all feedback before acting, classifies each item, verifies technical claims, implements accepted fixes, re-runs tests, and requests re-review. The reviewer's side is handled by `internal/dev-review/SKILL.md`.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` + `session.py` dispatch via `backend.py`)
+> - Required: `review:changes-requested` phase reached
+> - Required tables: `projects`, `skill_gates`, `phase_bypasses`, `sessions` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 Requires `review:changes-requested`.

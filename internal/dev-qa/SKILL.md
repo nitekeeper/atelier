@@ -6,6 +6,11 @@ description: Use when security is approved and deployment is imminent — verifi
 
 Pre-deployment verification. Ensures all gates are clean, all debt is resolved, and all acceptance criteria are met. Produces a QA report.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` + `tasks.py` + `session.py` + `documents.py` dispatch via `backend.py`)
+> - Required: `security:approved` phase reached
+> - Required tables: `projects`, `skill_gates`, `phase_bypasses`, `tasks`, `sessions`, `project_documents` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 Requires `security:approved`.

@@ -7,9 +7,9 @@ description: Use when review is approved and before QA — checks for vulnerabil
 Security review. Checks the implementation for vulnerabilities, exposed secrets, and insecure patterns before QA.
 
 > **Prerequisites**
-> - Mode: Memex or Local (mode-symmetric — `workflow.py` dispatches via `backend.py`)
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` + `session.py` dispatch via `backend.py`)
 > - Required: `review:approved` phase reached
-> - Required tables: `projects`, `skill_gates`, `phase_bypasses` — seeded by Atelier bootstrap
+> - Required tables: `projects`, `skill_gates`, `phase_bypasses`, `sessions` — seeded by Atelier bootstrap
 
 ## Hard gate
 
@@ -39,7 +39,13 @@ Requires `review:approved`.
 
 2. Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> security:open`
 
-3. Security checklist (all required):
+3. **Read prior session for carry-over security notes:**
+   ```
+   python3 atelier/scripts/session.py read-latest <project_id>
+   ```
+   If the returned `pm_notes` field references security-relevant concerns (carry-over debt, deferred audits, "next session must..."), include those items in the checklist evaluation below. If no prior session exists or `pm_notes` is empty, proceed to step 4.
+
+4. Security checklist (all required):
 
    | # | Check |
    |---|---|
@@ -52,7 +58,7 @@ Requires `review:approved`.
    | 7 | Error messages do not leak internal state to external callers |
    | 8 | Authentication and authorisation are not bypassable by changing a parameter |
 
-4. **If issues are found:**
+5. **If issues are found:**
    - Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> security:changes-requested`
    - List each issue: file, line range, vulnerability class, recommended fix.
    - The engineer addresses all issues.
@@ -60,9 +66,10 @@ Requires `review:approved`.
      ```
      python3 atelier/scripts/workflow.py <db_path> advance <project_id> security:open
      ```
-     Then repeat the checklist from the top.
+     If the advance command exits non-zero (e.g., `WorkflowError: invalid transition`), do NOT silently continue. Surface the error to the user, run `python3 atelier/scripts/workflow.py <db_path> show <project_id>` to capture the project's actual current phase, and ask: "Re-review advance failed. Project is in phase: <current>. How should I proceed?" Wait for the user's direction before retrying.
+     Then repeat the checklist from step 4.
 
-5. **If no issues found:**
+6. **If no issues found:**
    - Advance phase: `python3 atelier/scripts/workflow.py <db_path> advance <project_id> security:approved`
    - Confirm: "Security review approved. Phase: security:approved. Ready for dev:qa."
 

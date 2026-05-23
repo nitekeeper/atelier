@@ -67,7 +67,7 @@ All deterministic operations live in `scripts/`. Each script is callable from th
 | `scripts/bootstrap.py` | Memex-mode bootstrap (idempotent) |
 | `scripts/migrate.py` | Apply SQL migrations to a SQLite file (used by Local mode + bootstrap); inlines DB connection with WAL + FK pragma |
 | `scripts/migrate_to_memex.py` | Per-project Local→Memex replay |
-| `scripts/session.py` | Read/write `.ai/work.md` session state |
+| `scripts/session.py` | Session CRUD against the `sessions` table (via the backend facade) |
 | `scripts/roles.py` | Role CRUD |
 | `scripts/agents.py` | Agent CRUD |
 | `scripts/projects.py` | Project CRUD + phase tracking |

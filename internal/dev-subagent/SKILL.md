@@ -6,6 +6,11 @@ description: Use when executing an approved implementation plan — dispatches f
 
 Executes an approved plan by dispatching a fresh implementer subagent per task, followed by a spec-compliance reviewer and a code-quality reviewer. The coordinator never implements; it orchestrates and verifies. Runs without human check-ins between tasks unless a stopping condition is met.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` + `tasks.py` + `documents.py` dispatch via `backend.py`)
+> - Required: `plan:approved` phase reached
+> - Required tables: `projects`, `skill_gates`, `phase_bypasses`, `tasks`, `project_documents` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 Requires `plan:approved`.

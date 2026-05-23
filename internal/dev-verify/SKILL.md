@@ -6,6 +6,11 @@ description: Use when about to claim any work is complete, fixed, or passing —
 
 Universal completion check. Before claiming any status — "tests pass", "feature works", "bug fixed", "PR ready" — identify the command that proves it, run it fresh, and read the full output. A confident mental model is not evidence. Confidence is the precondition for the most dangerous skips.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — no DB writes; pure verification discipline)
+> - Required: callable from any phase (no phase gate)
+> - Required tables: none — this procedure runs no scripts and touches no DB tables
+
 ## Hard gate
 
 None — callable from any phase.

@@ -15,7 +15,7 @@ Manages agent desks (tmux panes) within a room. Each pane is one agent's desk ru
 
 ### agent:join
 1. Ask: "Workspace name?" / "Room name?" / "Agent ID (from the agents registry, e.g. 'dev-1')?"
-2. Check: verify the agent exists — `python3 atelier/scripts/agents.py get <agent_id>`
+2. Run `python3 atelier/scripts/agents.py get <agent_id>`. If the command exits non-zero, abort and tell the user: 'Agent <agent_id> not found in the registry. Register it first.'
 3. Run: `python3 atelier/scripts/workspace.py agent:join <workspace> <room_name> <agent_id>`
 4. Confirm: "Agent '[agent_id]' is now at their desk in room '[room_name]'. Claude Code launched in pane [pane_id]."
 5. Note the pane ID for future `internal/agent/SKILL.md` (`leave`) calls.
@@ -26,6 +26,6 @@ Manages agent desks (tmux panes) within a room. Each pane is one agent's desk ru
 3. Confirm: "Agent's desk (pane [pane_id]) closed."
 
 ## Hard rules
-- Always verify the agent exists in the Atelier registry before creating their desk.
+- The agent must exist in the Atelier registry (step 2 exit-0) before the desk is created. A non-zero exit at step 2 is a hard stop.
 - Maximum 3–5 agents per room. Warn at 4; refuse at 6.
 - Record the pane ID when an agent joins — it is the only way to identify the pane for `internal/agent/SKILL.md` (`leave`).

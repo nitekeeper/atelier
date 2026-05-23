@@ -75,6 +75,16 @@ Skill discovery is file-based — no registration script exists. After writing:
 3. If replacing an existing skill, confirm the old file is overwritten, not duplicated.
 4. If the skill has frontmatter, parse it as YAML. Abort if parsing fails — do not commit a file with malformed frontmatter.
 
+## Verb clarity (advisory)
+
+Advisory guidance for skill authors — elaborates step-quality rule 1 in the self-review checklist (step 4 above). Not enforced by automated tests; reviewer judgment.
+
+1. In a Hard rules section every verb must be "must" or "must not". "Should" in Hard rules is a contradiction in terms — replace with "must" plus the explicit refusal action.
+2. "Verify X" is incomplete. Every verify step requires a failure branch: "Verify X; if X is false, [abort | warn and continue | ask the user]."
+3. "Ensure X" is banned in numbered procedure steps. Replace with a concrete check command plus a decision branch for the false case.
+4. "May" is correctly used for genuinely optional fields or caller-side choices. If only one valid path exists, "must" is correct.
+5. Qualitative escape hatches ("intentionally", "appropriately", "as needed") in procedure steps create ambiguous branches. Replace with the question to ask the user or the condition to assert.
+
 ## Hard rules
 
 - Never add frontmatter to dev-workflow or CRUD skills.

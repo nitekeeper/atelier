@@ -18,8 +18,7 @@ For Tier 3 (prose ingest where the domain and relations must be extracted
 from text) the Librarian subagent must be dispatched via the Task tool —
 that is `memex:index:write`'s "dispatch path" (`librarian_output=None`).
 The corresponding Atelier internal procedure (`internal/memex/dispatch-ingest`)
-is **deferred to a future plan**. Until it lands, callers needing Tier 3
-should invoke `memex:run` directly with an `ingest` intent.
+is **deferred to a future plan**. Until `internal/memex/dispatch-ingest` lands, callers needing Tier 3 must invoke `memex:run` directly with an `ingest` intent. There is no other supported path.
 
 ## The two paths of `memex:index:write`
 

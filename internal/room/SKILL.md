@@ -37,4 +37,4 @@ Manages rooms (tmux windows) within a workspace. Rooms are created dynamically. 
 
 ## Hard rules
 - The main room cannot be closed. Refuse with an explanation if the user tries.
-- Room names should describe purpose (e.g. 'standup', 'auth-sprint') not people.
+- Room names must describe purpose (e.g. 'standup', 'auth-sprint'), not be a bare personal name. If a proposed name is ambiguous (e.g. a feature named after a founder, like 'ada-refactor'), ask the user to confirm intent before refusing.

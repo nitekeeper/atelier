@@ -6,6 +6,11 @@ description: Use when QA is approved and the work is ready to integrate — guid
 
 Final integration step. Runs after `qa:approved`. Verifies CI is green, presents integration options, and advances the project to `handoff:complete`.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` + `session.py` dispatch via `backend.py`)
+> - Required: `qa:approved` phase reached; working tree clean; CI green
+> - Required tables: `projects`, `skill_gates`, `phase_bypasses`, `sessions` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 Requires `qa:approved`.
@@ -77,11 +82,42 @@ Requires `qa:approved`.
    ```
 
 6. **Retro — surface phase bypasses:**
+
+   `scripts/backend.py` does not yet expose a read path for `phase_bypasses`. Use the mode-appropriate snippet directly.
+
+   <!-- TODO: route via backend facade once list_phase_bypasses lands -->
+
+   **Local mode** (`.ai/atelier.db` present):
    ```python
-   # via scripts/db.py
-   SELECT skill, current_phase, required_phase, COUNT(*) FROM phase_bypasses
-   WHERE project_id = ? GROUP BY skill ORDER BY COUNT(*) DESC
+   # Run as: python3 -c "<contents below>" (replace <db_path> and <project_id>)
+   from contextlib import closing
+   from scripts.backend_local import _conn
+
+   with closing(_conn()) as conn:
+       rows = conn.execute(
+           'SELECT skill, current_phase, required_phase, COUNT(*) AS n '
+           'FROM phase_bypasses WHERE project_id = ? '
+           'GROUP BY skill ORDER BY n DESC',
+           (<project_id>,),
+       ).fetchall()
+       for row in rows: print(dict(row))
    ```
+
+   **Memex mode** (Memex v2 installed):
+   ```python
+   # Run as: python3 -c "<contents below>" (replace <project_id>)
+   from scripts.backend_memex import _memex_module
+
+   rows = _memex_module("stores").query(
+       "atelier",
+       'SELECT skill, current_phase, required_phase, COUNT(*) AS n '
+       'FROM phase_bypasses WHERE project_id = ? '
+       'GROUP BY skill ORDER BY n DESC',
+       (<project_id>,),
+   )
+   for row in rows: print(dict(row))
+   ```
+
    If any bypasses exist, present the summary. Ask the user if any should be captured as lessons.
 
 ## Hard rules

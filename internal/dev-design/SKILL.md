@@ -6,6 +6,11 @@ description: Use when starting any new project, feature, or initiative — PM ag
 
 The first phase of every project. The PM agent grills the human until all requirements are fully clear, then produces the design document. No time limit on questions — the PM keeps asking until there are zero remaining ambiguities.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `backend.py` routes all phase and document writes)
+> - Required: `project_id` known and project exists (`project:read <project_id>` confirms)
+> - Required tables: `projects`, `skill_gates`, `project_documents` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 No gate — requires only that a project exists. Run `project:read <project_id>` to confirm.

@@ -6,6 +6,11 @@ description: Use when implementing a plan task — drives red/green/clean TDD cy
 
 Test-driven development. Implements plan tasks one at a time using red → green → clean cycles. The primary implementation skill.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` + `documents.py` dispatch via `backend.py`)
+> - Required: `plan:approved` phase reached; plan document readable via `documents.py list`
+> - Required tables: `projects`, `skill_gates`, `phase_bypasses`, `project_documents` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 Requires `plan:approved`.

@@ -4,6 +4,11 @@ description: Use to create, join, list, or leave tmux workspaces for multi-agent
 
 # workspace
 
+> **Prerequisites**
+> - Runtime: `tmux` on PATH; `libtmux` Python package installed (per requirements.txt)
+> - Mode: Memex or Local (mode-symmetric — `workspace.py` dispatches via `backend.py` for any DB writes; tmux session state is mode-independent)
+> - Required tables: none — pure tmux session management
+
 Manages tmux workspaces. Each workspace is a tmux session with Claude Code agent teams enabled.
 
 ## Commands

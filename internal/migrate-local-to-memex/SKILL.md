@@ -4,6 +4,11 @@ description: Internal — one-shot per-project migration from Local-mode atelier
 
 # migrate-local-to-memex (internal)
 
+> **Prerequisites**
+> - Mode: **MEMEX ONLY** — Memex v2 must be installed and bootstrapped (`~/.memex/registry.json` must exist); `mode_detector.detect_mode()` must return `"memex"` and `migrate_to_memex.should_prompt()` must return `True`
+> - Required: a project running in Local mode with `.ai/atelier.db` present (i.e. neither `.ai/atelier.migrated` nor `.ai/atelier.local-only` marker is present)
+> - Required tables: reads from `<project>/.ai/atelier.db` (tables: `projects`, `tasks`, `meetings`, `sessions`, `phase_bypasses`, `project_documents`); writes to `~/.memex/atelier.db` (Memex Core store) via `backend_memex.write_*`
+
 ## Trigger
 
 At the top of any Atelier user-facing skill in Memex mode, before any

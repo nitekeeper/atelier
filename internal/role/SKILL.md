@@ -6,6 +6,11 @@ description: Use to create, read, update, delete, list, or search agent roles in
 
 Manages roles in Atelier. Roles define the type and responsibility of agents.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `roles.py` dispatches via `backend.py`)
+> - Required: Atelier bootstrap complete
+> - Required tables: `roles` — seeded by Atelier bootstrap
+
 ## Commands
 
 - `internal/role/SKILL.md` (`create`) — Register a new role

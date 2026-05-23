@@ -6,6 +6,11 @@ description: Use to create, read, update, delete, list, or search agents (human 
 
 Manages agents in Atelier. Agents are human or AI participants with a role and a profile.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `agents.py` dispatches via `backend.py`)
+> - Required: Atelier bootstrap complete
+> - Required tables: `agents`, `roles` — seeded by Atelier bootstrap
+
 ## Commands
 
 - `internal/agent/SKILL.md` (`create`) — Register a new agent

@@ -6,6 +6,11 @@ description: Use when creating a new Atelier skill or rewriting an existing one 
 
 Authors, reviews, and registers a new Atelier skill. Use when creating a skill from scratch, rewriting an existing one, or auditing a skill for quality after a self-improve cycle identifies a gap.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — no DB writes; skill authoring is file-based only)
+> - Required: callable from any phase (no phase gate)
+> - Required tables: none — this procedure runs no scripts and touches no DB tables
+
 ## Hard gate
 
 None — callable from any phase.

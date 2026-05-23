@@ -6,6 +6,11 @@ description: Use to create, read, update, delete, list, or search Atelier projec
 
 Manages projects in Atelier. A project is a feature, epic, or new repo moving through the dev workflow.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `projects.py` dispatches via `backend.py`)
+> - Required: Atelier bootstrap complete; workspace_id known (projects are workspace-scoped — resolved automatically from the singleton workspace row)
+> - Required tables: `projects`, `workspaces` — seeded by Atelier bootstrap
+
 ## Commands
 
 - `internal/project/SKILL.md` (`create`) — Create a new project

@@ -6,6 +6,11 @@ description: Use to create, read, update, delete, list, or search documents atta
 
 Manages documents attached to projects — design docs, implementation plans, test reports, etc.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `documents.py` dispatches via `backend.py`)
+> - Required: Atelier bootstrap complete; target document file must exist on disk before registering
+> - Required tables: `project_documents`, `projects` — seeded by Atelier bootstrap
+
 ## Commands
 
 - `internal/doc/SKILL.md` (`create`) — Attach a document to a project

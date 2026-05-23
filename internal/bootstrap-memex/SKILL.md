@@ -4,6 +4,11 @@ description: Internal — first-run Atelier bootstrap into Memex. Seeds Atelier'
 
 # bootstrap-memex (internal)
 
+> **Prerequisites**
+> - Mode: **MEMEX ONLY** — `mode_detector.detect_mode()` must return `"memex"` or this procedure is a no-op
+> - Required: Memex plugin installed in Claude Code; `~/.memex/` bootstrapped (i.e. `~/.memex/registry.json` must exist — either via `memex:run` Step 0.2 auto-bootstrap or a prior `memex:run` invocation)
+> - Required tables: created/seeded by this skill — `~/.memex/atelier.db` registered as a Memex Core store (via `memex:core:create-store`); roles + agent profiles seeded into `~/.memex/agents.db` (Memex's pre-existing agents DB)
+
 ## When invoked
 
 Every Atelier command in Memex mode reads

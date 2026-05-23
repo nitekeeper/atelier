@@ -6,6 +6,11 @@ description: Use when encountering a bug or unexpected behavior at any phase —
 
 Bug diagnosis. Can be entered from any phase. Identifies root cause, writes a regression test, fixes the root cause, and resumes the interrupted phase.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` + `session.py` dispatch via `backend.py`)
+> - Required: an existing project (no phase gate — callable from any phase)
+> - Required tables: `projects`, `phases`, `phase_transitions`, `skill_gates`, `sessions` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 None — callable from any phase.

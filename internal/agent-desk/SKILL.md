@@ -4,6 +4,11 @@ description: Use to join or leave a tmux agent desk (pane) within a room.
 
 # agent-desk
 
+> **Prerequisites**
+> - Runtime: `tmux` on PATH; `libtmux` Python package installed (per requirements.txt)
+> - Mode: Memex or Local (mode-symmetric — `workspace.py` dispatches via `backend.py` for any DB writes; tmux session state is mode-independent)
+> - Required tables: none — pure tmux session management
+
 Manages agent desks (tmux panes) within a room. Each pane is one agent's desk running a Claude Code CLI session.
 
 ## Commands

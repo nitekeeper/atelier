@@ -6,6 +6,11 @@ description: Use to create, assign, claim, update, complete, list, or search tas
 
 Manages tasks in Atelier. Tasks are created from the TDD red phase and assigned by the coordinator.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `tasks.py` dispatches via `backend.py`)
+> - Required: Atelier bootstrap complete; project must exist and be in phase `plan:approved` or later before tasks can be assigned
+> - Required tables: `tasks`, `projects` — seeded by Atelier bootstrap
+
 ## Commands
 
 - `internal/task/SKILL.md` (`create`) — Create a new task

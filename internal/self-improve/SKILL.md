@@ -4,6 +4,11 @@ description: Use when improving Atelier's own code, skills, or structure — mul
 
 # dev:self-improve
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — atelier's facade dispatches via `backend.py`; `startup_check()` routes automatically)
+> - Required: atelier installed in the active project; meta-skill executed by a human operator against Atelier's own codebase (user-initiated only — agents must not invoke this skill)
+> - Required tables: depends on which sub-procedures run — typically `projects`, `skill_gates`, `phase_bypasses`, `project_documents`, `tasks` (resolved through `backend.py` to either `~/.memex/atelier.db` or `<project>/.ai/atelier.db`)
+
 Autonomous multi-agent improvement of Atelier's own code, skills, and structure. Uses an isolated git clone, a structured meeting with world-class expert agents, unanimous consensus, and a full test gate before merging.
 
 ## Hard gate

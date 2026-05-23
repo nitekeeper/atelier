@@ -6,6 +6,11 @@ description: Use when a design is approved and ready for implementation — tran
 
 Implementation planning. Translates an approved design into a concrete task list. Produces a plan document that guides TDD execution.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` + `documents.py` dispatch via `backend.py`)
+> - Required: `design:approved` phase reached; approved design document readable via `documents.py list`
+> - Required tables: `projects`, `skill_gates`, `phase_bypasses`, `project_documents`, `phases`, `phase_transitions` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 Requires `design:approved`.

@@ -4,6 +4,11 @@ description: Use to create, join, list, or close tmux rooms (windows) within a w
 
 # room
 
+> **Prerequisites**
+> - Runtime: `tmux` on PATH; `libtmux` Python package installed (per requirements.txt)
+> - Mode: Memex or Local (mode-symmetric — `workspace.py` dispatches via `backend.py` for any DB writes; tmux session state is mode-independent)
+> - Required tables: none — pure tmux session management
+
 Manages rooms (tmux windows) within a workspace. Rooms are created dynamically. Every workspace always has a main room.
 
 ## Commands

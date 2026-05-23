@@ -71,9 +71,9 @@ Accept the skill only if the agent trace shows: no invented steps, no omitted st
 Skill discovery is file-based — no registration script exists. After writing:
 
 1. Confirm the file exists at `skills/<name>/SKILL.md`.
-2. Confirm no name collision: `ls skills/` — ensure the directory is new or intentionally replacing the old skill.
+2. Confirm no name collision: `ls skills/`. Abort if a directory at `skills/<name>/` already exists unless the user has explicitly confirmed an intentional replacement. To confirm, ask: "Directory `skills/<name>/` already exists. Is this an intentional replacement? (yes/no)" — wait for `yes` before continuing.
 3. If replacing an existing skill, confirm the old file is overwritten, not duplicated.
-4. If the skill has frontmatter, verify it parses as valid YAML.
+4. If the skill has frontmatter, parse it as YAML. Abort if parsing fails — do not commit a file with malformed frontmatter.
 
 ## Hard rules
 

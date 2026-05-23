@@ -6,6 +6,11 @@ description: Use at the end of any session — records current state to the DB s
 
 Records current session state to the DB. Callable from any phase. Always the last action before closing a session.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — phase state routed via `backend.py`)
+> - Required: an existing project (created via `internal/project/SKILL.md`)
+> - Required tables: `projects`, `sessions`, `phase_bypasses` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 None — callable from any phase.
@@ -44,11 +49,21 @@ None — callable from any phase.
 
 4. **Query phase bypasses for retro:**
 
-   ```python
-   from contextlib import closing
-   from scripts.db import get_connection
+   `scripts/backend.py` does not yet expose a read path for `phase_bypasses` (`list_phase_bypasses` is deferred — see the v1.2.0 block in `backend.py`). `scripts/workflow.py` exposes only a `log-bypass` write command, not a list command. Use the mode-appropriate snippet below directly.
 
-   with closing(get_connection('<db_path>')) as conn:
+   <!-- TODO: route via backend facade once list_phase_bypasses lands -->
+   <!-- NOTE: the direct backend_local/_memex calls below violate CLAUDE.md rule 1
+        ("Never call backend_memex.* or backend_local.* directly from a skill").
+        This is an acknowledged temporary workaround until list_phase_bypasses is
+        added to the backend facade. -->
+
+   **Local mode** (`.ai/atelier.db` present, Memex not installed):
+   ```python
+   # Run as: python3 -c "<contents below>" (replace <db_path> and <project_id>)
+   from contextlib import closing
+   from scripts.backend_local import _conn
+
+   with closing(_conn()) as conn:
        rows = conn.execute('''
            SELECT skill, current_phase, required_phase, COUNT(*) AS n,
                   GROUP_CONCAT(note, ' | ') AS notes
@@ -58,7 +73,27 @@ None — callable from any phase.
            ORDER BY n DESC
        ''', (<project_id>,)).fetchall()
        for row in rows:
-           print(row)
+           print(dict(row))
+   ```
+
+   **Memex mode** (Memex v2 installed):
+   ```python
+   # Run as: python3 -c "<contents below>" (replace <project_id>)
+   from scripts.backend_memex import _memex_module
+
+   stores = _memex_module("stores")
+   rows = stores.query(
+       "atelier",
+       '''SELECT skill, current_phase, required_phase, COUNT(*) AS n,
+                 GROUP_CONCAT(note, ' | ') AS notes
+          FROM phase_bypasses
+          WHERE project_id = ?
+          GROUP BY skill, current_phase, required_phase
+          ORDER BY n DESC''',
+       (<project_id>,),
+   )
+   for row in rows:
+       print(dict(row))
    ```
 
    Format the output as a **Bypasses** subsection in the retro:

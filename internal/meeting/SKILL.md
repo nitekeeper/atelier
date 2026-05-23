@@ -6,6 +6,11 @@ description: Use to create, read, update, delete, list, or search meetings — w
 
 Manages meetings in Atelier. Each meeting creates both a DB record and a markdown file in `.ai/meetings/`.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `backend.write_meeting` dispatches via `backend.py`)
+> - Required filesystem: `.ai/meetings/` directory (created on first meeting in Local mode)
+> - Required tables: `meetings`, `meeting_participants`, `agents` — seeded by Atelier bootstrap
+
 ## Commands
 
 - `internal/meeting/SKILL.md` (`create`) — Record a meeting
@@ -49,4 +54,4 @@ Manages meetings in Atelier. Each meeting creates both a DB record and a markdow
 3. Display matching meetings as a table.
 
 ## Hard rules
-- Always capture meeting knowledge to Memex via `ingest` after recording a meeting. Prompt the user: "Meeting recorded. Capture key insights to the knowledge base? (y/n)"
+- Always capture meeting knowledge to the knowledge base via `ingest` after recording a meeting. Prompt the user: "Meeting recorded. Capture key insights to the knowledge base? (y/n)" — `ingest` routes correctly in both Memex and Local mode.

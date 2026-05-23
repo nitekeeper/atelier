@@ -6,6 +6,11 @@ description: Use when review is approved and before QA — checks for vulnerabil
 
 Security review. Checks the implementation for vulnerabilities, exposed secrets, and insecure patterns before QA.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` dispatches via `backend.py`)
+> - Required: `review:approved` phase reached
+> - Required tables: `projects`, `skill_gates`, `phase_bypasses` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 Requires `review:approved`.

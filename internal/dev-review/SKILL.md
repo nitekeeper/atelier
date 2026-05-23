@@ -6,6 +6,11 @@ description: Use when implementation is complete — examines code for correctne
 
 Code review. Examines the implementation for correctness, maintainability, and spec compliance. Produces a review decision.
 
+> **Prerequisites**
+> - Mode: Memex or Local (mode-symmetric — `workflow.py` + `documents.py` dispatch via `backend.py`)
+> - Required: `tdd:clean` phase reached; plan and design documents readable via `documents.py list`
+> - Required tables: `projects`, `skill_gates`, `phase_bypasses`, `project_documents` — seeded by Atelier bootstrap
+
 ## Hard gate
 
 Requires `tdd:clean`.

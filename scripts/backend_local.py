@@ -696,6 +696,21 @@ def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_phase_bypasses(*, project_id: int) -> list[dict]:
+    """Local-mode: SELECT all phase_bypasses rows for the project."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, project_id, from_phase, to_phase, reason, agent_id, created_at "
+            "FROM phase_bypasses WHERE project_id = ? "
+            "ORDER BY created_at",
+            (project_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
 # ── Cross-plan helpers ─────────────────────────────────────────────────────
 
 

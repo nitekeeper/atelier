@@ -1257,6 +1257,15 @@ def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
     return _memex_core_query(store="atelier", table="tasks", where=where)
 
 
+def list_phase_bypasses(*, project_id: int) -> list[dict]:
+    """Memex-mode: query phase_bypasses via _memex_core_query."""
+    return _memex_core_query(
+        store="atelier",
+        table="phase_bypasses",
+        where={"project_id": project_id},
+    )
+
+
 # ── Cross-plan helpers ─────────────────────────────────────────────────────
 
 

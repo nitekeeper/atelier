@@ -157,3 +157,18 @@ def test_record_phase_bypass_inserts_row(mock_core):
     assert kwargs["row"]["to_phase"] == "plan:open"
     assert kwargs["row"]["reason"] == "user override"
     assert kwargs["row"]["agent_id"] == "atelier-pm-1"
+
+
+# ── list_phase_bypasses ───────────────────────────────────────────────────
+
+
+def test_list_phase_bypasses_calls_memex_core_query(mock_core):
+    """list_phase_bypasses must delegate to _memex_core_query with the correct
+    store, table, and where kwargs."""
+    mock_core["query"].return_value = []
+    backend_memex.list_phase_bypasses(project_id=1)
+    mock_core["query"].assert_called_once_with(
+        store="atelier",
+        table="phase_bypasses",
+        where={"project_id": 1},
+    )

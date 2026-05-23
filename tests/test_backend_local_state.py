@@ -202,3 +202,81 @@ def test_record_phase_bypass_inserts_row(workspace):
     assert row["from_phase"] == "design:open"
     assert row["to_phase"] == "plan:open"
     assert row["agent_id"] == "atelier-pm-1"
+
+
+# ── list_phase_bypasses ────────────────────────────────────────────────────
+
+
+def test_list_phase_bypasses_empty_returns_empty_list(workspace):
+    """No bypasses recorded → list returns []."""
+    result = backend_local.list_phase_bypasses(project_id=workspace["project_id"])
+    assert result == []
+
+
+def test_list_phase_bypasses_filters_by_project_id(workspace):
+    """Safety F4 mandatory: two projects seeded with different bypass counts;
+    list_phase_bypasses must return only rows for the requested project_id."""
+    # Seed a second project so we can assert cross-project isolation.
+    now = "2026-05-23T00:00:00Z"
+    conn = sqlite3.connect(workspace["db"])
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.row_factory = sqlite3.Row
+    ws_id = conn.execute(
+        "SELECT workspace_id FROM projects WHERE id = ?", (workspace["project_id"],)
+    ).fetchone()["workspace_id"]
+    cur = conn.execute(
+        "INSERT INTO projects (workspace_id, slug, name, description, "
+        "phase, created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (ws_id, "proj-b", "ProjB", "d", "design:open", "atelier-pm-1", now, now),
+    )
+    proj_b_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    proj_a_id = workspace["project_id"]
+
+    # Seed 2 bypasses for project A, 3 for project B.
+    for i in range(2):
+        backend_local.record_phase_bypass(
+            project_id=proj_a_id,
+            from_phase="design:open",
+            to_phase="plan:open",
+            reason=f"reason-a-{i}",
+            agent_id="atelier-pm-1",
+        )
+    for i in range(3):
+        backend_local.record_phase_bypass(
+            project_id=proj_b_id,
+            from_phase="design:open",
+            to_phase="plan:open",
+            reason=f"reason-b-{i}",
+            agent_id="atelier-pm-1",
+        )
+
+    rows_a = backend_local.list_phase_bypasses(project_id=proj_a_id)
+    assert len(rows_a) == 2
+    assert all(r["project_id"] == proj_a_id for r in rows_a)
+
+
+def test_list_phase_bypasses_returns_v110_columns(workspace):
+    """Returned dicts must contain exactly the v1.1.0 phase_bypasses columns."""
+    backend_local.record_phase_bypass(
+        project_id=workspace["project_id"],
+        from_phase="design:open",
+        to_phase="plan:open",
+        reason="testing",
+        agent_id="atelier-pm-1",
+    )
+    rows = backend_local.list_phase_bypasses(project_id=workspace["project_id"])
+    assert len(rows) == 1
+    expected_keys = {
+        "id",
+        "project_id",
+        "from_phase",
+        "to_phase",
+        "reason",
+        "agent_id",
+        "created_at",
+    }
+    assert set(rows[0].keys()) == expected_keys

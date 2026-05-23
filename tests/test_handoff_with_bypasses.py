@@ -12,8 +12,8 @@ def test_handoff_skill_references_phase_bypasses_query():
     assert "phase_bypasses" in text, (
         "dev-handoff must query phase_bypasses to surface bypasses in retro"
     )
-    # Must aggregate by skill so retro is readable
-    assert "GROUP BY" in text or "aggregat" in text.lower() or "by skill" in text.lower()
+    # Must aggregate for retro display — new format uses Python-side Counter aggregation.
+    assert "bypass(es)" in text or ("from " in text and "→" in text)
 
 
 def test_handoff_describes_bypass_section_in_retro():

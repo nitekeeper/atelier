@@ -350,6 +350,20 @@ def record_phase_bypass(
     )
 
 
+def list_phase_bypasses(*, project_id: int) -> list[dict]:
+    """Return all phase_bypasses rows for a project.
+
+    Returns raw rows from the phase_bypasses table (one dict per row) with
+    keys: id, project_id, from_phase, to_phase, reason, agent_id, created_at.
+    Returns [] if no bypasses exist for the project.
+
+    Callers that need grouped/aggregated views (e.g. dev-handoff and
+    dev-finish retros) aggregate in Python at the rendering layer — see
+    those SKILL.md files for the canonical pattern.
+    """
+    return _backend().list_phase_bypasses(project_id=project_id)
+
+
 # ── Workspace + project resolution — deferred to v1.2.0 ────────────────────
 #
 # Spec §4.3 keeps these on the surface so callers (Plan 3's

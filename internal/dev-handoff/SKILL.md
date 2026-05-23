@@ -49,57 +49,27 @@ None — callable from any phase.
 
 4. **Query phase bypasses for retro:**
 
-   `scripts/backend.py` does not yet expose a read path for `phase_bypasses` (`list_phase_bypasses` is deferred — see the v1.2.0 block in `backend.py`). `scripts/workflow.py` exposes only a `log-bypass` write command, not a list command. Use the mode-appropriate snippet below directly.
-
-   <!-- TODO: route via backend facade once list_phase_bypasses lands -->
-   <!-- NOTE: the direct backend_local/_memex calls below violate CLAUDE.md rule 1
-        ("Never call backend_memex.* or backend_local.* directly from a skill").
-        This is an acknowledged temporary workaround until list_phase_bypasses is
-        added to the backend facade. -->
-
-   **Local mode** (`.ai/atelier.db` present, Memex not installed):
-   ```python
-   # Run as: python3 -c "<contents below>" (replace <db_path> and <project_id>)
-   from contextlib import closing
-   from scripts.backend_local import _conn
-
-   with closing(_conn()) as conn:
-       rows = conn.execute('''
-           SELECT skill, current_phase, required_phase, COUNT(*) AS n,
-                  GROUP_CONCAT(note, ' | ') AS notes
-           FROM phase_bypasses
-           WHERE project_id = ?
-           GROUP BY skill, current_phase, required_phase
-           ORDER BY n DESC
-       ''', (<project_id>,)).fetchall()
-       for row in rows:
-           print(dict(row))
-   ```
-
-   **Memex mode** (Memex v2 installed):
    ```python
    # Run as: python3 -c "<contents below>" (replace <project_id>)
-   from scripts.backend_memex import _memex_module
+   from collections import Counter
+   from scripts import backend
 
-   stores = _memex_module("stores")
-   rows = stores.query(
-       "atelier",
-       '''SELECT skill, current_phase, required_phase, COUNT(*) AS n,
-                 GROUP_CONCAT(note, ' | ') AS notes
-          FROM phase_bypasses
-          WHERE project_id = ?
-          GROUP BY skill, current_phase, required_phase
-          ORDER BY n DESC''',
-       (<project_id>,),
-   )
-   for row in rows:
-       print(dict(row))
+   rows = backend.list_phase_bypasses(project_id=<project_id>)
+   if not rows:
+       print("No phase bypasses during this project's lifecycle.")
+   else:
+       # Aggregate by (from_phase, to_phase) for the retro display.
+       counts = Counter((r["from_phase"], r["to_phase"]) for r in rows)
+       reasons_by_pair = {}
+       for r in rows:
+           key = (r["from_phase"], r["to_phase"])
+           reasons_by_pair.setdefault(key, []).append(r["reason"])
+       for (from_phase, to_phase), n in counts.most_common():
+           reasons = " | ".join(reasons_by_pair[(from_phase, to_phase)])
+           print(f"from {from_phase} → {to_phase}: {n} bypass(es). Reasons: {reasons}")
    ```
 
-   Format the output as a **Bypasses** subsection in the retro:
-
-   - For each row: `<skill>: <n> bypass(es) from <current_phase> (normally requires <required_phase>)`. If `notes` is non-empty, append it.
-   - If no rows, write: "*No phase bypasses during this project's lifecycle.*"
+   Format the output as a **Bypasses** subsection in the retro.
 
 5. Ask: "Anything to capture to the knowledge base before closing? (y/n)"
    If yes: invoke `ingest`.

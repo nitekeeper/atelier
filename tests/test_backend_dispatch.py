@@ -146,6 +146,7 @@ def _patch_all_local(**overrides):
         "transition_phase": lambda **k: {"id": 1, "marker": "transition_phase"},
         "update_task_status": lambda **k: {"id": 1, "marker": "update_task_status"},
         "record_phase_bypass": lambda **k: {"id": 1, "marker": "record_phase_bypass"},
+        "list_phase_bypasses": lambda **k: [{"marker": "list_phase_bypasses"}],
         "find_documents": lambda **k: [{"marker": "find_documents"}],
         "get_task": lambda **k: {"marker": "get_task"},
         "list_tasks": lambda **k: [{"marker": "list_tasks"}],
@@ -224,6 +225,7 @@ def test_every_implemented_method_dispatches_to_local():
             )["marker"]
             == "record_phase_bypass"
         )
+        assert backend.list_phase_bypasses(project_id=1)[0]["marker"] == "list_phase_bypasses"
         assert backend.find_documents(query="q")[0]["marker"] == "find_documents"
         assert backend.get_task(task_id=1)["marker"] == "get_task"
         assert backend.list_tasks(project_id=1)[0]["marker"] == "list_tasks"
@@ -252,6 +254,7 @@ def _patch_all_memex(**overrides):
         "transition_phase": lambda **k: {"id": 1, "marker": "transition_phase"},
         "update_task_status": lambda **k: {"id": 1, "marker": "update_task_status"},
         "record_phase_bypass": lambda **k: {"id": 1, "marker": "record_phase_bypass"},
+        "list_phase_bypasses": lambda **k: [{"marker": "list_phase_bypasses"}],
         "find_documents": lambda **k: [{"marker": "find_documents"}],
         "get_task": lambda **k: {"marker": "get_task"},
         "list_tasks": lambda **k: [{"marker": "list_tasks"}],
@@ -333,6 +336,7 @@ def test_every_implemented_method_dispatches_to_memex():
             )["marker"]
             == "record_phase_bypass"
         )
+        assert backend.list_phase_bypasses(project_id=1)[0]["marker"] == "list_phase_bypasses"
         assert backend.find_documents(query="q")[0]["marker"] == "find_documents"
         assert backend.get_task(task_id=1)["marker"] == "get_task"
         assert backend.list_tasks(project_id=1)[0]["marker"] == "list_tasks"

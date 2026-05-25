@@ -14,7 +14,8 @@ Public function signatures are preserved from pre-retrofit. The
 the DB via `backend_local._local_db()` (workspace_root + .ai/atelier.db),
 Memex mode resolves `~/.memex/agents.db` via the Memex registry.
 
-`phase_bypasses.agent_id` no-FK semantics (spec §11 / TODO Reviewer Nit-3):
+`phase_bypasses.agent_id` no-FK semantics (design decision: spec §11
+no-FK semantics for cross-store agent references — settled in review):
 the v1.1.0 `phase_bypasses` row stores `agent_id TEXT NOT NULL` with
 NO foreign key. Memex/Local agent stores are disjoint — Memex-mode
 agents live in `~/.memex/agents.db` while the Atelier workspace DB

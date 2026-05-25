@@ -280,3 +280,219 @@ def test_list_phase_bypasses_returns_v110_columns(workspace):
         "created_at",
     }
     assert set(rows[0].keys()) == expected_keys
+
+
+# ── update_task ────────────────────────────────────────────────────────────
+#
+# Issue #26: general partial update — single/multi-field; status not
+# auto-flipped when assigned_to is in the changes; raises on miss.
+
+
+def test_update_task_single_field(workspace):
+    """Single column write — only that column moves; status is untouched."""
+    r = backend_local.update_task(
+        task_id=workspace["task_id"],
+        title="New Title",
+    )
+    assert r["title"] == "New Title"
+    # Status was seeded as 'pending' by _seed() — must remain pending,
+    # because update_task does NOT auto-flip status.
+    assert r["status"] == "pending"
+
+
+def test_update_task_multi_field(workspace):
+    """Multi-column write — all changes applied in one call."""
+    r = backend_local.update_task(
+        task_id=workspace["task_id"],
+        title="T",
+        description="D",
+        priority=4,
+        notes="n",
+    )
+    assert r["title"] == "T"
+    assert r["description"] == "D"
+    assert r["priority"] == 4
+    assert r["notes"] == "n"
+    # No auto-flip; status remains as seeded.
+    assert r["status"] == "pending"
+
+
+def test_update_task_does_not_auto_flip_status_when_assigned_to_changes(workspace):
+    """Critical contract from issue #26: assigning via update_task must
+    NOT touch status. Only the dedicated assign_task helper flips it."""
+    r = backend_local.update_task(
+        task_id=workspace["task_id"],
+        assigned_to="atelier-pm-1",
+    )
+    assert r["assigned_to"] == "atelier-pm-1"
+    # Seeded as 'pending'; update_task is a pure column update.
+    assert r["status"] == "pending"
+
+
+def test_update_task_raises_when_task_missing(workspace):
+    with pytest.raises(ValueError):
+        backend_local.update_task(task_id=99999, title="ghost")
+
+
+def test_update_task_rejects_status_even_when_combined_with_assigned_to(workspace):
+    """M3: backend.update_task rejects `status` because it would bypass the
+    COALESCE timestamp side-effects in update_task_status. Defense-in-depth
+    mirror is enforced here too — even mixing assigned_to in the same call
+    doesn't smuggle the status write through."""
+    with pytest.raises(ValueError, match="status writes must go through update_task_status"):
+        backend_local.update_task(
+            task_id=workspace["task_id"],
+            status="complete",
+            assigned_to="atelier-pm-1",
+        )
+
+
+def test_update_task_with_assigned_to_only_updates_just_that_field(workspace):
+    """M3: passing `assigned_to` without `status` succeeds and leaves the
+    seeded status ('pending') untouched — confirms no auto-flip."""
+    before = backend_local.get_task(task_id=workspace["task_id"])
+    assert before["status"] == "pending"
+    r = backend_local.update_task(
+        task_id=workspace["task_id"],
+        assigned_to="atelier-pm-1",
+    )
+    assert r["assigned_to"] == "atelier-pm-1"
+    # Status MUST remain pending — pure column update.
+    assert r["status"] == before["status"]
+
+
+def test_update_task_rejects_unknown_column_at_backend_local(workspace):
+    """m3 defense-in-depth: a direct backend_local caller (bypassing the
+    facade) must still get a ValueError on an unknown column."""
+    with pytest.raises(ValueError, match="does not accept column"):
+        backend_local.update_task(task_id=workspace["task_id"], evil="x")
+
+
+# ── delete_task ────────────────────────────────────────────────────────────
+
+
+def test_delete_task_existing_returns_true(workspace):
+    """Issue #27: deleting a real task returns True and removes the row."""
+    assert backend_local.delete_task(task_id=workspace["task_id"]) is True
+    assert backend_local.get_task(task_id=workspace["task_id"]) is None
+
+
+def test_delete_task_missing_returns_false(workspace):
+    """Issue #27: rowcount-based contract — absent id returns False."""
+    assert backend_local.delete_task(task_id=99999) is False
+
+
+def test_delete_task_is_idempotent(workspace):
+    """Two calls in a row: first deletes (True), second is a no-op (False)."""
+    assert backend_local.delete_task(task_id=workspace["task_id"]) is True
+    assert backend_local.delete_task(task_id=workspace["task_id"]) is False
+
+
+# ── assign_task ────────────────────────────────────────────────────────────
+
+
+def test_assign_task_sets_both_fields(workspace):
+    """Issue #28: post-call both assigned_to and status are set."""
+    r = backend_local.assign_task(task_id=workspace["task_id"], agent_id="atelier-pm-1")
+    assert r["assigned_to"] == "atelier-pm-1"
+    assert r["status"] == "assigned"
+
+
+def test_assign_task_uses_single_update_statement(workspace, monkeypatch):
+    """Atomicity check: a single backend call → a single connection
+    that issues exactly one UPDATE on the tasks table. We instrument
+    `sqlite3.Connection.execute` via a wrapping monkeypatch on the
+    `_conn()` helper so we can count UPDATE-tasks statements through
+    one assign_task call."""
+    update_calls = []
+    real_conn = backend_local._conn
+
+    class _Wrap:
+        def __init__(self, c):
+            self._c = c
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.lstrip().upper().startswith("UPDATE TASKS"):
+                update_calls.append(sql)
+            return self._c.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._c, name)
+
+    def fake_conn():
+        return _Wrap(real_conn())
+
+    monkeypatch.setattr(backend_local, "_conn", fake_conn)
+    backend_local.assign_task(task_id=workspace["task_id"], agent_id="atelier-pm-1")
+    assert len(update_calls) == 1, (
+        f"assign_task must issue exactly one UPDATE on tasks; got {update_calls}"
+    )
+
+
+def test_assign_task_raises_when_task_missing(workspace):
+    with pytest.raises(ValueError):
+        backend_local.assign_task(task_id=99999, agent_id="atelier-pm-1")
+
+
+# ── list_tasks assigned_to filter ──────────────────────────────────────────
+
+
+def test_list_tasks_assigned_to_filter_narrows_results(workspace):
+    """Issue #29: the filter is pushed into the WHERE clause."""
+    proj_id = workspace["project_id"]
+    # Seed a second task assigned to a different agent.
+    now = "2026-05-23T00:00:00Z"
+    conn = sqlite3.connect(workspace["db"])
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        "INSERT INTO tasks (project_id, title, description, status, "
+        "assigned_to, created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (proj_id, "T2", "d", "assigned", "dev-2", "atelier-pm-1", now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    # Assign the seeded task to dev-1.
+    backend_local.assign_task(task_id=workspace["task_id"], agent_id="dev-1")
+
+    only_dev1 = backend_local.list_tasks(project_id=proj_id, assigned_to="dev-1")
+    only_dev2 = backend_local.list_tasks(project_id=proj_id, assigned_to="dev-2")
+    assert len(only_dev1) == 1
+    assert only_dev1[0]["assigned_to"] == "dev-1"
+    assert len(only_dev2) == 1
+    assert only_dev2[0]["assigned_to"] == "dev-2"
+
+
+def test_list_tasks_no_filter_returns_all(workspace):
+    """No assigned_to filter — all rows in the project come back."""
+    proj_id = workspace["project_id"]
+    backend_local.assign_task(task_id=workspace["task_id"], agent_id="dev-1")
+    rows = backend_local.list_tasks(project_id=proj_id)
+    assert len(rows) == 1
+
+
+def test_list_tasks_combines_status_and_assigned_to(workspace):
+    """Combined filter is an AND — both predicates ride the WHERE."""
+    proj_id = workspace["project_id"]
+    # Seed a second task: also assigned to dev-1 but with a different status.
+    now = "2026-05-23T00:00:00Z"
+    conn = sqlite3.connect(workspace["db"])
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        "INSERT INTO tasks (project_id, title, description, status, "
+        "assigned_to, created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (proj_id, "T2", "d", "complete", "dev-1", "atelier-pm-1", now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    backend_local.assign_task(task_id=workspace["task_id"], agent_id="dev-1")
+
+    assigned_dev1 = backend_local.list_tasks(
+        project_id=proj_id, status="assigned", assigned_to="dev-1"
+    )
+    assert len(assigned_dev1) == 1
+    assert assigned_dev1[0]["status"] == "assigned"
+    assert assigned_dev1[0]["assigned_to"] == "dev-1"

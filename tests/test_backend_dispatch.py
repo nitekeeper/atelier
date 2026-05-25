@@ -145,6 +145,9 @@ def _patch_all_local(**overrides):
         "upsert_session": lambda **k: {"id": 1, "marker": "upsert_session"},
         "transition_phase": lambda **k: {"id": 1, "marker": "transition_phase"},
         "update_task_status": lambda **k: {"id": 1, "marker": "update_task_status"},
+        "update_task": lambda **k: {"id": 1, "marker": "update_task"},
+        "delete_task": lambda **k: True,
+        "assign_task": lambda **k: {"id": 1, "marker": "assign_task"},
         "record_phase_bypass": lambda **k: {"id": 1, "marker": "record_phase_bypass"},
         "list_phase_bypasses": lambda **k: [{"marker": "list_phase_bypasses"}],
         "find_documents": lambda **k: [{"marker": "find_documents"}],
@@ -219,6 +222,9 @@ def test_every_implemented_method_dispatches_to_local():
         assert (
             backend.update_task_status(task_id=1, status="done")["marker"] == "update_task_status"
         )
+        assert backend.update_task(task_id=1, title="t")["marker"] == "update_task"
+        assert backend.delete_task(task_id=1) is True
+        assert backend.assign_task(task_id=1, agent_id="dev-1")["marker"] == "assign_task"
         assert (
             backend.record_phase_bypass(
                 project_id=1, from_phase="x", to_phase="y", reason="r", agent_id="a"
@@ -253,6 +259,9 @@ def _patch_all_memex(**overrides):
         "upsert_session": lambda **k: {"id": 1, "marker": "upsert_session"},
         "transition_phase": lambda **k: {"id": 1, "marker": "transition_phase"},
         "update_task_status": lambda **k: {"id": 1, "marker": "update_task_status"},
+        "update_task": lambda **k: {"id": 1, "marker": "update_task"},
+        "delete_task": lambda **k: True,
+        "assign_task": lambda **k: {"id": 1, "marker": "assign_task"},
         "record_phase_bypass": lambda **k: {"id": 1, "marker": "record_phase_bypass"},
         "list_phase_bypasses": lambda **k: [{"marker": "list_phase_bypasses"}],
         "find_documents": lambda **k: [{"marker": "find_documents"}],
@@ -330,6 +339,9 @@ def test_every_implemented_method_dispatches_to_memex():
         assert (
             backend.update_task_status(task_id=1, status="done")["marker"] == "update_task_status"
         )
+        assert backend.update_task(task_id=1, title="t")["marker"] == "update_task"
+        assert backend.delete_task(task_id=1) is True
+        assert backend.assign_task(task_id=1, agent_id="dev-1")["marker"] == "assign_task"
         assert (
             backend.record_phase_bypass(
                 project_id=1, from_phase="x", to_phase="y", reason="r", agent_id="a"
@@ -654,3 +666,160 @@ def test_local_preserves_subdomain_for_write_meeting():
 
     assert captured["subdomain"] == "weekly"
     assert captured["workspace_id"] == 1
+
+
+# ── update_task / delete_task / assign_task / list_tasks facade behavior ───
+#
+# Issues #26-#29 widen the backend write surface beyond the Plan 2
+# status-only surface. The facade owns the allowlist + the no-auto-flip
+# contract; both backends mirror the wider signature.
+
+
+def test_update_task_rejects_unknown_column_at_facade():
+    """Issue #26: a column not in the allowlist must raise ValueError
+    BEFORE either backend is touched. Hermetic guard so a stray kwarg
+    can never poison the downstream UPDATE.
+    """
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch("scripts.backend_local.update_task") as local_call,
+        patch("scripts.backend_memex.update_task") as memex_call,
+    ):
+        with pytest.raises(ValueError, match="unknown column"):
+            backend.update_task(task_id=1, evil_drop_table="x")
+    local_call.assert_not_called()
+    memex_call.assert_not_called()
+
+
+def test_update_task_rejects_status_at_facade():
+    """M2: status writes MUST NOT slip through the facade — they have
+    to flow through `update_task_status` to preserve the COALESCE
+    lifecycle-timestamp side-effects (claimed_at / completed_at). The
+    rejection error message is dedicated (distinct from "unknown
+    column") so the caller knows where to route the write instead."""
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch("scripts.backend_local.update_task") as local_call,
+        patch("scripts.backend_memex.update_task") as memex_call,
+    ):
+        with pytest.raises(ValueError, match="status writes must go through update_task_status"):
+            backend.update_task(task_id=1, status="complete")
+        # Combined-with-other-columns case rejects the same way.
+        with pytest.raises(ValueError, match="status writes must go through update_task_status"):
+            backend.update_task(task_id=1, status="complete", assigned_to="dev-1")
+    local_call.assert_not_called()
+    memex_call.assert_not_called()
+
+
+def test_update_task_does_not_auto_flip_status_when_assigned_to_in_changes():
+    """Issue #26 (critical contract): the general partial update never
+    auto-flips status. Only the dedicated `assign_task` helper does
+    that. This is the line that keeps the two methods semantically
+    distinct."""
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"id": 1, "assigned_to": kwargs.get("assigned_to"), "status": "pending"}
+
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch("scripts.backend_local.update_task", new=fake),
+    ):
+        backend.update_task(task_id=1, assigned_to="dev-1")
+    assert captured == {"task_id": 1, "assigned_to": "dev-1"}
+    # Status must NOT have been injected by the facade.
+    assert "status" not in captured
+
+
+def test_update_task_forwards_only_listed_columns():
+    """Multi-field update arrives at the backend with exactly the
+    caller's keys — no facade-injected status, no facade-injected
+    timestamps. Per-column SQL on the backend handles each branch."""
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"id": 1}
+
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.update_task", new=fake),
+    ):
+        backend.update_task(task_id=1, title="t", priority=3, notes="n")
+    assert captured["task_id"] == 1
+    assert captured["title"] == "t"
+    assert captured["priority"] == 3
+    assert captured["notes"] == "n"
+
+
+def test_assign_task_forwards_to_backend_atomically():
+    """Issue #28: facade must forward (task_id, agent_id) to the
+    backend's `assign_task` — no two-call workaround, no facade-side
+    field decomposition."""
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"id": 1, "assigned_to": "dev-1", "status": "assigned"}
+
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch("scripts.backend_local.assign_task", new=fake),
+    ):
+        result = backend.assign_task(task_id=1, agent_id="dev-1")
+    assert captured == {"task_id": 1, "agent_id": "dev-1"}
+    assert result["assigned_to"] == "dev-1"
+    assert result["status"] == "assigned"
+
+
+def test_delete_task_returns_backend_boolean():
+    """Issue #27: True on success, False on miss — facade just
+    forwards the backend's truthy return."""
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch("scripts.backend_local.delete_task", return_value=False),
+    ):
+        assert backend.delete_task(task_id=999) is False
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.delete_task", return_value=True),
+    ):
+        assert backend.delete_task(task_id=1) is True
+
+
+def test_list_tasks_forwards_assigned_to_filter():
+    """Issue #29: `assigned_to` rides into the backend WHERE clause
+    instead of being post-filtered in Python. Facade must forward the
+    kwarg unchanged."""
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.list_tasks", new=fake),
+    ):
+        backend.list_tasks(project_id=1, status="assigned", assigned_to="dev-1")
+    assert captured["project_id"] == 1
+    assert captured["status"] == "assigned"
+    assert captured["assigned_to"] == "dev-1"
+
+
+def test_list_tasks_assigned_to_defaults_to_none():
+    """Backwards-compat: callers passing only project_id / status get
+    None for assigned_to (no filtering)."""
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="local"),
+        patch("scripts.backend_local.list_tasks", new=fake),
+    ):
+        backend.list_tasks(project_id=1)
+    assert captured["assigned_to"] is None

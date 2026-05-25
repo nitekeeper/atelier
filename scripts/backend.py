@@ -336,6 +336,76 @@ def update_task_status(*, task_id: int, status: str, notes: str | None = None) -
     )
 
 
+# Allowlist for `update_task`. Kept here (not on the backends) so the
+# facade is the single source of truth for what columns are externally
+# writable via the general-partial-update path.
+#
+# `status` is INTENTIONALLY EXCLUDED — status writes MUST go through
+# `update_task_status` to preserve the lifecycle-timestamp side-effects
+# (claimed_at / completed_at via COALESCE in backend_local). Routing a
+# status write through this method would bypass those side-effects and
+# leave the row in a coherent-but-incomplete state.
+#
+# `assign_task` is the only path that flips status as a side effect of
+# an assignment write — general `update_task` never auto-flips status,
+# even when `assigned_to` is one of the changes.
+_UPDATE_TASK_ALLOWED_COLUMNS: frozenset[str] = frozenset(
+    {"title", "description", "priority", "notes", "assigned_to"}
+)
+
+
+def update_task(*, task_id: int, **changes: object) -> dict:
+    """General partial update for a task row. Returns the updated row.
+
+    Allowed columns: title, description, priority, notes, assigned_to.
+    Unknown keys raise `ValueError` BEFORE either backend is touched
+    (hermetic — no SQLite open, no Memex Core hit).
+
+    Status writes are NOT accepted here — they must go through
+    `update_task_status` to preserve lifecycle timestamps
+    (claimed_at / completed_at). Passing `status` raises a dedicated
+    `ValueError` so the caller sees a clear "route this through
+    update_task_status" message rather than a generic "unknown column".
+
+    Semantics: this is a *pure* column update. It does NOT auto-flip
+    `status` to `'assigned'` when `assigned_to` is in the changes dict
+    — that side effect is the exclusive contract of `assign_task`,
+    which keeps the two methods semantically distinct.
+    """
+    if not changes:
+        return _backend().update_task(task_id=task_id)
+    if "status" in changes:
+        raise ValueError(
+            "status writes must go through update_task_status (preserves lifecycle timestamps)"
+        )
+    unknown = set(changes) - _UPDATE_TASK_ALLOWED_COLUMNS
+    if unknown:
+        raise ValueError(
+            f"update_task: unknown column(s) {sorted(unknown)}; "
+            f"allowed: {sorted(_UPDATE_TASK_ALLOWED_COLUMNS)}"
+        )
+    return _backend().update_task(task_id=task_id, **changes)
+
+
+def delete_task(*, task_id: int) -> bool:
+    """Delete a task row. Returns True on success, False if the row was
+    absent (idempotent semantics matching SQLite `rowcount > 0`)."""
+    return _backend().delete_task(task_id=task_id)
+
+
+def assign_task(*, task_id: int, agent_id: str) -> dict:
+    """Atomic two-field update: set `assigned_to = agent_id` AND flip
+    `status = 'assigned'` in a single backend statement so the row can
+    never be observed mid-update with one field set and the other not.
+    Returns the updated row.
+
+    This is the ONLY path on the backend surface that auto-flips
+    status as a side effect of an assignment write. General
+    `update_task` never does.
+    """
+    return _backend().assign_task(task_id=task_id, agent_id=agent_id)
+
+
 def record_phase_bypass(
     *, project_id: int, from_phase: str, to_phase: str, reason: str, agent_id: str
 ) -> dict:
@@ -429,9 +499,14 @@ def get_task(*, task_id: int) -> dict | None:
     return _backend().get_task(task_id=task_id)
 
 
-def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
-    """Return every task row in the project, optionally filtered by status."""
-    return _backend().list_tasks(project_id=project_id, status=status)
+def list_tasks(
+    *, project_id: int, status: str | None = None, assigned_to: str | None = None
+) -> list[dict]:
+    """Return every task row in the project, optionally filtered by
+    `status` and/or `assigned_to`. Both filters compose (AND); each is
+    pushed into the backend WHERE clause rather than post-filtered in
+    Python so we don't drag rows we'll throw away across the FFI."""
+    return _backend().list_tasks(project_id=project_id, status=status, assigned_to=assigned_to)
 
 
 def get_document(*, doc_id: int) -> dict | None:

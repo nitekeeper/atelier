@@ -10,11 +10,11 @@ in one place.
 # Note: backend_memex.update_task_status does not set claimed_at/completed_at
 # yet — Plan 4 v1.2 followup.
 
-assign_task / delete_task / general update_task are the mutations NOT
-covered by the backend surface (Plan 2 intentionally scoped
-`update_task_status` to status-only writes). They are routed mode-by-mode
-via `_memex_module("stores")` / `_memex_core_update` in Memex mode and a
-direct `backend_local._conn()` connection in Local mode.
+assign_task / delete_task / general update_task all ride the backend
+facade now (`backend.assign_task`, `backend.delete_task`,
+`backend.update_task`) — Plan 2's status-only `update_task_status` was
+widened in v1.2 with dedicated facade methods so this module no longer
+reaches into `_memex_core_update` / `backend_local._conn()` directly.
 
 ## Priority TEXT → INT coercion
 
@@ -146,10 +146,22 @@ def create_task(
 
 
 def update_task(db_path: str, task_id: int, **kwargs) -> dict:
-    """Partial update. Routes status changes through
-    `backend.update_task_status` so claimed_at / completed_at stay
-    coherent; routes everything else through the active backend's
-    `_conn()` so the write still respects mode dispatch.
+    """Partial update routed through the backend facade.
+
+    `backend.update_task` does NOT accept `status` — the facade rejects
+    it with a dedicated ValueError because status writes must preserve
+    the lifecycle-timestamp side-effects (claimed_at / completed_at)
+    that live in `update_task_status`. To keep this CLI seam tolerant,
+    when callers mix `status` with other columns we split the work:
+    first the status flip through `update_task_status` (capturing the
+    timestamp side-effects), then any remaining columns through
+    `backend.update_task`. The final returned row is the post-second-call
+    state so callers see all updates reflected.
+
+    The facade also rejects unknown columns with `ValueError`, so we
+    filter callers' kwargs to the allowed set here as a friendlier
+    "ignore the junk" path. This module is the legacy CLI entry point;
+    ignoring unknown kwargs preserves that surface's tolerance.
     """
     allowed = {"title", "description", "priority", "notes", "status", "assigned_to"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
@@ -159,135 +171,50 @@ def update_task(db_path: str, task_id: int, **kwargs) -> dict:
     if "priority" in updates:
         updates["priority"] = _coerce_priority(updates["priority"])
 
-    # Status-only or status+notes goes through the facade so the timestamp
-    # side-effects land via the canonical path.
-    if set(updates.keys()) <= {"status", "notes"} and "status" in updates:
-        return backend.update_task_status(
+    # Split status from the rest. backend.update_task rejects `status` to
+    # protect the COALESCE timestamps in update_task_status; route it through
+    # the canonical path here.
+    status_val = updates.pop("status", None)
+    notes_val = updates.get("notes")
+
+    if status_val is not None:
+        # Apply the status flip (+notes if present) first so the lifecycle
+        # timestamps land via the canonical path. update_task_status takes
+        # `notes` directly, so pull it from `updates` if we also have other
+        # columns to write below — we don't want the same notes write to
+        # fire twice.
+        result = backend.update_task_status(
             task_id=task_id,
-            status=updates["status"],
-            notes=updates.get("notes"),
+            status=status_val,
+            notes=notes_val,
         )
-
-    # General path: write directly via the active backend's connection.
-    # TODO(v1.2): backend.update_task (general partial update beyond
-    # status) is deferred — Plan 2's `update_task_status` was
-    # status-only by design. Until a typed surface lands, route through
-    # _memex_core_update (Memex) / backend_local._conn() (Local).
-    if mode_detector.detect_mode() == "memex":
-        from scripts import backend_memex
-
-        changes = dict(updates)
-        changes["updated_at"] = _now()
-        backend_memex._memex_core_update(
-            store="atelier",
-            table="tasks",
-            row_id=task_id,
-            changes=changes,
+        # If status was the only thing (plus optional notes), we're done.
+        remaining = (
+            {k: v for k, v in updates.items() if k != "notes"} if notes_val else dict(updates)
         )
+        if not remaining:
+            return result
+        # Otherwise, drop notes from `updates` (already applied) and fall
+        # through to the regular partial-update path for the rest.
+        if notes_val is not None:
+            updates.pop("notes", None)
+
+    if not updates:
+        # Nothing left after handling status / notes — return current row.
         return get_task(db_path, task_id)
 
-    from scripts import backend_local
-
-    now = _now()
-    c = backend_local._conn()
-    try:
-        # Per-column static SQL: each branch is a hardcoded literal so
-        # the column name can't be poisoned by a future kwarg passthrough.
-        if "title" in updates:
-            c.execute(
-                "UPDATE tasks SET title = ?, updated_at = ? WHERE id = ?",
-                (updates["title"], now, task_id),
-            )
-        if "description" in updates:
-            c.execute(
-                "UPDATE tasks SET description = ?, updated_at = ? WHERE id = ?",
-                (updates["description"], now, task_id),
-            )
-        if "priority" in updates:
-            c.execute(
-                "UPDATE tasks SET priority = ?, updated_at = ? WHERE id = ?",
-                (updates["priority"], now, task_id),
-            )
-        if "notes" in updates:
-            c.execute(
-                "UPDATE tasks SET notes = ?, updated_at = ? WHERE id = ?",
-                (updates["notes"], now, task_id),
-            )
-        if "status" in updates:
-            c.execute(
-                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                (updates["status"], now, task_id),
-            )
-        if "assigned_to" in updates:
-            c.execute(
-                "UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ?",
-                (updates["assigned_to"], now, task_id),
-            )
-        c.commit()
-    finally:
-        c.close()
-    return get_task(db_path, task_id)
+    return backend.update_task(task_id=task_id, **updates)
 
 
 def delete_task(db_path: str, task_id: int) -> bool:
-    # TODO(v1.2): backend.delete_task is not on the surface yet — Plan 2
-    # scoped writes to insert/update only. Until that lands, route via
-    # `_memex_module("stores").delete` (Memex) and a direct
-    # backend_local._conn() DELETE (Local). The previous `from scripts
-    # import stores` pattern collided with Atelier's own `scripts/`
-    # namespace; `_memex_module` resolves the Memex plugin module by
-    # file path, bypassing sys.modules.
-    if mode_detector.detect_mode() == "memex":
-        from scripts import backend_memex
-
-        backend_memex._memex_module("stores").delete(
-            "atelier",
-            "tasks",
-            task_id,
-        )
-        return True
-    from scripts import backend_local
-
-    c = backend_local._conn()
-    try:
-        cur = c.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        c.commit()
-        return cur.rowcount > 0
-    finally:
-        c.close()
+    return backend.delete_task(task_id=task_id)
 
 
 def assign_task(db_path: str, task_id: int, agent_id: str) -> dict:
-    """Set `assigned_to` AND flip status → 'assigned'.
-
-    TODO(v1.2): two-field update isn't on the backend surface (Plan 2
-    scoped `update_task_status` to status-only). Until a typed
-    `backend.assign_task` lands, we write the columns directly via
-    `_memex_core_update` (Memex) / `backend_local._conn()` (Local) and
-    let the v1.1.0 row factory surface a clean dict.
-    """
-    if mode_detector.detect_mode() == "memex":
-        from scripts import backend_memex
-
-        return backend_memex._memex_core_update(
-            store="atelier",
-            table="tasks",
-            row_id=task_id,
-            changes={"assigned_to": agent_id, "status": "assigned", "updated_at": _now()},
-        )
-    from scripts import backend_local
-
-    c = backend_local._conn()
-    try:
-        c.execute(
-            "UPDATE tasks SET assigned_to = ?, status = 'assigned', updated_at = ? WHERE id = ?",
-            (agent_id, _now(), task_id),
-        )
-        c.commit()
-        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    finally:
-        c.close()
-    return dict(row) if row else {}
+    """Set `assigned_to` AND flip status → 'assigned' atomically via
+    the backend facade. The two-field update is a single statement
+    downstream — see `backend.assign_task`."""
+    return backend.assign_task(task_id=task_id, agent_id=agent_id)
 
 
 def claim_task(db_path: str, task_id: int, agent_id: str) -> dict:
@@ -333,7 +260,9 @@ def list_tasks(
     """List tasks, optionally filtered.
 
     `backend.list_tasks` requires `project_id` (spec §4.3) so the
-    backend can stay efficient (no full-table scan).
+    backend can stay efficient (no full-table scan). `assigned_to` now
+    rides into the backend WHERE clause directly — no post-filter
+    pass.
 
     Mode asymmetry when `project_id` is None: Memex mode raises
     NotImplementedError (cross-project search is a v1.2 surface); Local
@@ -341,13 +270,7 @@ def list_tasks(
     scan. Callers should always pass `project_id` today.
     """
     if project_id is not None:
-        rows = backend.list_tasks(project_id=project_id, status=status)
-        if assigned_to is not None:
-            # TODO(v1.2): assigned_to is a post-filter symptom — push
-            # the predicate into `backend.list_tasks` once its surface
-            # widens, so we don't pull rows we'll throw away.
-            rows = [r for r in rows if r.get("assigned_to") == assigned_to]
-        return rows
+        return backend.list_tasks(project_id=project_id, status=status, assigned_to=assigned_to)
 
     # No project filter — backend surface doesn't cover this; reach into
     # the local connection. Memex mode would require a cross-project

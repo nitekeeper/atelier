@@ -31,6 +31,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# MUST be kept in sync with `backend._UPDATE_TASK_ALLOWED_COLUMNS`. Mirrored
+# here (rather than imported) to avoid a circular import — `scripts.backend`
+# already imports this module lazily inside `_backend()`. Defense-in-depth:
+# the facade validates kwargs before dispatch; this module re-validates so a
+# caller who bypasses the facade by importing `backend_local` directly still
+# gets the same surface contract.
+_UPDATE_TASK_ALLOWED_COLUMNS: frozenset[str] = frozenset(
+    {"title", "description", "priority", "notes", "assigned_to"}
+)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -579,6 +590,126 @@ def update_task_status(*, task_id: int, status: str, notes: str | None = None) -
     return dict(row)
 
 
+def update_task(*, task_id: int, **changes: object) -> dict:
+    """General partial update for a task row via per-column static SQL.
+
+    Each branch is a hardcoded UPDATE literal (mirroring the
+    `upsert_session` / `update_task_status` pattern) so the column
+    identity comes from this file, never from kwargs — no dynamic
+    SET-clause construction, no SQL-injection surface even if the
+    facade's allowlist gate were bypassed.
+
+    Caller-allowlist enforcement lives at `backend.update_task` (the
+    single source of truth for what's externally writable); this
+    method also re-validates as defense-in-depth so callers who bypass
+    the facade by importing `backend_local` directly still get the
+    same surface contract. An empty `changes` short-circuits to a
+    pure read so the no-op path stays cheap.
+
+    `status` is explicitly NOT supported here — it must flow through
+    `update_task_status` so the COALESCE timestamp side-effects fire.
+    Passing `status` raises ValueError.
+
+    Raises ValueError if `task_id` is absent — matches the error
+    contract of `update_task_status`.
+    """
+    if not changes:
+        return get_task(task_id=task_id) or _raise_task_missing(task_id)
+    # defense-in-depth — facade also validates; mirrors the facade rejection
+    # so a direct caller (bypassing scripts.backend) sees the same surface.
+    if "status" in changes:
+        raise ValueError(
+            "status writes must go through update_task_status (preserves lifecycle timestamps)"
+        )
+    for col in changes:
+        if col not in _UPDATE_TASK_ALLOWED_COLUMNS:
+            raise ValueError(f"update_task does not accept column: {col}")
+    now = _now()
+    c = _conn()
+    try:
+        # Per-column static SQL — each branch is a hardcoded literal so
+        # the column name can never come from a kwarg.
+        if "title" in changes:
+            c.execute(
+                "UPDATE tasks SET title = ?, updated_at = ? WHERE id = ?",
+                (changes["title"], now, task_id),
+            )
+        if "description" in changes:
+            c.execute(
+                "UPDATE tasks SET description = ?, updated_at = ? WHERE id = ?",
+                (changes["description"], now, task_id),
+            )
+        if "priority" in changes:
+            c.execute(
+                "UPDATE tasks SET priority = ?, updated_at = ? WHERE id = ?",
+                (changes["priority"], now, task_id),
+            )
+        if "notes" in changes:
+            c.execute(
+                "UPDATE tasks SET notes = ?, updated_at = ? WHERE id = ?",
+                (changes["notes"], now, task_id),
+            )
+        if "assigned_to" in changes:
+            c.execute(
+                "UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ?",
+                (changes["assigned_to"], now, task_id),
+            )
+        c.commit()
+        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    finally:
+        c.close()
+    if row is None:
+        raise ValueError(f"task_id={task_id} not found")
+    return dict(row)
+
+
+def _raise_task_missing(task_id: int) -> dict:
+    """Helper — collapses the `if row is None: raise` ladder for the
+    no-change-payload short-circuit in `update_task`."""
+    raise ValueError(f"task_id={task_id} not found")
+
+
+def delete_task(*, task_id: int) -> bool:
+    """Delete the row with `id = task_id` from `tasks`.
+
+    Returns True if the DELETE affected a row, False otherwise —
+    `cur.rowcount > 0` is the canonical sqlite3 idiom for this check
+    and it's also the contract `backend_memex.delete_task` mirrors.
+    Idempotent: calling twice on the same id returns True then False.
+    """
+    c = _conn()
+    try:
+        cur = c.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        c.commit()
+        return cur.rowcount > 0
+    finally:
+        c.close()
+
+
+def assign_task(*, task_id: int, agent_id: str) -> dict:
+    """Atomic two-field update: assigned_to + status='assigned' in a
+    SINGLE UPDATE statement so the row cannot be observed in a
+    half-updated state. Returns the updated row.
+
+    Raises ValueError if `task_id` is absent — same contract as
+    `update_task_status`.
+    """
+    now = _now()
+    c = _conn()
+    try:
+        c.execute(
+            "UPDATE tasks SET assigned_to = ?, status = 'assigned', updated_at = ? WHERE id = ?",
+            (agent_id, now, task_id),
+        )
+        c.commit()
+        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    finally:
+        c.close()
+    if row is None:
+        raise ValueError(f"task_id={task_id} not found")
+    return dict(row)
+
+
 def record_phase_bypass(
     *, project_id: int, from_phase: str, to_phase: str, reason: str, agent_id: str
 ) -> dict:
@@ -676,21 +807,27 @@ def get_task(*, task_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
-    """Return every task in `project_id`, optionally filtered by `status`."""
+def list_tasks(
+    *, project_id: int, status: str | None = None, assigned_to: str | None = None
+) -> list[dict]:
+    """Return every task in `project_id`, optionally filtered by
+    `status` and/or `assigned_to`. Both filters compose with AND; each
+    rides as a bound `?` parameter so column values can't be coerced
+    into the SQL string (no interpolation).
+    """
+    conditions: list[str] = ["project_id = ?"]
+    params: list[Any] = [project_id]
+    if status is not None:
+        conditions.append("status = ?")
+        params.append(status)
+    if assigned_to is not None:
+        conditions.append("assigned_to = ?")
+        params.append(assigned_to)
+    where = " AND ".join(conditions)
+    sql = f"SELECT * FROM tasks WHERE {where} ORDER BY priority DESC, created_at"  # nosec B608
     c = _conn()
     try:
-        if status is not None:
-            rows = c.execute(
-                "SELECT * FROM tasks WHERE project_id = ? AND status = ? "
-                "ORDER BY priority DESC, created_at",
-                (project_id, status),
-            ).fetchall()
-        else:
-            rows = c.execute(
-                "SELECT * FROM tasks WHERE project_id = ? ORDER BY priority DESC, created_at",
-                (project_id,),
-            ).fetchall()
+        rows = c.execute(sql, params).fetchall()
     finally:
         c.close()
     return [dict(r) for r in rows]

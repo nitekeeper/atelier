@@ -490,6 +490,16 @@ def _is_embedding_unavailable(exc: BaseException) -> bool:
 
 _WORKSPACE_SLUG = "atelier"  # Single-workspace deployment; spec §6.7.
 
+# MUST be kept in sync with `backend._UPDATE_TASK_ALLOWED_COLUMNS`. Mirrored
+# here (rather than imported) to avoid a circular import — `scripts.backend`
+# already imports this module lazily inside `_backend()`. Defense-in-depth:
+# the facade validates kwargs before dispatch; this module re-validates so a
+# caller who bypasses the facade by importing `backend_memex` directly still
+# gets the same surface contract.
+_UPDATE_TASK_ALLOWED_COLUMNS: frozenset[str] = frozenset(
+    {"title", "description", "priority", "notes", "assigned_to"}
+)
+
 
 def _resolve_project_slug(project_id: int | None) -> str | None:
     """Best-effort project_id → project_slug lookup for key construction.
@@ -524,9 +534,9 @@ def _auto_relations(metadata: dict, explicit: list[dict]) -> list[dict]:
     if project_id is not None:
         try:
             memex_stores = _memex_module("stores")
-            # TODO(multi-workspace): filter by workspace_id when
-            # multi-workspace lands. Today _WORKSPACE_SLUG is the only
-            # workspace so the project-domain JSON filter is sufficient.
+            # TODO(#30, multi-workspace): filter by workspace_id when spec §10 lands.
+            # Today _WORKSPACE_SLUG is the only workspace so the
+            # project-domain JSON filter is sufficient.
             rows = memex_stores.query(
                 "index",
                 "SELECT index_id FROM documents WHERE domain = ? "
@@ -1124,6 +1134,93 @@ def update_task_status(*, task_id: int, status: str, notes: str | None = None) -
     return _memex_core_update(store="atelier", table="tasks", row_id=task_id, changes=changes)
 
 
+def update_task(*, task_id: int, **changes: object) -> dict:
+    """General partial update for a task row via Memex Core.
+
+    The facade (`backend.update_task`) validates kwargs before
+    dispatch, and this method ALSO validates (defense-in-depth) so a
+    caller who bypasses the facade by importing `backend_memex`
+    directly still gets the same surface contract. `_memex_core_update`
+    builds parameterized SET clauses (no string interpolation).
+
+    `status` is explicitly NOT supported — it must flow through
+    `update_task_status` so the lifecycle-timestamp side-effects fire.
+    Passing `status` raises ValueError matching the facade message.
+
+    Missing-task raises `ValueError(f"task_id={task_id} not found")`,
+    matching the local-mode contract — probed via `_memex_core_query`
+    BEFORE any UPDATE fires so the error surface is identical across
+    backends (no silent `{}` return).
+
+    Empty `changes` short-circuits to a read-only fetch rather than
+    firing an UPDATE with an empty SET list (SQLite would raise).
+    The empty-changes branch ALSO probes for missing tasks so callers
+    can't observe a silent `{}` on a bad task_id.
+    """
+    # defense-in-depth — facade also validates; mirrors the facade rejection
+    # so a direct caller (bypassing scripts.backend) sees the same surface.
+    if "status" in changes:
+        raise ValueError(
+            "status writes must go through update_task_status (preserves lifecycle timestamps)"
+        )
+    for col in changes:
+        if col not in _UPDATE_TASK_ALLOWED_COLUMNS:
+            raise ValueError(f"update_task does not accept column: {col}")
+    # Probe for existence first so we raise the same ValueError as
+    # backend_local on a missing row (instead of memex's silent {}).
+    rows = _memex_core_query(store="atelier", table="tasks", where={"id": task_id})
+    if not rows:
+        raise ValueError(f"task_id={task_id} not found")
+    if not changes:
+        return rows[0]
+    return _memex_core_update(store="atelier", table="tasks", row_id=task_id, changes=dict(changes))
+
+
+def delete_task(*, task_id: int) -> bool:
+    """Delete the row with `id = task_id` from `tasks`.
+
+    Returns True if the row existed and was deleted, False if it was
+    absent — mirrors the local-mode `cur.rowcount > 0` contract so
+    callers see identical semantics across backends. Memex Core's
+    `stores.delete` is best-effort (no rowcount surface), so we probe
+    existence first via a cheap PK lookup.
+    """
+    rows = _memex_core_query(store="atelier", table="tasks", where={"id": task_id})
+    if not rows:
+        return False
+    _memex_core_delete(store="atelier", table="tasks", row_id=task_id)
+    return True
+
+
+def assign_task(*, task_id: int, agent_id: str) -> dict:
+    """Atomic two-field update: assigned_to + status flipped to
+    'assigned' in a single Memex Core update call so the row cannot be
+    observed with one field set and the other lagging.
+
+    Atomicity guaranteed by Memex Core's `stores.update`, which
+    executes a single UPDATE in one connection's auto-commit
+    transaction. Atelier does not verify this contract; it trusts
+    Memex Core.
+
+    Missing-task raises `ValueError(f"task_id={task_id} not found")`,
+    matching the local-mode contract — probed via `_memex_core_query`
+    BEFORE the UPDATE so the error surface is identical across backends
+    (no silent `{}` return on a bad task_id).
+    """
+    # Probe first so the missing-task signal is a clean ValueError matching
+    # backend_local — without this, Memex Core's `stores.update` returns
+    # None on miss and we'd silently hand back `{}` (silent-data-loss class).
+    rows = _memex_core_query(store="atelier", table="tasks", where={"id": task_id})
+    if not rows:
+        raise ValueError(f"task_id={task_id} not found")
+    return _memex_core_update(
+        store="atelier",
+        table="tasks",
+        row_id=task_id,
+        changes={"assigned_to": agent_id, "status": "assigned"},
+    )
+
+
 def record_phase_bypass(
     *, project_id: int, from_phase: str, to_phase: str, reason: str, agent_id: str
 ) -> dict:
@@ -1249,11 +1346,18 @@ def get_task(*, task_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
-def list_tasks(*, project_id: int, status: str | None = None) -> list[dict]:
-    """List tasks for a project, optionally filtered by status."""
+def list_tasks(
+    *, project_id: int, status: str | None = None, assigned_to: str | None = None
+) -> list[dict]:
+    """List tasks for a project, optionally filtered by `status` and/or
+    `assigned_to`. Both filters ride the same where-dict so they land
+    in the same parameterized WHERE clause downstream (no string
+    interpolation, no post-filter pass)."""
     where: dict = {"project_id": project_id}
     if status:
         where["status"] = status
+    if assigned_to is not None:
+        where["assigned_to"] = assigned_to
     return _memex_core_query(store="atelier", table="tasks", where=where)
 
 

@@ -148,6 +148,74 @@ def _archive_raw(body: str, title: str, *, root: Path | None = None) -> tuple[st
     return str(abs_path), rel_path
 
 
+# ── Workspace CRUD (atelier#51, spec §10.1) ────────────────────────────────
+
+
+def find_workspace_by_identity(*, identity: str) -> dict | None:
+    """Return the `workspaces` row whose `identity` column matches.
+
+    `identity` is the §10.1 stable workspace key (`repo_url` if a git
+    remote is configured, else `realpath(git_root)`). UNIQUE on the
+    column guarantees at most one row.
+    """
+    c = _conn()
+    try:
+        row = c.execute("SELECT * FROM workspaces WHERE identity = ?", (identity,)).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else None
+
+
+def find_or_create_workspace(
+    *, identity: str, slug: str, name: str, description: str | None = None
+) -> dict:
+    """Return the `workspaces` row for `identity`, creating it if absent.
+
+    Race-safe via INSERT OR IGNORE + SELECT: when two connections race
+    on the same `identity`, the second INSERT is a no-op (UNIQUE
+    constraint elides it) and the post-INSERT SELECT returns the row
+    inserted by the winner. Both callers observe the same row.
+
+    NOTE: the SELECT returns the EXISTING row's values when one was
+    already present — caller-supplied `slug` / `name` / `description`
+    do NOT overwrite an existing row. This matches spec §10.1's
+    "identity is the canonical key" rule; renames go through a
+    separate update path (not implemented here).
+    """
+    now = _now()
+    c = _conn()
+    try:
+        c.execute(
+            "INSERT OR IGNORE INTO workspaces "
+            "(slug, identity, name, description, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (slug, identity, name, description, now, now),
+        )
+        c.commit()
+        row = c.execute("SELECT * FROM workspaces WHERE identity = ?", (identity,)).fetchone()
+    finally:
+        c.close()
+    if row is None:
+        # Should never fire — INSERT OR IGNORE either inserts our row
+        # or no-ops on an existing one, and SELECT must hit. Defensive
+        # raise so a future schema bug doesn't return a silent `None`.
+        raise RuntimeError(
+            f"find_or_create_workspace: row for identity={identity!r} not found "
+            "after INSERT OR IGNORE — possible schema corruption"
+        )
+    return dict(row)
+
+
+def list_workspaces() -> list[dict]:
+    """Return every `workspaces` row, ordered by `slug` (ascending)."""
+    c = _conn()
+    try:
+        rows = c.execute("SELECT * FROM workspaces ORDER BY slug").fetchall()
+    finally:
+        c.close()
+    return [dict(r) for r in rows]
+
+
 # ── Document-shaped writes — Tier 2 ────────────────────────────────────────
 
 

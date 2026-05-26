@@ -1032,6 +1032,55 @@ def _workspace_id_for_project(project_id: int | None) -> int:
     return int(rows[0]["workspace_id"])
 
 
+def find_workspace_by_identity(*, identity: str) -> dict | None:
+    """Return the `workspaces` row whose `identity` column matches.
+
+    `identity` is the §10.1 stable workspace key. Memex-mode equivalent
+    of `backend_local.find_workspace_by_identity` — the atelier store's
+    `workspaces` table is reachable via `_memex_core_query`.
+    """
+    rows = _memex_core_query(store="atelier", table="workspaces", where={"identity": identity})
+    return rows[0] if rows else None
+
+
+def find_or_create_workspace(
+    *, identity: str, slug: str, name: str, description: str | None = None
+) -> dict:
+    """Return the workspace row for `identity`, creating it if absent.
+
+    Memex-mode lookup-then-insert. The atelier-on-Memex store is
+    single-user in practice (one workstation per maintainer) so the
+    benign race window between the SELECT and INSERT is acceptable —
+    Memex Core's `insert` would raise on a UNIQUE violation if it ever
+    fires, which surfaces a clean error rather than silent corruption.
+
+    Caller-supplied `slug` / `name` / `description` are used ONLY on
+    create; existing rows are returned unchanged (rename goes through a
+    separate update path, not implemented here). Matches the
+    `backend_local.find_or_create_workspace` semantics exactly.
+    """
+    existing = find_workspace_by_identity(identity=identity)
+    if existing is not None:
+        return existing
+    now = _now()
+    payload = {
+        "slug": slug,
+        "identity": identity,
+        "name": name,
+        "description": description,
+        "created_at": now,
+        "updated_at": now,
+    }
+    return _memex_core_insert(store="atelier", table="workspaces", row=payload)
+
+
+def list_workspaces() -> list[dict]:
+    """Return every `workspaces` row in the atelier Memex store, ordered
+    by `slug` (ascending)."""
+    rows = _memex_core_query(store="atelier", table="workspaces")
+    return sorted(rows, key=lambda r: r.get("slug") or "")
+
+
 def _resolve_singleton_workspace_id() -> int:
     """Resolve the singleton workspace id in memex mode without taking
     a dependency on `scripts.projects._resolve_workspace_id` (that

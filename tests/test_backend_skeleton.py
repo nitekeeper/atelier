@@ -227,13 +227,14 @@ METHOD_KWARGS: dict[str, list[dict]] = {
 }
 
 
-# ── Implemented vs deferred split (Plan 2 Task 9) ──────────────────────────
+# ── Implemented vs deferred split (Plan 2 Task 9; atelier#51) ──────────────
 #
-# 14 methods dispatch through to a backend; 6 remain stubs.
+# Originally Plan 2 Task 9 deferred 6 methods to v1.2.0. atelier#51 wired
+# the workspace-layer trio (find_or_create_workspace,
+# find_workspace_by_identity, list_workspaces) through to both backends;
+# the remaining 3 (find_project, list_projects, get_document) are still
+# deferred and land in atelier#52.
 DEFERRED_METHODS = {
-    "find_or_create_workspace",
-    "find_workspace_by_identity",
-    "list_workspaces",
     "find_project",
     "list_projects",
     "get_document",

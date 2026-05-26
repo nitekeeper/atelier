@@ -437,29 +437,44 @@ def list_phase_bypasses(*, project_id: int) -> list[dict]:
     return _backend().list_phase_bypasses(project_id=project_id)
 
 
-# ── Workspace + project resolution — deferred to v1.2.0 ────────────────────
+# ── Workspace resolution — landed via atelier#51 (workspace layer) ─────────
 #
-# Spec §4.3 keeps these on the surface so callers (Plan 3's
-# scripts/scope.py) don't have to feature-flag; the implementations land
-# alongside the workspaces script.
+# Spec §4.3 keeps these on the surface so callers (`scripts/scope.py`'s
+# `resolve_scope()`, atelier#50) don't have to feature-flag. The
+# project-layer + document-layer sibling stubs (find_project,
+# list_projects, get_document) land via atelier#52.
 
 
 def find_or_create_workspace(
     *, identity: str, slug: str, name: str, description: str | None = None
 ) -> dict:
     """Return the workspace row for `identity`, creating it if absent.
-    Deferred to v1.2.0."""
-    _not_implemented("find_or_create_workspace")
+
+    Idempotent on `identity` (the §10.1 stable workspace identifier).
+    The implementation uses INSERT-OR-IGNORE + SELECT in Local mode (race-
+    safe under the SQLite WAL connection) and look-up-then-insert in
+    Memex mode (single-user atelier; no concurrent workspace creation in
+    practice). When two callers race to create the same workspace,
+    both observe the same row on return.
+
+    Per spec §10.1: `identity` is the canonical workspace key
+    (`repo_url` if a git remote is configured, else `realpath(git_root)`),
+    `slug` is the §0.2 kebab-case form used in §6.7 key construction,
+    `name` is human-displayable.
+    """
+    return _backend().find_or_create_workspace(
+        identity=identity, slug=slug, name=name, description=description
+    )
 
 
 def find_workspace_by_identity(*, identity: str) -> dict | None:
-    """Return the workspace row for `identity` or None. Deferred to v1.2.0."""
-    _not_implemented("find_workspace_by_identity")
+    """Return the workspace row for `identity` or None if absent."""
+    return _backend().find_workspace_by_identity(identity=identity)
 
 
 def list_workspaces() -> list[dict]:
-    """Return every workspace row, ordered by slug. Deferred to v1.2.0."""
-    _not_implemented("list_workspaces")
+    """Return every workspace row, ordered by slug."""
+    return _backend().list_workspaces()
 
 
 def find_project(*, workspace_id: int, slug: str) -> dict | None:

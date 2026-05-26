@@ -7,6 +7,9 @@ __pycache__/
 .ai/meetings/
 .superpowers/
 .worktrees/
+# Concurrency bench artifact written by tests/test_bridge_concurrency.py.
+# Latency-only trend monitoring; never asserted on, so safe to ignore.
+tests/_bridge_bench.json
 # Dist bundle body — only dist/v*/manifest.json is tracked (built by scripts.release)
 dist/v*/
 !dist/v*/manifest.json

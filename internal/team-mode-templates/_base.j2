@@ -1,0 +1,57 @@
+{#-
+  Base briefing template for atelier team-mode worker spawn prompts.
+
+  Composition (fixed, per design §16.3 + team-mode-rules SKILL.md):
+    1. role              — IDENTITY block (persona + team-lead binding)
+    2. channel_handles   — team_id, bridge cmd one-liners, last_seq cursor
+    3. reply_contract    — reply envelope + closure tokens + shutdown handshake
+    4. wave_context      — wave_id, phase, peers, deadline, quorum_rule
+    5. task              — {{ untrusted(task_brief, "pm") }} slot
+    6. abandon_clause    — abandon regex + 8 categories
+
+  All vars are STRICT-required. dispatch.py wires
+  Environment(undefined=StrictUndefined, autoescape=False,
+              keep_trailing_newline=True, trim_blocks=True, lstrip_blocks=True)
+  in wave 4 — any missing var in render-context raises UndefinedError.
+
+  Untrusted payload handling:
+    - The `untrusted(payload, sender)` macro below wraps bridge-payload data in
+      <untrusted source="..."> fences and HTML-escapes BOTH the `sender`
+      attribute AND the `payload` body via Jinja's `|e` filter. This prevents
+      a malicious teammate from injecting a literal `</untrusted>` (or any
+      other markup) inside the payload to break out of the fence and escalate
+      pasted text into executable instructions (TM-008 hardening).
+    - Control-char stripping (\x00-\x08, \x0b-\x1f) is performed by dispatch.py
+      on the context dict BEFORE render — see the `sanitize_bridge_field()`
+      helper in dispatch.py (wave 4). Templates assume task_brief is already
+      ctrl-char-clean by the time it reaches the macro.
+    - Equivalent filter form `{{ x | untrusted }}` may be registered by
+      dispatch.py via `env.filters['untrusted'] = ...`. The macro is the
+      template-level fallback that always works without filter registration.
+    - Pre-escape byte cap contract: bridge_send.py's 8192-byte cap is measured
+      on the raw sender-written payload. The rendered macro output (with `|e`
+      applied) can exceed 8192 bytes and is not stored — bridge_read renders
+      the fence at consumption time.
+
+  Required render-context vars (StrictUndefined enforced):
+    role_id, team_lead_name, from_agent_self, schema_version,
+    team_id, bridge_cmds, idempotency_seed,
+    wave_id, wave_phase, deadline_iso, peers, quorum_rule, forbidden_actions,
+    task_brief, acceptance_criteria.
+-#}
+{%- macro untrusted(payload, sender) -%}
+<untrusted source="{{ sender|e }}">
+{{ payload|e }}
+</untrusted>
+{%- endmacro -%}
+{% block role %}{% endblock %}
+
+{% block channel_handles %}{% endblock %}
+
+{% block reply_contract %}{% endblock %}
+
+{% block wave_context %}{% endblock %}
+
+{% block task %}{% endblock %}
+
+{% block abandon_clause %}{% endblock %}

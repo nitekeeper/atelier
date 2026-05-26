@@ -79,7 +79,7 @@ def test_apply_shared_then_local_creates_all_tables(tmp_path):
             ).fetchall()
         }
     expected = {
-        # shared/ tables
+        # shared/ tables (001)
         "workspaces",
         "projects",
         "project_documents",
@@ -92,6 +92,14 @@ def test_apply_shared_then_local_creates_all_tables(tmp_path):
         "skill_gates",
         "phase_bypasses",
         "migrations",  # bookkeeping
+        # shared/ tables (003 — team-mode foundationals; epic #37)
+        "teams",
+        "persona_snapshots",
+        "team_members",
+        "bridge_messages",
+        "bridge_delivery",
+        "shutdown_requests",
+        "team_audit_log",
         # local-only/ tables
         "roles",
         "agents",

@@ -23,10 +23,10 @@ def find_git_root(start: Path | None = None) -> Path | None:
     entry (file or directory) is found. Returns the resolved path of that
     directory, or None if the walk hits filesystem root.
 
-    Used by `scripts.workspace.workspace_root()` and `scripts.scope.resolve_scope()`
-    (spec §10.2). A `.git` *file* (not directory) indicates a submodule or linked
-    worktree — both still resolve to a valid workspace per the spec's
-    workspace-identity rules.
+    Used by `scripts.workspace.workspace_root()` and
+    `scripts.scope.resolve_scope()` (spec §10.2, atelier#50). A `.git` *file*
+    (not directory) indicates a submodule or linked worktree — both still
+    resolve to a valid workspace per the spec's workspace-identity rules.
 
     Returns the linked-worktree path when invoked inside a linked worktree (not
     the main repo). This matches spec §6.8 (filesystem co-location) and §10.2

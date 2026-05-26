@@ -13,3 +13,18 @@ tests/_bridge_bench.json
 # Dist bundle body — only dist/v*/manifest.json is tracked (built by scripts.release)
 dist/v*/
 !dist/v*/manifest.json
+# Process artifacts — Memex is canonical, git tracks only docs/runbooks/.
+# See CLAUDE.md → Process-artifact storage (2026-05-26).
+docs/kaizen/
+docs/plans/
+docs/specs/
+docs/design/
+docs/agora-design.md
+**/cycle-minutes-*.md
+**/abandonment-report-*.md
+**/bridge-smoke-*.md
+**/*.plan.md
+**/*.design.md
+# Tracked exceptions (forward-compat with kaizen+memex shape; none exist today; reserve the slot).
+!docs/runbooks/
+!docs/runbooks/**

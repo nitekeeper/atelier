@@ -837,3 +837,64 @@ def test_auto_relations_runs_real_logic_and_emits_part_of_edge(fake_memex, monke
         if q[0] == "index" and "domain" in q[1] and "project" in q[2] and 42 in q[2]
     ]
     assert matching, f"no SELECT against index.documents seen: {queries_seen}"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# atelier#30 — _auto_relations workspace_id filter
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_auto_relations_adds_workspace_filter_when_metadata_has_workspace_id(
+    fake_memex, monkeypatch
+):
+    """atelier#30: when metadata carries workspace_id, the project-doc
+    query MUST add `AND json_extract(metadata, '$.workspace_id') = ?`
+    so cross-workspace project_id collisions cannot create part_of
+    edges to the wrong workspace's project document."""
+    queries_seen: list = []
+
+    def fake_query(store, sql, params):
+        queries_seen.append((store, sql, params))
+        return []  # no matching project, edge not auto-added
+
+    fake_stores = types.SimpleNamespace(query=fake_query)
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_module",
+        lambda name: fake_stores if name == "stores" else backend_memex._memex_module(name),
+    )
+
+    backend_memex._auto_relations(metadata={"project_id": 42, "workspace_id": 7}, explicit=[])
+    # Exactly one query — the project-doc lookup.
+    assert len(queries_seen) == 1
+    store, sql, params = queries_seen[0]
+    assert store == "index"
+    assert "$.project_id" in sql
+    assert "$.workspace_id" in sql, f"workspace filter missing from SQL: {sql}"
+    assert params == ("project", 42, 7)
+
+
+def test_auto_relations_omits_workspace_filter_when_metadata_lacks_workspace_id(
+    fake_memex, monkeypatch
+):
+    """Backward compat: pre-#30 callers that didn't add workspace_id to
+    metadata must still get the single-filter (project_id only) query so
+    nothing breaks in the single-workspace deployment."""
+    queries_seen: list = []
+
+    def fake_query(store, sql, params):
+        queries_seen.append((store, sql, params))
+        return []
+
+    fake_stores = types.SimpleNamespace(query=fake_query)
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_module",
+        lambda name: fake_stores if name == "stores" else backend_memex._memex_module(name),
+    )
+
+    backend_memex._auto_relations(metadata={"project_id": 42}, explicit=[])
+    assert len(queries_seen) == 1
+    _store, sql, params = queries_seen[0]
+    assert "$.workspace_id" not in sql, f"unexpected workspace filter in SQL: {sql}"
+    assert params == ("project", 42)

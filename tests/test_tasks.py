@@ -283,3 +283,94 @@ def test_coerce_priority_int_passthrough():
 
 def test_coerce_priority_none_returns_zero():
     assert _coerce_priority(None) == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# atelier#33 — cross-project list_tasks in Memex mode
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_list_tasks_local_mode_cross_project_returns_all(setup):
+    """Local mode + project_id=None: full-table scan covers tasks from
+    ALL projects (existing behavior — verifying it still works after
+    the Memex-mode branch was added)."""
+    db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
+    workspace_id = setup["workspace_id"]
+    # Seed a second project via raw SQL (mirrors _seed pattern) so we can
+    # write tasks to both projects without colliding on slugs.
+    import sqlite3 as _s
+
+    conn = _s.connect(db)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        "INSERT INTO projects (workspace_id, slug, name, phase, description, "
+        "created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            workspace_id,
+            "second-proj",
+            "Second project",
+            "design:open",
+            "",
+            agent_id,
+            "2026-05-18T00:00:00Z",
+            "2026-05-18T00:00:00Z",
+        ),
+    )
+    conn.commit()
+    second_pid = conn.execute("SELECT id FROM projects WHERE slug = 'second-proj'").fetchone()[0]
+    conn.close()
+    create_task(
+        db,
+        project_id=project_id,
+        title="Task in P1",
+        created_by=agent_id,
+        workspace_id=workspace_id,
+    )
+    create_task(
+        db,
+        project_id=second_pid,
+        title="Task in P2",
+        created_by=agent_id,
+        workspace_id=workspace_id,
+    )
+    all_tasks = list_tasks(db, project_id=None)
+    titles = sorted(t["title"] for t in all_tasks)
+    assert titles == ["Task in P1", "Task in P2"]
+
+
+def test_list_tasks_memex_mode_cross_project_calls_backend(monkeypatch):
+    """Memex mode + project_id=None: routes to
+    backend_memex.list_tasks_cross_project (no NotImplementedError)."""
+    from scripts import backend_memex, mode_detector, tasks
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+    seen = {}
+
+    def fake_cross_project(*, status=None, assigned_to=None):
+        seen["status"] = status
+        seen["assigned_to"] = assigned_to
+        return [{"id": 1, "title": "from-memex"}]
+
+    monkeypatch.setattr(backend_memex, "list_tasks_cross_project", fake_cross_project)
+    result = tasks.list_tasks("/unused", project_id=None, status="pending")
+    assert seen == {"status": "pending", "assigned_to": None}
+    assert result == [{"id": 1, "title": "from-memex"}]
+
+
+def test_list_tasks_memex_mode_with_project_id_uses_backend_list_tasks(monkeypatch):
+    """Memex mode + project_id set: still routes through backend.list_tasks
+    (project-scoped facade, spec §4.3) — cross-project surface is NOT
+    used when caller supplies a project_id."""
+    from scripts import backend, mode_detector, tasks
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+    seen = {}
+
+    def fake_list_tasks(*, project_id, status=None, assigned_to=None):
+        seen["project_id"] = project_id
+        return [{"id": 7, "project_id": project_id}]
+
+    monkeypatch.setattr(backend, "list_tasks", fake_list_tasks)
+    result = tasks.list_tasks("/unused", project_id=42)
+    assert seen == {"project_id": 42}
+    assert result == [{"id": 7, "project_id": 42}]

@@ -528,21 +528,35 @@ def _auto_relations(metadata: dict, explicit: list[dict]) -> list[dict]:
     document to the owning project's document. Callers can still pass
     explicit relations; duplicates by `(rel_type, to_index_id)` are
     deduped here.
+
+    Multi-workspace (spec §10 / atelier#30): when `metadata.workspace_id`
+    is present, the project lookup is constrained by workspace_id so a
+    same-valued `project_id` in another workspace cannot create a
+    cross-workspace `part_of` edge. Today `_WORKSPACE_SLUG` is the only
+    workspace so the filter is a no-op for correctness but serves as a
+    forward-compat guard for §10.
     """
     relations = list(explicit or [])
     project_id = (metadata or {}).get("project_id")
     if project_id is not None:
+        workspace_id = (metadata or {}).get("workspace_id")
         try:
             memex_stores = _memex_module("stores")
-            # TODO(#30, multi-workspace): filter by workspace_id when spec §10 lands.
-            # Today _WORKSPACE_SLUG is the only workspace so the
-            # project-domain JSON filter is sufficient.
-            rows = memex_stores.query(
-                "index",
-                "SELECT index_id FROM documents WHERE domain = ? "
-                "AND json_extract(metadata, '$.project_id') = ?",
-                ("project", project_id),
-            )
+            if workspace_id is not None:
+                rows = memex_stores.query(
+                    "index",
+                    "SELECT index_id FROM documents WHERE domain = ? "
+                    "AND json_extract(metadata, '$.project_id') = ? "
+                    "AND json_extract(metadata, '$.workspace_id') = ?",
+                    ("project", project_id, workspace_id),
+                )
+            else:
+                rows = memex_stores.query(
+                    "index",
+                    "SELECT index_id FROM documents WHERE domain = ? "
+                    "AND json_extract(metadata, '$.project_id') = ?",
+                    ("project", project_id),
+                )
         except Exception:
             rows = []
         seen = {(r.get("rel_type"), r.get("to_index_id")) for r in relations}
@@ -1359,6 +1373,33 @@ def list_tasks(
     if assigned_to is not None:
         where["assigned_to"] = assigned_to
     return _memex_core_query(store="atelier", table="tasks", where=where)
+
+
+def list_tasks_cross_project(
+    *, status: str | None = None, assigned_to: str | None = None
+) -> list[dict]:
+    """Cross-project task listing in Memex mode (atelier#33 v1.2 surface).
+
+    Returns every task row in the workspace, optionally filtered by
+    status and/or assigned_to. The project_id filter is intentionally
+    NOT applied — this is the cross-project surface called by
+    `scripts.tasks.list_tasks` when its caller passes `project_id=None`.
+
+    Spec §4.3 says `backend.list_tasks` REQUIRES project_id; this is
+    NOT a relaxation of that facade contract. It is a separate
+    cross-project surface, deliberately kept out of `backend.py` so
+    callers that genuinely need cross-project results route through
+    `scripts.tasks.list_tasks(project_id=None)` rather than the
+    project-scoped facade. Today single-workspace = cross-project ≡
+    cross-workspace; when spec §10 multi-workspace lands, this surface
+    will need a workspace_id filter (tracked alongside atelier#30).
+    """
+    where: dict = {}
+    if status:
+        where["status"] = status
+    if assigned_to is not None:
+        where["assigned_to"] = assigned_to
+    return _memex_core_query(store="atelier", table="tasks", where=where or None)
 
 
 def list_phase_bypasses(*, project_id: int) -> list[dict]:

@@ -260,27 +260,27 @@ def list_tasks(
     """List tasks, optionally filtered.
 
     `backend.list_tasks` requires `project_id` (spec §4.3) so the
-    backend can stay efficient (no full-table scan). `assigned_to` now
-    rides into the backend WHERE clause directly — no post-filter
-    pass.
+    project-scoped facade can stay efficient (no full-table scan).
+    `assigned_to` rides into the backend WHERE clause directly — no
+    post-filter pass.
 
-    Mode asymmetry when `project_id` is None: Memex mode raises
-    NotImplementedError (cross-project search is a v1.2 surface); Local
-    mode falls back to a direct `backend_local._conn()` full-table
-    scan. Callers should always pass `project_id` today.
+    When `project_id` is None, both modes fall back to a cross-project
+    surface that bypasses `backend.list_tasks` (atelier#33):
+      - Memex mode: routes to `backend_memex.list_tasks_cross_project`.
+      - Local mode: reaches into `backend_local._conn()` for a direct
+        full-table scan.
+
+    Callers should still pass `project_id` whenever they have one —
+    the project-scoped path is cheaper and is the spec §4.3 contract.
     """
     if project_id is not None:
         return backend.list_tasks(project_id=project_id, status=status, assigned_to=assigned_to)
 
-    # No project filter — backend surface doesn't cover this; reach into
-    # the local connection. Memex mode would require a cross-project
-    # search; defer to v1.2 (callers should always pass project_id today).
+    # No project filter — cross-project surface (atelier#33).
     if mode_detector.detect_mode() == "memex":
-        raise NotImplementedError(
-            "list_tasks without project_id is not supported in Memex mode "
-            "(spec §4.3 list_tasks requires project_id; cross-project "
-            "search lands in v1.2)."
-        )
+        from scripts import backend_memex
+
+        return backend_memex.list_tasks_cross_project(status=status, assigned_to=assigned_to)
     from scripts import backend_local
 
     conditions, params = [], []

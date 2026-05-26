@@ -303,3 +303,124 @@ def test_parse_version_returns_none_on_non_numeric_parts():
     """Unit test for the helper — a non-numeric segment must trigger the
     ValueError branch and yield None rather than crashing."""
     assert _parse_version_tuple("2.x.0") is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# atelier#35 — version-floor warning
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_check_install_status_absent_when_no_config(tmp_path):
+    memex_home = tmp_path / ".memex"
+    memex_home.mkdir()
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        status, version = mode_detector._check_memex_install_status()
+        assert status == "absent"
+        assert version is None
+
+
+def test_check_install_status_ok_at_floor(tmp_path):
+    memex_home = tmp_path / ".memex"
+    memex_home.mkdir()
+    plugin_root = tmp_path / "memex-2.2.0"
+    _make_fake_plugin_root(plugin_root)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "memex", "version": "2.2.0"})
+    )
+    (memex_home / "config.json").write_text(json.dumps({"plugin_root": str(plugin_root)}))
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        status, version = mode_detector._check_memex_install_status()
+        assert status == "ok"
+        assert version is None
+
+
+def test_check_install_status_too_old_below_floor(tmp_path):
+    memex_home = tmp_path / ".memex"
+    memex_home.mkdir()
+    plugin_root = tmp_path / "memex-2.1.0"
+    _make_fake_plugin_root(plugin_root)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "memex", "version": "2.1.0"})
+    )
+    (memex_home / "config.json").write_text(json.dumps({"plugin_root": str(plugin_root)}))
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        status, version = mode_detector._check_memex_install_status()
+        assert status == "too_old"
+        assert version == "2.1.0"
+
+
+def test_detect_mode_warns_once_when_memex_too_old(tmp_path, capsys):
+    """When Memex is installed but below the v2.2.0 floor, detect_mode()
+    must emit a single stderr hint and degrade to Local mode."""
+    memex_home = tmp_path / ".memex"
+    memex_home.mkdir()
+    (memex_home / "registry.json").write_text("{}")
+    plugin_root = tmp_path / "memex-2.1.0"
+    _make_fake_plugin_root(plugin_root)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "memex", "version": "2.1.0"})
+    )
+    (memex_home / "config.json").write_text(json.dumps({"plugin_root": str(plugin_root)}))
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        result = mode_detector.detect_mode()
+    assert result == "local"
+    captured = capsys.readouterr()
+    assert "v2.1.0" in captured.err
+    assert "v2.2.0+" in captured.err
+    assert "Running in Local mode" in captured.err
+
+
+def test_detect_mode_silent_when_memex_absent(tmp_path, capsys):
+    """No Memex registry at all — Local mode is intentional, no warning."""
+    memex_home = tmp_path / ".memex-not-here"
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        result = mode_detector.detect_mode()
+    assert result == "local"
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_detect_mode_silent_when_memex_at_floor(tmp_path, capsys):
+    """Memex installed and meets the floor — no warning, Memex mode."""
+    memex_home = tmp_path / ".memex"
+    memex_home.mkdir()
+    (memex_home / "registry.json").write_text("{}")
+    plugin_root = tmp_path / "memex-2.2.0"
+    _make_fake_plugin_root(plugin_root)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "memex", "version": "2.2.0"})
+    )
+    (memex_home / "config.json").write_text(json.dumps({"plugin_root": str(plugin_root)}))
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        result = mode_detector.detect_mode()
+    assert result == "memex"
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_warning_is_rate_limited_per_process(tmp_path, capsys):
+    """Multiple detect_mode() calls (even after _clear_cache) within one
+    process emit the warning at most once until _clear_cache resets the
+    flag. _clear_cache resets BOTH cache and warning flag, so a test that
+    explicitly clears can re-trigger the warning."""
+    memex_home = tmp_path / ".memex"
+    memex_home.mkdir()
+    (memex_home / "registry.json").write_text("{}")
+    plugin_root = tmp_path / "memex-2.1.0"
+    _make_fake_plugin_root(plugin_root)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "memex", "version": "2.1.0"})
+    )
+    (memex_home / "config.json").write_text(json.dumps({"plugin_root": str(plugin_root)}))
+    with patch("scripts.mode_detector._memex_home", return_value=memex_home):
+        mode_detector.detect_mode()
+        # Cache returns cached value on second call; no extra warning.
+        mode_detector.detect_mode()
+        # Even with explicit cache clear (which also resets the warning flag
+        # for tests), only the resulting fresh probe emits — total 2 warnings
+        # across the two probe rounds.
+        mode_detector._clear_cache()
+        mode_detector.detect_mode()
+    captured = capsys.readouterr()
+    # Exactly two emissions: one per fresh probe-round.
+    assert captured.err.count("v2.1.0 detected") == 2

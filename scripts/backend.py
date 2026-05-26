@@ -188,6 +188,7 @@ def write_task(
     notes: str | None = None,
     source_ref: str | None = None,
     relations: Sequence[dict] = (),
+    parallel_group: int | None = None,
 ) -> dict:
     """Persist a task row and any declared relations.
 
@@ -214,6 +215,7 @@ def write_task(
             source_ref=source_ref,
             metadata=adapted_metadata if adapted_metadata else None,
             relations=list(relations) if relations else None,
+            parallel_group=parallel_group,
         )
     return be.write_task(
         workspace_id=workspace_id,
@@ -227,6 +229,7 @@ def write_task(
         notes=notes,
         source_ref=source_ref,
         relations=relations,
+        parallel_group=parallel_group,
     )
 
 
@@ -350,7 +353,7 @@ def update_task_status(*, task_id: int, status: str, notes: str | None = None) -
 # an assignment write — general `update_task` never auto-flips status,
 # even when `assigned_to` is one of the changes.
 _UPDATE_TASK_ALLOWED_COLUMNS: frozenset[str] = frozenset(
-    {"title", "description", "priority", "notes", "assigned_to"}
+    {"title", "description", "priority", "notes", "assigned_to", "parallel_group"}
 )
 
 

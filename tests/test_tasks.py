@@ -374,3 +374,91 @@ def test_list_tasks_memex_mode_with_project_id_uses_backend_list_tasks(monkeypat
     result = tasks.list_tasks("/unused", project_id=42)
     assert seen == {"project_id": 42}
     assert result == [{"id": 7, "project_id": 42}]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# atelier#34 — tasks.parallel_group reintroduction (migration 004)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_create_task_default_parallel_group_is_null(setup):
+    """Back-compat: callers that don't pass parallel_group get NULL.
+    Existing tests that pre-date #34 must keep passing — the column
+    is additive and nullable."""
+    db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
+    task = create_task(
+        db,
+        project_id=project_id,
+        title="No parallel group set",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
+    assert task["parallel_group"] is None
+
+
+def test_create_task_with_explicit_parallel_group(setup):
+    """When parallel_group is provided, it lands on the row and survives
+    the write/round-trip-read cycle. Consumed by atelier#39's planner +
+    dispatch.py wave grouping."""
+    db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
+    task = create_task(
+        db,
+        project_id=project_id,
+        title="In parallel group 3",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+        parallel_group=3,
+    )
+    assert task["parallel_group"] == 3
+
+
+def test_update_task_can_set_parallel_group(setup):
+    """`backend.update_task` accepts parallel_group via the
+    _UPDATE_TASK_ALLOWED_COLUMNS allowlist; the per-column UPDATE branch
+    in backend_local lands it on the existing row."""
+    db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
+    create_task(
+        db,
+        project_id=project_id,
+        title="Assign me a parallel group later",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
+    task = update_task(db, 1, parallel_group=7)
+    assert task["parallel_group"] == 7
+
+
+def test_update_task_can_clear_parallel_group_back_to_null(setup):
+    """Setting parallel_group=None on an existing row must actually NULL
+    the column — operators need a way to remove a tag, not just change it."""
+    db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
+    create_task(
+        db,
+        project_id=project_id,
+        title="Will be cleared",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+        parallel_group=5,
+    )
+    cleared = update_task(db, 1, parallel_group=None)
+    assert cleared["parallel_group"] is None
+
+
+def test_update_task_rejects_status_alongside_parallel_group(setup):
+    """Defense-in-depth: status still routes through update_task_status
+    even when paired with parallel_group. Facade rejects with the
+    canonical message; mixing the two must not silently allow status."""
+    db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
+    create_task(
+        db,
+        project_id=project_id,
+        title="t",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
+    # scripts.tasks.update_task splits status from other columns and
+    # routes status through update_task_status; parallel_group lands via
+    # the regular update path. Both succeed.
+    task = update_task(db, 1, parallel_group=2, status="assigned", assigned_to=agent_id)
+    assert task["parallel_group"] == 2
+    assert task["status"] == "assigned"

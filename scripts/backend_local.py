@@ -38,7 +38,7 @@ from typing import Any
 # caller who bypasses the facade by importing `backend_local` directly still
 # gets the same surface contract.
 _UPDATE_TASK_ALLOWED_COLUMNS: frozenset[str] = frozenset(
-    {"title", "description", "priority", "notes", "assigned_to"}
+    {"title", "description", "priority", "notes", "assigned_to", "parallel_group"}
 )
 
 
@@ -231,6 +231,7 @@ def write_task(
     notes: str | None = None,
     source_ref: str | None = None,
     relations: Sequence[dict] = (),
+    parallel_group: int | None = None,
 ) -> dict:
     """Persist a row into the v1.1.0 `tasks` table.
 
@@ -247,14 +248,18 @@ def write_task(
     `source_ref` is persisted to `tasks.source_ref` (added in
     `002_source_ref_and_fts.sql`) so Plan 4's idempotent migrator can find
     the local row id for a v1.0.13 source key.
+
+    `parallel_group` is an optional operator-meaningful integer tag
+    (atelier#34 / migration 004) consumed by the planner+dispatch work
+    in atelier#39. NULL by default — back-compat with all pre-#34 callers.
     """
     c = _conn()
     try:
         cur = c.execute(
             "INSERT INTO tasks (project_id, title, description, subdomain, "
             "status, priority, notes, created_by, assigned_to, source_ref, "
-            "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
+            "parallel_group, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 title,
@@ -265,6 +270,7 @@ def write_task(
                 created_by,
                 assigned_to,
                 source_ref,
+                parallel_group,
                 _now(),
                 _now(),
             ),
@@ -653,6 +659,11 @@ def update_task(*, task_id: int, **changes: object) -> dict:
             c.execute(
                 "UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ?",
                 (changes["assigned_to"], now, task_id),
+            )
+        if "parallel_group" in changes:
+            c.execute(
+                "UPDATE tasks SET parallel_group = ?, updated_at = ? WHERE id = ?",
+                (changes["parallel_group"], now, task_id),
             )
         c.commit()
         row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()

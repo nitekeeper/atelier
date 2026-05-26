@@ -497,7 +497,7 @@ _WORKSPACE_SLUG = "atelier"  # Single-workspace deployment; spec §6.7.
 # caller who bypasses the facade by importing `backend_memex` directly still
 # gets the same surface contract.
 _UPDATE_TASK_ALLOWED_COLUMNS: frozenset[str] = frozenset(
-    {"title", "description", "priority", "notes", "assigned_to"}
+    {"title", "description", "priority", "notes", "assigned_to", "parallel_group"}
 )
 
 
@@ -789,6 +789,7 @@ def write_task(
     source_ref: str | None = None,
     metadata: dict | None = None,
     relations: list[dict] | None = None,
+    parallel_group: int | None = None,
 ) -> dict:
     """`source_ref` is an optional stable origin tag (e.g.
     `"atelier:tasks:42"`); Plan 4's `migrate_to_memex.py` passes it
@@ -816,6 +817,7 @@ def write_task(
         "assigned_to": assigned_to,
         "priority": priority,
         "notes": notes,
+        "parallel_group": parallel_group,
         "status": "pending",
         "created_at": now,
         "updated_at": now,
@@ -829,6 +831,8 @@ def write_task(
         merged["notes"] = notes
     if source_ref:
         merged["source_ref"] = source_ref
+    if parallel_group is not None:
+        merged["parallel_group"] = parallel_group
     if metadata:
         # Caller's metadata wins — facade-folded subdomain / explicit
         # caller overrides land on top of the internal defaults.

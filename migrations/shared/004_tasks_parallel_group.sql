@@ -1,0 +1,28 @@
+-- migrations/shared/004_tasks_parallel_group.sql
+-- Reintroduce tasks.parallel_group (atelier#34 / spec §11.3).
+--
+-- The v1.0.13 → v1.1.0 migration dropped tasks.parallel_group because no
+-- consumer existed. atelier#39 (team-mode rollout) needs the planner to
+-- emit parallel groups for wave-based dispatch in scripts/dispatch.py;
+-- this migration restores the column so the planner work can land
+-- without a co-required schema change.
+--
+-- Semantics: parallel_group is an OPTIONAL operator-meaningful integer
+-- tag. Tasks with the same parallel_group within a project can run
+-- concurrently per the planner's DAG; NULL means "no parallel group
+-- assigned" (the default — back-compat with all existing rows).
+--
+-- Style mirrors 001/002/003:
+--   * Single ALTER TABLE; idempotent via the migration registry (the
+--     same row in `__migrations` gates re-application).
+--   * No CHECK constraints — parallel_group values are operator data,
+--     not a closed enum; validators belong in the application layer.
+--   * No index today — the column is write-driven by the planner; reads
+--     are filtered first by project_id (which already has an index), and
+--     within-project task counts are bounded enough that a sequential
+--     scan of the filtered rows is cheaper than maintaining an index.
+--     If the planner ever needs cross-project parallel_group queries,
+--     add `CREATE INDEX idx_tasks_parallel_group ON tasks(parallel_group)`
+--     in a follow-up migration.
+
+ALTER TABLE tasks ADD COLUMN parallel_group INTEGER;

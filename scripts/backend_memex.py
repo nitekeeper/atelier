@@ -488,7 +488,57 @@ def _is_embedding_unavailable(exc: BaseException) -> bool:
     return isinstance(exc, memex_embeddings.EmbeddingUnavailable)
 
 
-_WORKSPACE_SLUG = "atelier"  # Single-workspace deployment; spec §6.7.
+# ── Workspace resolution (atelier#55, spec §10.1) ──────────────────────────
+#
+# Pre-§10 the workspace slug was a hardcoded `"atelier"` literal at module
+# scope (every key construction interpolated it). atelier#55 removed that
+# hardcoding: `_atelier_write` now derives the slug from
+# `metadata.workspace_id`, falling back to the singleton workspace row
+# (`_singleton_workspace`) for writes that don't carry workspace context.
+# Multi-workspace deployments per spec §10.1 are unblocked.
+
+
+def _singleton_workspace() -> dict:
+    """Return the first workspace row in the atelier Memex store.
+
+    Used by writes that don't carry an explicit `workspace_id` in
+    metadata (e.g. workspace-level meetings, or callers that haven't
+    been threaded through `resolve_scope()` yet). Raises `RuntimeError`
+    if the store has no workspace row — that's an environment-bootstrap
+    failure, not a caller bug.
+
+    Pre-#55 this was slug-filtered against the literal `"atelier"`;
+    post-#55 it just takes the first row sorted by id. Both work for
+    single-workspace deployments today; the latter is forward-
+    compatible with multi-workspace (caller pre-resolves the right
+    workspace via `resolve_scope()` and passes `workspace_id` in
+    metadata before reaching this fallback).
+    """
+    rows = _memex_core_query(store="atelier", table="workspaces")
+    if not rows:
+        raise RuntimeError(
+            "memex atelier store has no workspace row; "
+            "run atelier bootstrap before writing workspace-level rows"
+        )
+    return rows[0]
+
+
+def _workspace_slug_for_id(workspace_id: int) -> str:
+    """Resolve the `workspaces.slug` for a given workspace_id.
+
+    Used by `_atelier_write` to construct the §6.7 key without
+    hardcoding the workspace slug. Raises `ValueError` for an unknown
+    workspace_id — same shape as `_workspace_id_for_project`'s
+    bad-caller-input error path.
+    """
+    rows = _memex_core_query(store="atelier", table="workspaces", where={"id": workspace_id})
+    if not rows or rows[0].get("slug") is None:
+        raise ValueError(
+            f"workspace_id={workspace_id} not found in atelier store — "
+            "cannot derive workspace_slug for §6.7 key construction"
+        )
+    return str(rows[0]["slug"])
+
 
 # MUST be kept in sync with `backend._UPDATE_TASK_ALLOWED_COLUMNS`. Mirrored
 # here (rather than imported) to avoid a circular import — `scripts.backend`
@@ -529,12 +579,14 @@ def _auto_relations(metadata: dict, explicit: list[dict]) -> list[dict]:
     explicit relations; duplicates by `(rel_type, to_index_id)` are
     deduped here.
 
-    Multi-workspace (spec §10 / atelier#30): when `metadata.workspace_id`
-    is present, the project lookup is constrained by workspace_id so a
-    same-valued `project_id` in another workspace cannot create a
-    cross-workspace `part_of` edge. Today `_WORKSPACE_SLUG` is the only
-    workspace so the filter is a no-op for correctness but serves as a
-    forward-compat guard for §10.
+    Multi-workspace (spec §10 / atelier#30 + #55): when
+    `metadata.workspace_id` is present, the project lookup is
+    constrained by workspace_id so a same-valued `project_id` in
+    another workspace cannot create a cross-workspace `part_of` edge.
+    Post-atelier#55, `_atelier_write` injects `workspace_id` into the
+    metadata blob before calling this helper (deriving from the
+    singleton workspace when not caller-supplied), so the filter
+    actively fires on every write — no longer a no-op.
     """
     relations = list(explicit or [])
     project_id = (metadata or {}).get("project_id")
@@ -595,16 +647,43 @@ def _atelier_write(
     the project slot of the key (it has no `project_id` row yet, since
     it IS the project row). Other callers fall back to
     `_resolve_project_slug(metadata.project_id)`.
+
+    Per atelier#55, the workspace slug is no longer hardcoded — it is
+    derived from `metadata.workspace_id` via `_workspace_slug_for_id`,
+    or from the singleton workspace via `_singleton_workspace()` when
+    metadata carries no workspace context. workspace_id is also
+    injected into the metadata blob before `_auto_relations` runs so
+    the §10 multi-workspace filter from atelier#30 ACTIVATES (today's
+    single-workspace deployment makes it a no-op for correctness, but
+    the wiring is in place for §10).
     """
     domain_vocabulary.assert_valid(domain)
+
+    # Resolve workspace BEFORE key construction. atelier#55: workspace_slug
+    # comes from `metadata.workspace_id` when present, else from the
+    # singleton workspace. This is the post-#55 contract — no more
+    # hardcoded workspace-slug literal.
+    metadata = dict(metadata or {})  # copy so we can mutate freely below
+    workspace_id_in_meta = metadata.get("workspace_id")
+    if workspace_id_in_meta is not None:
+        workspace_slug = _workspace_slug_for_id(int(workspace_id_in_meta))
+    else:
+        singleton = _singleton_workspace()
+        workspace_slug = str(singleton["slug"])
+        # Inject the resolved workspace_id into metadata so downstream
+        # consumers (atelier#30 `_auto_relations` filter) see the
+        # workspace context even when the caller didn't provide it.
+        # This is the activation step for the multi-workspace filter
+        # that PR#48 wired but couldn't fire without this seeding.
+        metadata["workspace_id"] = int(singleton["id"])
 
     created_at = _now()
     if project_slug_override is not None:
         project_slug = project_slug_override
     else:
-        project_slug = _resolve_project_slug((metadata or {}).get("project_id"))
+        project_slug = _resolve_project_slug(metadata.get("project_id"))
     key = _build_key(
-        workspace_slug=_WORKSPACE_SLUG,
+        workspace_slug=workspace_slug,
         project_slug=project_slug,
         domain=domain,
         created_at_iso=created_at,
@@ -616,11 +695,11 @@ def _atelier_write(
             [
                 title,
                 body or "",
-                _metadata_narrative(metadata or {}),
+                _metadata_narrative(metadata),
             ],
         )
     )
-    final_relations = _auto_relations(metadata or {}, relations or [])
+    final_relations = _auto_relations(metadata, relations or [])
 
     def _attempt(this_key: str) -> dict:
         output = _memex_validate_output(
@@ -661,7 +740,7 @@ def _atelier_write(
         # Race: another writer claimed the seq we computed. Re-allocate
         # once and retry. If that still collides, surface the error.
         retry_key = _build_key(
-            workspace_slug=_WORKSPACE_SLUG,
+            workspace_slug=workspace_slug,
             project_slug=project_slug,
             domain=domain,
             created_at_iso=created_at,
@@ -1140,22 +1219,18 @@ def _resolve_singleton_workspace_id() -> int:
     backend_memex). Used by writes that have no `project_id` to derive
     workspace_id from (e.g. workspace-level meetings).
 
-    Slug-first, with a slug-less fallback for bootstrap-race robustness.
+    Per atelier#55, this no longer slug-filters against the literal
+    `"atelier"` — it takes the first workspace row by id. Behavior is
+    identical for single-workspace deployments today; multi-workspace
+    callers should pre-resolve via `scope.resolve_scope()` and pass the
+    workspace_id in metadata instead of falling through to this helper.
 
     Raises `RuntimeError` (not `ValueError`) when no workspace row
     exists, because that's an environment-bootstrap failure rather than
     caller-input error — distinct signal from `_workspace_id_for_project`
     which raises `ValueError` on a bad caller-supplied project_id.
     """
-    rows = _memex_core_query(store="atelier", table="workspaces", where={"slug": _WORKSPACE_SLUG})
-    if not rows:
-        rows = _memex_core_query(store="atelier", table="workspaces")
-    if not rows:
-        raise RuntimeError(
-            "memex atelier store has no workspace row; "
-            "run atelier bootstrap before writing workspace-level rows"
-        )
-    return int(rows[0]["id"])
+    return int(_singleton_workspace()["id"])
 
 
 # ── Operational state writes ───────────────────────────────────────────────

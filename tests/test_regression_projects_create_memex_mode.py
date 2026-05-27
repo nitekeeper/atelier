@@ -11,7 +11,8 @@ provisioned in memex mode, so the query crashes.
 
 Fix shape: gate the local resolution on mode_detector.detect_mode()
 == "local"; in memex mode, resolve workspace_id from the memex atelier
-store (single-workspace via _WORKSPACE_SLUG).
+store (singleton workspace via _singleton_workspace — post atelier#55
+the `_WORKSPACE_SLUG` hardcoding is gone).
 """
 
 from __future__ import annotations

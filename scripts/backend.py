@@ -218,12 +218,11 @@ def write_task(
 ) -> dict:
     """Persist a task row and any declared relations.
 
-    Memex-mode signature is narrower (no `workspace_id` / `subdomain`).
-    `workspace_id` is dropped (singleton `_WORKSPACE_SLUG` for now; spec
-    §10 multi-workspace lands in v1.2). `subdomain` is folded into the
-    Memex Index row's metadata blob (matching `write_document`'s adapter
-    pattern) so it survives into searchable storage rather than getting
-    silently discarded.
+    Memex-mode signature is narrower (no `workspace_id` / `subdomain`
+    kwarg — `subdomain` is folded into the Memex Index row's metadata
+    blob matching `write_document`'s adapter pattern, and `workspace_id`
+    is derived inside `_atelier_write` from the metadata blob per
+    atelier#55 — no more hardcoded workspace-slug literal).
     """
     be = _backend()
     if _backend_is_memex(be):

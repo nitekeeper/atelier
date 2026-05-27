@@ -43,10 +43,11 @@ def _resolve_workspace_id() -> int:
     seeding via `backend.find_or_create_workspace` in Local mode if the
     table is empty (Memex mode bootstraps its singleton row elsewhere).
 
-    Singleton-workspace semantics are intentional here pending atelier#55
-    which removes the `_WORKSPACE_SLUG` hardcoding entirely. After #55
-    lands, this function will resolve from `scope.resolve_scope()`
-    instead of grabbing the first row.
+    Singleton-workspace semantics here remain a backwards-compat
+    convenience for callers that haven't yet been threaded through
+    `scope.resolve_scope()`. Multi-workspace callers should resolve
+    their workspace_id via `scope.resolve_scope()` and pass it
+    explicitly rather than falling through to this helper.
 
     Memex mode: the atelier bootstrap (see `scripts/atelier_entrypoint.py`)
     provisions the singleton workspace row before any project create

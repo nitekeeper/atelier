@@ -478,14 +478,27 @@ def list_workspaces() -> list[dict]:
 
 
 def find_project(*, workspace_id: int, slug: str) -> dict | None:
-    """Return the project row for `(workspace_id, slug)` or None.
-    Deferred to v1.2.0."""
-    _not_implemented("find_project")
+    """Return the project row for `(workspace_id, slug)` or None if absent.
+
+    Spec §10.1 identity rule: a project's canonical key is
+    `(workspace_id, slug)` — slug is unique WITHIN a workspace, not
+    globally. `find_or_create_workspace` from atelier#51 lands the
+    workspace-id; the caller (e.g. `scripts.scope.resolve_scope`)
+    pairs it with the locally-known slug.
+    """
+    return _backend().find_project(workspace_id=workspace_id, slug=slug)
 
 
 def list_projects(*, workspace_id: int) -> list[dict]:
-    """Return every project row in the workspace. Deferred to v1.2.0."""
-    _not_implemented("list_projects")
+    """Return every project row in the given workspace, ordered by slug.
+
+    Spec §10.2 detection algorithm uses this in the "workspace has one
+    project — auto-select" and "multiple projects — prompt user" arms
+    of `resolve_scope`. Always workspace-scoped per the §10.1 two-layer
+    invariant; no global cross-workspace listing here (a separate read
+    surface lands later if/when a consumer needs it).
+    """
+    return _backend().list_projects(workspace_id=workspace_id)
 
 
 # ── Reads ──────────────────────────────────────────────────────────────────
@@ -528,8 +541,15 @@ def list_tasks(
 
 
 def get_document(*, doc_id: int) -> dict | None:
-    """Return the document row for `doc_id` or None. Deferred to v1.2.0."""
-    _not_implemented("get_document")
+    """Return the `project_documents` row for `doc_id` or None if absent.
+
+    `doc_id` is the integer `project_documents.id` autoincrement column
+    (Local) / the equivalent row id in the atelier-on-Memex
+    `project_documents` table (Memex). NOT the Memex Index `index_id`
+    UUID — that lookup is a separate surface (`lookup_index_id_by_source_ref`
+    + future read surfaces).
+    """
+    return _backend().get_document(doc_id=doc_id)
 
 
 def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:

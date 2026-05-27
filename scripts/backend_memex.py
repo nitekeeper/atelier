@@ -1081,6 +1081,48 @@ def list_workspaces() -> list[dict]:
     return sorted(rows, key=lambda r: r.get("slug") or "")
 
 
+# ── Project + document CRUD (atelier#52, spec §10.1) ───────────────────────
+
+
+def find_project(*, workspace_id: int, slug: str) -> dict | None:
+    """Return the `projects` row for `(workspace_id, slug)` or None.
+
+    Project slugs are unique WITHIN a workspace per the v1.1.0 schema;
+    the composite key matches spec §10.1.
+    """
+    rows = _memex_core_query(
+        store="atelier",
+        table="projects",
+        where={"workspace_id": workspace_id, "slug": slug},
+    )
+    return rows[0] if rows else None
+
+
+def list_projects(*, workspace_id: int) -> list[dict]:
+    """Return every `projects` row in the workspace, ordered by `slug`.
+
+    Memex Core's `query` doesn't guarantee an ORDER BY; the helper sorts
+    in Python so callers see a stable order matching `backend_local`.
+    """
+    rows = _memex_core_query(
+        store="atelier",
+        table="projects",
+        where={"workspace_id": workspace_id},
+    )
+    return sorted(rows, key=lambda r: r.get("slug") or "")
+
+
+def get_document(*, doc_id: int) -> dict | None:
+    """Return the atelier `project_documents` row for `doc_id` or None.
+
+    Mirrors `backend_local.get_document`: queries the atelier-on-Memex
+    `project_documents` table by row `id` (NOT the Memex Index UUID
+    `index_id` — that lookup is a separate surface).
+    """
+    rows = _memex_core_query(store="atelier", table="project_documents", where={"id": doc_id})
+    return rows[0] if rows else None
+
+
 def _resolve_singleton_workspace_id() -> int:
     """Resolve the singleton workspace id in memex mode without taking
     a dependency on `scripts.projects._resolve_workspace_id` (that

@@ -30,7 +30,16 @@ def workspace_root(tmp_path, monkeypatch):
 
     No seed rows — the tests here are the FIRST writers into the
     workspaces table, so the fixture only handles the schema apply.
+
+    Forces Local mode via `mode_detector.detect_mode` patch — without
+    this, the resolve_scope integration test would dispatch to Memex
+    on dev machines where ~/.memex is installed. Same hardening
+    pattern as test_tasks.py's setup fixture.
     """
+    from scripts import mode_detector
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
+
     root = tmp_path / "repo"
     root.mkdir()
     (root / ".git").mkdir()
@@ -142,29 +151,17 @@ def test_list_workspaces_returns_all_rows_ordered_by_slug(workspace_root):
 
 
 def test_resolve_scope_now_works_in_a_real_workspace(workspace_root):
-    """With the workspace stubs landed, `scripts.scope.resolve_scope` is
-    no longer blocked by NotImplementedError when CWD is in a git repo.
-    It still relies on `find_project` / `list_projects` (atelier#52) for
-    the project layer, so the project slot remains None — but the
-    workspace gets created and returned end-to-end.
+    """With the workspace stubs landed (atelier#51) AND the project +
+    document stubs (atelier#52), `scripts.scope.resolve_scope` runs
+    end-to-end against the real backend in a real workspace — no
+    patches required. With zero projects in the workspace, the project
+    slot is None and the caller (SKILL.md flow) prompts.
 
-    This is the load-bearing test that proves #50 + #51 compose: the
-    pure-identity scope.py layer + the new workspace backend stubs
-    together yield a populated `Scope.workspace`.
+    Load-bearing integration test that proves #50 + #51 + #52 compose.
     """
-    # find_project / list_projects still raise NotImplementedError;
-    # patch them so the test exercises the workspace half end-to-end
-    # without crashing in the project lookup. (atelier#52 makes the
-    # patch unnecessary.)
-    import unittest.mock
+    from scripts import scope
 
-    from scripts import backend, scope
-
-    with (
-        unittest.mock.patch.object(backend, "find_project", return_value=None),
-        unittest.mock.patch.object(backend, "list_projects", return_value=[]),
-    ):
-        s = scope.resolve_scope(workspace_override="repo:integ")
+    s = scope.resolve_scope(workspace_override="repo:integ")
     assert s.workspace is not None
     assert s.workspace["identity"] == "repo:integ"
     assert s.workspace["slug"] == "repo-integ"

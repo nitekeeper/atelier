@@ -216,6 +216,57 @@ def list_workspaces() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ── Project + document CRUD (atelier#52, spec §10.1) ───────────────────────
+
+
+def find_project(*, workspace_id: int, slug: str) -> dict | None:
+    """Return the `projects` row for `(workspace_id, slug)` or None.
+
+    Project slugs are unique WITHIN a workspace per the v1.1.0 schema
+    `UNIQUE(workspace_id, slug)` constraint, not globally. The composite
+    key matches spec §10.1's "Identity: (workspace_id, slug)" rule.
+    """
+    c = _conn()
+    try:
+        row = c.execute(
+            "SELECT * FROM projects WHERE workspace_id = ? AND slug = ?",
+            (workspace_id, slug),
+        ).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else None
+
+
+def list_projects(*, workspace_id: int) -> list[dict]:
+    """Return every `projects` row in the workspace, ordered by `slug`."""
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT * FROM projects WHERE workspace_id = ? ORDER BY slug",
+            (workspace_id,),
+        ).fetchall()
+    finally:
+        c.close()
+    return [dict(r) for r in rows]
+
+
+def get_document(*, doc_id: int) -> dict | None:
+    """Return the `project_documents` row for `doc_id` or None if absent.
+
+    `doc_id` is the integer auto-increment `project_documents.id`
+    column; NOT the Memex Index `index_id` UUID (separate surface).
+    Returns the full row including denormalized `workspace_id`,
+    `project_id`, `domain`, `subdomain`, `title`, `filename`,
+    `created_by`, `index_id`, and timestamps.
+    """
+    c = _conn()
+    try:
+        row = c.execute("SELECT * FROM project_documents WHERE id = ?", (doc_id,)).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else None
+
+
 # ── Document-shaped writes — Tier 2 ────────────────────────────────────────
 
 

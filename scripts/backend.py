@@ -113,8 +113,8 @@ def write_project(
 
 def write_document(
     *,
-    workspace_id: int,
-    project_id: int,
+    workspace_id: int | None,
+    project_id: int | None,
     domain: str,
     subdomain: str | None,
     title: str,
@@ -127,6 +127,17 @@ def write_document(
 ) -> dict:
     """Persist a project document and any declared relations.
 
+    Per spec §10.4 (atelier#53), `workspace_id` and `project_id` are
+    BOTH nullable. The canonical use case is the daily-log domain,
+    which may be workspace-less and/or project-less per §6.7's
+    `_no-workspace_/(no-project)/...` key reservation. Local mode
+    accepts both NULL (migration 005 relaxed the NOT NULL constraints).
+    Memex mode raises `NotImplementedError` when `workspace_id is None`
+    because the §6.7 key construction needs the literal `_no-workspace_`
+    placeholder + Memex Index synthetic-workspace handling — out of
+    scope for atelier#53 and tracked as a follow-up when a real
+    workspace-less Memex consumer arrives.
+
     Memex-mode signature is narrower (no explicit `workspace_id` /
     `subdomain` kwargs); the adapter folds those into `metadata` so the
     canonical spec §4.3 wide signature stays the caller-facing contract.
@@ -136,6 +147,15 @@ def write_document(
     assert_valid_domain(domain)
     be = _backend()
     if _backend_is_memex(be):
+        if workspace_id is None:
+            raise NotImplementedError(
+                "write_document with workspace_id=None is not supported in "
+                "Memex mode yet — the §6.7 key construction needs the "
+                "literal `_no-workspace_` placeholder + synthetic-workspace "
+                "handling in the Memex Index. Use Local mode for workspace-"
+                "less daily logs, or open a follow-up issue when a Memex "
+                "consumer arrives."
+            )
         adapted_metadata = dict(metadata or {})
         # workspace_id / project_id / subdomain / source_ref belong on
         # the Index row's metadata blob in Memex mode — they're not
@@ -144,8 +164,12 @@ def write_document(
         # caller passing `metadata={"workspace_id": 99}` wins over the
         # kwarg-level 42 — surprising at first but matches "caller knows
         # best" semantics already used for write_task/write_meeting.
+        # None project_id is skipped from the fold so the metadata blob
+        # doesn't carry an explicit `project_id: null` (it just remains
+        # absent, which the Memex Index query plan reads as "any project").
         adapted_metadata.setdefault("workspace_id", workspace_id)
-        adapted_metadata.setdefault("project_id", project_id)
+        if project_id is not None:
+            adapted_metadata.setdefault("project_id", project_id)
         if subdomain is not None:
             adapted_metadata.setdefault("subdomain", subdomain)
         if source_ref is not None:
@@ -159,7 +183,9 @@ def write_document(
             source_url=source_url,
             relations=list(relations) if relations else None,
         )
-    # Local mode accepts the wide signature directly.
+    # Local mode accepts the wide signature directly, including NULL
+    # workspace_id / project_id for §10.4 workspace-less / project-less
+    # writes (migration 005).
     return be.write_document(
         workspace_id=workspace_id,
         project_id=project_id,
@@ -485,7 +511,19 @@ def find_project(*, workspace_id: int, slug: str) -> dict | None:
     globally. `find_or_create_workspace` from atelier#51 lands the
     workspace-id; the caller (e.g. `scripts.scope.resolve_scope`)
     pairs it with the locally-known slug.
+
+    Per atelier#53, `workspace_id=None` is REJECTED with a clear
+    ValueError — projects are workspace-scoped per §10.1 and a
+    workspace-less project lookup is a category error (not a
+    deferred surface).
     """
+    if workspace_id is None:
+        raise ValueError(
+            "find_project requires workspace_id — projects are "
+            "workspace-scoped per spec §10.1. For a cross-workspace "
+            "project search, the caller must iterate workspaces "
+            "via `list_workspaces` and call `find_project` per workspace."
+        )
     return _backend().find_project(workspace_id=workspace_id, slug=slug)
 
 
@@ -497,7 +535,20 @@ def list_projects(*, workspace_id: int) -> list[dict]:
     of `resolve_scope`. Always workspace-scoped per the §10.1 two-layer
     invariant; no global cross-workspace listing here (a separate read
     surface lands later if/when a consumer needs it).
+
+    Per atelier#53, `workspace_id=None` is REJECTED with a clear
+    ValueError — cross-workspace listing is not the workspace-less
+    surface §10.4 describes (that's for daily-log writes). Callers
+    that need cross-workspace results should iterate
+    `list_workspaces()` and call this per workspace.
     """
+    if workspace_id is None:
+        raise ValueError(
+            "list_projects requires workspace_id — listing is "
+            "workspace-scoped per spec §10.1. For cross-workspace "
+            "results, iterate `list_workspaces()` and call this per "
+            "workspace."
+        )
     return _backend().list_projects(workspace_id=workspace_id)
 
 

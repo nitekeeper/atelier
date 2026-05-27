@@ -272,8 +272,8 @@ def get_document(*, doc_id: int) -> dict | None:
 
 def write_document(
     *,
-    workspace_id: int,
-    project_id: int,
+    workspace_id: int | None,
+    project_id: int | None,
     domain: str,
     subdomain: str | None,
     title: str,
@@ -291,6 +291,13 @@ def write_document(
     `body` to `.ai/raw/<key>.md` and record the relative path —
     the raw archive doubles as both the recoverable source-of-truth and
     the filesystem co-located copy spec §6.8 talks about.
+
+    Per spec §10.4 (atelier#53), `workspace_id` and `project_id` are
+    BOTH nullable to support workspace-less / project-less writes
+    (canonical use case: the daily-log domain). Migration 005 relaxed
+    the NOT NULL constraints on both columns. Callers that supply None
+    get a row with NULL in that column; SQL FK constraints are not
+    enforced on NULL values.
 
     `source_url`, `relations`, and the `metadata` dict are accepted for
     signature parity with `backend.write_document` (the facade) and with

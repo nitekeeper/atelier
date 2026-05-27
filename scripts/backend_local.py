@@ -267,6 +267,20 @@ def get_document(*, doc_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def get_project(*, project_id: int) -> dict | None:
+    """Return the `projects` row for `project_id` or None if absent.
+
+    Lookup-by-id surface paralleling `get_document` (atelier#54). The
+    composite-key `(workspace_id, slug)` lookup lives in `find_project`.
+    """
+    c = _conn()
+    try:
+        row = c.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else None
+
+
 # ── Document-shaped writes — Tier 2 ────────────────────────────────────────
 
 

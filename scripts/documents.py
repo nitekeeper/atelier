@@ -151,32 +151,16 @@ def _row_to_legacy_dict(row: dict) -> dict:
 def get_document(db_path: str, doc_id: int) -> dict | None:
     """Return the project_documents row for `doc_id`, or None.
 
-    `backend.get_document` is deferred to v1.2.0 (spec §10), so we drop
-    one layer down per mode and read the row directly.
+    Routes through `backend.get_document(doc_id)` (landed by
+    atelier#52) and converts the v1.1.0 row shape to the legacy
+    `type` field via `_row_to_legacy_dict` for backward-compat with
+    pre-v1.1.0 callers.
     """
-    from scripts import mode_detector
-
-    if mode_detector.detect_mode() == "memex":
-        from scripts import backend_memex
-
-        rows = backend_memex._memex_core_query(
-            store="atelier", table="project_documents", where={"id": doc_id}
-        )
-    else:
-        from scripts import backend_local
-
-        c = backend_local._conn()
-        try:
-            r = c.execute(
-                "SELECT * FROM project_documents WHERE id = ?",
-                (doc_id,),
-            ).fetchone()
-        finally:
-            c.close()
-        rows = [dict(r)] if r else []
-    if not rows:
+    del db_path
+    row = backend.get_document(doc_id=doc_id)
+    if row is None:
         return None
-    return _row_to_legacy_dict(rows[0])
+    return _row_to_legacy_dict(row)
 
 
 def update_document(db_path: str, doc_id: int, **kwargs) -> dict | None:

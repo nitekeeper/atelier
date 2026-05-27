@@ -603,6 +603,18 @@ def get_document(*, doc_id: int) -> dict | None:
     return _backend().get_document(doc_id=doc_id)
 
 
+def get_project(*, project_id: int) -> dict | None:
+    """Return the `projects` row for `project_id` or None if absent.
+
+    Lookup-by-integer-id surface paralleling `get_document(doc_id)`.
+    Distinct from `find_project(workspace_id, slug)` which is the
+    spec §10.1 composite-key lookup — callers that already have a
+    project_id (e.g. wrappers in `scripts/projects.py`) use this
+    instead of having to round-trip through workspace identity.
+    """
+    return _backend().get_project(project_id=project_id)
+
+
 def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:
     """Reverse-lookup for the idempotent-migration use case (Plan 4).
 

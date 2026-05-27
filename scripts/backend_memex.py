@@ -1123,6 +1123,16 @@ def get_document(*, doc_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def get_project(*, project_id: int) -> dict | None:
+    """Return the atelier `projects` row for `project_id` or None.
+
+    Lookup-by-id surface paralleling `get_document` (atelier#54). The
+    composite-key `(workspace_id, slug)` lookup lives in `find_project`.
+    """
+    rows = _memex_core_query(store="atelier", table="projects", where={"id": project_id})
+    return rows[0] if rows else None
+
+
 def _resolve_singleton_workspace_id() -> int:
     """Resolve the singleton workspace id in memex mode without taking
     a dependency on `scripts.projects._resolve_workspace_id` (that

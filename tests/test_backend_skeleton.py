@@ -49,6 +49,7 @@ EXPECTED_METHODS = [
     "get_task",
     "list_tasks",
     "get_document",
+    "get_project",
     "lookup_index_id_by_source_ref",
     # Idempotent role/agent helpers — used by scripts/seed_roles.py
     # (Plan 3) and the bootstrap path. Both must be safe to call on a
@@ -214,6 +215,9 @@ METHOD_KWARGS: dict[str, list[dict]] = {
     ],
     "get_document": [
         {"doc_id": 1},
+    ],
+    "get_project": [
+        {"project_id": 1},
     ],
     "lookup_index_id_by_source_ref": [
         {"source_ref": "atelier:tasks:1"},

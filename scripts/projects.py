@@ -8,11 +8,10 @@ break) but is silently dropped — Memex mode keeps repo info on the
 workspace identity, not the project row.
 
 Writes route through `backend.write_project` (Plan 3 Task 2). Reads
-that the facade doesn't yet expose (Plan 2 deferred `find_project`,
-`list_projects`) use `backend_local._conn()` in Local mode or
-`backend_memex._memex_core_query` in Memex mode — direct queries are
-acceptable here because the facade explicitly defers these to v1.2.0
-(spec §10) and Plan 3's other rewires use the same pattern.
+route through the facade methods landed in atelier#51 / #52 / #54:
+`find_or_create_workspace`, `find_project`, `list_projects`,
+`get_project` — no direct `backend_local._conn()` or
+`backend_memex._memex_core_query` access here as of atelier#54.
 """
 
 from __future__ import annotations
@@ -39,69 +38,43 @@ def _resolve_workspace_id() -> int:
     """Return the workspace id for the current process.
 
     v1.1.0 schema requires `workspace_id NOT NULL` on `projects`. The
-    workspaces script + multi-workspace lookups land in v1.2.0; until
-    then we resolve the singleton workspace row (or seed one in local
-    mode if absent) so the write doesn't violate the FK.
+    workspace registry is now reachable through the facade (atelier#51 +
+    #54): we use `backend.list_workspaces()` to find the singleton row,
+    seeding via `backend.find_or_create_workspace` in Local mode if the
+    table is empty (Memex mode bootstraps its singleton row elsewhere).
 
-    Mode-aware:
-    - Local mode: opens `backend_local._conn()` and reads / seeds the
-      singleton row in the local SQLite `workspaces` table.
-    - Memex mode: queries the memex atelier store via
-      `backend_memex._memex_core_query`. The atelier bootstrap (see
-      `scripts/atelier_entrypoint.py`) provisions the singleton
-      workspace row keyed on `_WORKSPACE_SLUG`, so no seeding is needed
-      here; the regression for issue #6 bug #1 covers the "memex mode
-      must not touch the local workspaces table" guarantee. The
-      slug-less fallback below catches a bootstrap-race window where
-      the workspace row exists but the slug is not yet what we expect
-      (e.g. mid-rename); if both queries return empty we surface a
-      `RuntimeError` rather than silently inserting.
+    Singleton-workspace semantics are intentional here pending atelier#55
+    which removes the `_WORKSPACE_SLUG` hardcoding entirely. After #55
+    lands, this function will resolve from `scope.resolve_scope()`
+    instead of grabbing the first row.
 
-    Note: in local mode this opens its own `_conn()` and `create_project`
-    opens a second one inside `backend.write_project`. The double-open is
-    intentional — WAL mode handles concurrent reads on the same DB
-    fine, and folding the resolution into the facade is a v1.2.0 task
-    (it requires the workspaces script to land first).
+    Memex mode: the atelier bootstrap (see `scripts/atelier_entrypoint.py`)
+    provisions the singleton workspace row before any project create
+    call lands here. If `list_workspaces()` returns empty in Memex mode,
+    we surface a RuntimeError rather than silently inserting (Memex
+    workspace creation goes through the atelier bootstrap, not this
+    function).
     """
+    workspaces = backend.list_workspaces()
+    if workspaces:
+        return int(workspaces[0]["id"])
+    # Memex mode: bootstrap should have created the row; refuse to
+    # paper over an unbootstrapped store.
     if mode_detector.detect_mode() == "memex":
-        from scripts import backend_memex
-
-        # Single-workspace deployment (spec §6.7); identified by
-        # `_WORKSPACE_SLUG`. Fall back to the first row if the slug is
-        # absent for any reason — the workspaces table is bootstrapped
-        # before any project create call lands here.
-        rows = backend_memex._memex_core_query(
-            store="atelier", table="workspaces", where={"slug": backend_memex._WORKSPACE_SLUG}
+        raise RuntimeError(
+            "memex atelier store has no workspace row; run atelier bootstrap before create_project"
         )
-        if not rows:
-            rows = backend_memex._memex_core_query(store="atelier", table="workspaces")
-        if not rows:
-            raise RuntimeError(
-                "memex atelier store has no workspace row; "
-                "run atelier bootstrap before create_project"
-            )
-        return int(rows[0]["id"])
-
-    from scripts import backend_local
-
-    c = backend_local._conn()
-    try:
-        row = c.execute("SELECT id FROM workspaces ORDER BY id LIMIT 1").fetchone()
-        if row is not None:
-            return int(row["id"])
-        # Seed a default workspace so the project insert can resolve its
-        # FK. Matches the "singleton workspace until v1.2.0" pattern used
-        # by other backend callers (see `backend_memex._WORKSPACE_SLUG`).
-        now = _now()
-        cur = c.execute(
-            "INSERT INTO workspaces (slug, identity, name, description, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("default", "local:default", "Default", "Auto-seeded workspace", now, now),
-        )
-        c.commit()
-        return int(cur.lastrowid)
-    finally:
-        c.close()
+    # Local mode: seed a default workspace so the project insert can
+    # resolve its FK. Matches the "singleton workspace until atelier#55"
+    # pattern. Routes through the facade for consistency with the rest
+    # of the file.
+    workspace = backend.find_or_create_workspace(
+        identity="local:default",
+        slug="default",
+        name="Default",
+        description="Auto-seeded workspace",
+    )
+    return int(workspace["id"])
 
 
 def create_project(
@@ -142,27 +115,15 @@ def create_project(
 
 
 def get_project(db_path: str, project_id: int) -> dict | None:
-    """Return the project row for `project_id` or None.
+    """Return the project row for `project_id` or None if absent.
 
-    `backend.find_project` is deferred to v1.2.0; until then we read
-    directly from the active backend.
+    Routes through `backend.get_project(project_id)` (landed by
+    atelier#54) — the lookup-by-id surface that parallels
+    `backend.get_document`. The `(workspace_id, slug)` composite-key
+    lookup lives in `backend.find_project`.
     """
     del db_path
-    if mode_detector.detect_mode() == "memex":
-        from scripts import backend_memex
-
-        rows = backend_memex._memex_core_query(
-            store="atelier", table="projects", where={"id": project_id}
-        )
-        return rows[0] if rows else None
-    from scripts import backend_local
-
-    c = backend_local._conn()
-    try:
-        row = c.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-    finally:
-        c.close()
-    return dict(row) if row else None
+    return backend.get_project(project_id=project_id)
 
 
 def update_project(
@@ -234,9 +195,9 @@ def delete_project(db_path: str, project_id: int) -> bool:
     deletes as a direct backend operation."""
     del db_path
     # Memex Index rows are not row-deletable through the public facade;
-    # soft-delete via metadata is the v1.2.0 path. For now, treat Memex
-    # delete as a no-op that matches the old contract (returns False so
-    # callers can tell it didn't happen).
+    # soft-delete via metadata is a future path (no consumer today).
+    # For now, treat Memex delete as a no-op that matches the old
+    # contract (returns False so callers can tell it didn't happen).
     if mode_detector.detect_mode() == "memex":
         return False
     from scripts import backend_local
@@ -251,37 +212,31 @@ def delete_project(db_path: str, project_id: int) -> bool:
 
 
 def list_projects(db_path: str, phase: str | None = None) -> list[dict]:
-    """Return every project row (optionally filtered by phase).
+    """Return every project row across all workspaces, optionally
+    filtered by phase, ordered by name within each workspace then
+    workspace-by-workspace (matches the historical single-workspace
+    behavior — names sort naturally because there's one workspace today,
+    and the multi-workspace ordering is acceptable until a real caller
+    needs a global sort).
 
-    `backend.list_projects` is deferred to v1.2.0; until then we read
-    directly from the active backend, matching the pattern Plan 3's
-    template uses for `get_project`.
+    Routes through `backend.list_workspaces()` + `backend.list_projects(
+    workspace_id=...)` per workspace (landed by atelier#51 / #52),
+    applying the optional phase filter in Python so the per-workspace
+    `list_projects` calls don't need a phase parameter today.
+    Cross-workspace listing is the spec §10.1 "iterate workspaces +
+    call per-workspace" recipe documented on `backend.list_projects`.
     """
     del db_path
-    if mode_detector.detect_mode() == "memex":
-        from scripts import backend_memex
-
-        where: dict = {}
+    rows: list[dict] = []
+    for workspace in backend.list_workspaces():
+        ws_projects = backend.list_projects(workspace_id=workspace["id"])
         if phase is not None:
-            where["phase"] = phase
-        rows = backend_memex._memex_core_query(
-            store="atelier", table="projects", where=where or None
-        )
-        return list(rows)
-    from scripts import backend_local
-
-    c = backend_local._conn()
-    try:
-        if phase is not None:
-            cur = c.execute(
-                "SELECT * FROM projects WHERE phase = ? ORDER BY name",
-                (phase,),
-            )
-        else:
-            cur = c.execute("SELECT * FROM projects ORDER BY name")
-        rows = [dict(r) for r in cur.fetchall()]
-    finally:
-        c.close()
+            ws_projects = [p for p in ws_projects if p.get("phase") == phase]
+        # Order by name within each workspace; the slug-ordered facade
+        # list is re-sorted here because the public contract is
+        # name-ordered for human display (predates atelier#52).
+        ws_projects.sort(key=lambda p: p.get("name") or "")
+        rows.extend(ws_projects)
     return rows
 
 
@@ -289,14 +244,15 @@ def search_projects(db_path: str, query: str) -> list[dict]:
     """Naive LIKE search over name / description.
 
     Local-mode only for now — the Memex backend exposes `find_documents`
-    for FTS but not a structured projects search; spec §10 / v1.2.0
-    folds this into `backend.list_projects(query=...)`.
+    for document-text FTS but no structured projects-search surface
+    today. A future `backend.list_projects(query=...)` extension is the
+    likely shape; tracked as a follow-up when a real consumer needs it.
     """
     del db_path
-    # Memex backend exposes `find_documents` for FTS but not a structured
-    # projects search; spec §10 / v1.2.0 folds this into
-    # `backend.list_projects(query=...)`. Until then, Memex mode returns
-    # an empty list rather than crash.
+    # No structured projects-search surface in Memex mode today; the
+    # Memex backend has `find_documents` for document-text FTS but no
+    # equivalent for projects. Return empty rather than crash; a follow-
+    # up issue can land the surface when a consumer arrives.
     if mode_detector.detect_mode() == "memex":
         return []
     from scripts import backend_local

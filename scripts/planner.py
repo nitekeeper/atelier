@@ -148,16 +148,112 @@ def _require_parallel_group(tasks: list[dict[str, Any]]) -> None:
 
 
 def validate_tasks(tasks: list[dict[str, Any]], *, existing_files: set[str] | None = None) -> None:
-    """Run the deterministic gates before persistence: the parallel_group
-    own-gate (§5.4) THEN ``dag.validate_dag`` (orphan-deps / acyclic /
-    file-contention / reads-satisfiable). Any failure raises
-    :class:`PlannerDagInvalid` carrying the validator message verbatim, so the
-    single retry can feed the exact defect back to the synthesis agent."""
+    """Run the deterministic gates before persistence, cheapest/most-structural
+    first so exactly one defect-class surfaces per retry:
+
+      1. ``_require_parallel_group`` — the parallel_group own-gate (§5.4).
+      2. ``dag.validate_dag`` — orphan-deps / acyclic / file-contention /
+         reads-satisfiable (structural graph gates).
+      3. ``check_reviewer_disjointness`` — the reviewer separation-of-duties
+         policy gate (atelier#59).
+
+    Any failure raises :class:`PlannerDagInvalid` carrying the validator message
+    verbatim, so the single retry can feed the exact defect back to the
+    synthesis agent."""
     _require_parallel_group(tasks)
     try:
         validate_dag(tasks, existing_files=existing_files)
     except DagValidationError as e:
         raise PlannerDagInvalid(f"{type(e).__name__}: {e}") from e
+    # Policy gate runs AFTER the structural gates (cleaner errors first) and
+    # before persist. It raises PlannerDagInvalid directly, so it rides the
+    # existing run_planner single-retry-then-escalate path with no changes.
+    check_reviewer_disjointness(tasks)
+
+
+def check_reviewer_disjointness(tasks: list[dict[str, Any]]) -> None:
+    """Reject a task list that violates reviewer disjointness (atelier#59).
+
+    Separation-of-duties / no-self-review: a ``review`` task's
+    ``assigned_persona`` MUST differ from the ``assigned_persona`` of the
+    implement task it reviews — a persona cannot impartially grade its own work
+    (the integrity guarantee behind A4/P2/F9).
+
+    A review task declares ``reviews: "<task_id>"`` (a SINGLE string naming the
+    implement task it reviews); non-review tasks omit the key (``None``).
+    ``reviews`` is validation-time-only metadata, NOT persisted — like
+    ``depends_on``/``reads``/``writes``. (Wave-ordering — a review running after
+    the work it reviews — is ORTHOGONAL: the synthesis prompt declares
+    ``depends_on: [reviewed]`` on review tasks and ``dag.validate_dag``'s
+    existing acyclic/wave gates enforce it. This gate is persona-only.)
+
+    Standalone, pure, side-effect-free, and ``.get()``-safe, so the PM
+    orchestrator (atelier#60) can call it VERBATIM at dispatch time on the same
+    in-memory task list (defense in depth: one canonical predicate guards both
+    synthesis-time here and dispatch-time in #60, with no drift).
+
+    FAIL-CLOSED. Raises :class:`PlannerDagInvalid` directly (NOT a
+    ``DagValidationError`` subclass — so it rides ``run_planner``'s existing
+    ``except PlannerDagInvalid`` single-retry-then-escalate path with zero
+    changes), on the FIRST violation, with a precise + affirmative message
+    carrying a defect-class prefix. Reference validity is resolved BEFORE the
+    persona comparison so a dangling/absent pointer can never vacuously pass
+    ("disjoint by absence" is the silent fail-open hazard). Sub-checks, in order:
+
+      1. ``reviews`` shape — must be a non-empty ``str`` (or absent/``None`` =
+         not a review task). A non-str / empty value is rejected.
+      2. self-reference — ``reviews == own task_id`` is rejected.
+      3. orphan — ``reviews`` must name an in-list ``task_id``.
+      4. persona-disjointness — both the reviewer's and the reviewed task's
+         ``assigned_persona`` must be present (a missing one is a DEFECT, not
+         "disjoint"), and they must DIFFER (exact-string compare on the
+         canonical roster ids; no normalization).
+
+    Only a review task is compared against the SINGLE task its ``reviews``
+    names — never all-pairs — so two implement tasks sharing a persona is legal.
+    """
+    by_id = {t.get("task_id"): t for t in tasks}
+    for t in tasks:
+        reviews = t.get("reviews")
+        if reviews is None:
+            continue  # not a review task
+        tid = t.get("task_id", "?")
+        if not isinstance(reviews, str) or not reviews:
+            raise PlannerDagInvalid(
+                f"reviewer-disjointness: task {tid!r} has a non-string/empty "
+                f"`reviews` value {reviews!r}. `reviews` must be the task_id "
+                f"(string) of the implement task this task reviews, or omitted "
+                f"for non-review tasks."
+            )
+        if reviews == tid:
+            raise PlannerDagInvalid(
+                f"self-review: task {tid!r} `reviews` itself — a task cannot "
+                f"review its own work. Point `reviews` at a different (implement) task."
+            )
+        if reviews not in by_id:
+            known = sorted(k for k in by_id if k is not None)
+            raise PlannerDagInvalid(
+                f"orphan-reviews: task {tid!r} `reviews` {reviews!r} which is not "
+                f"in the task list (known task_ids: {known}). Point `reviews` at "
+                f"an in-list implement task."
+            )
+        reviewer_persona = t.get("assigned_persona")
+        reviewed_persona = by_id[reviews].get("assigned_persona")
+        if not reviewer_persona or not reviewed_persona:
+            raise PlannerDagInvalid(
+                f"reviewer-disjointness: review task {tid!r} or the task {reviews!r} "
+                f"it reviews is missing assigned_persona (reviewer="
+                f"{reviewer_persona!r}, reviewed={reviewed_persona!r}). Both must "
+                f"name a persona so reviewer independence can be verified."
+            )
+        if reviewer_persona == reviewed_persona:
+            raise PlannerDagInvalid(
+                f"reviewer-disjointness: review task {tid!r} is assigned persona "
+                f"{reviewer_persona!r}, the SAME persona as the implement task "
+                f"{reviews!r} it reviews. A reviewer MUST be a DIFFERENT persona "
+                f"than the implementer (separation of duties, A4/P2/F9). "
+                f"Re-assign {tid!r} to another persona."
+            )
 
 
 def persist_tasks(

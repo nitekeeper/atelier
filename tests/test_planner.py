@@ -272,3 +272,132 @@ def test_persist_tasks_is_all_or_nothing(setup, monkeypatch):
         )
     # The first row was created then rolled back → zero residual rows.
     assert tasks_mod.list_tasks(setup["db_path"], project_id=setup["project_id"]) == []
+
+
+# ── reviewer disjointness (atelier#59) ────────────────────────────────────
+
+
+def _impl_review_pair(
+    reviewer_persona: str = "code-reviewer-1", reviews: str = "t-1"
+) -> list[dict]:
+    """A valid 2-wave DAG: t-1 implements (backend-engineer-1, writes a.py);
+    t-2 reviews t-1 (reviewer_persona, depends_on+reads t-1's output). Defaults
+    are disjoint (code-reviewer-1 != backend-engineer-1) and dag-clean."""
+    return [
+        {
+            "task_id": "t-1",
+            "assigned_persona": "backend-engineer-1",
+            "parallel_group": 1,
+            "depends_on": [],
+            "reads": [],
+            "writes": ["a.py"],
+            "description": "implement foo",
+        },
+        {
+            "task_id": "t-2",
+            "assigned_persona": reviewer_persona,
+            "parallel_group": 2,
+            "depends_on": ["t-1"],
+            "reviews": reviews,
+            "reads": ["a.py"],
+            "writes": [],
+            "description": "review foo",
+        },
+    ]
+
+
+def test_check_reviewer_disjointness_passes_disjoint():
+    planner.check_reviewer_disjointness(_impl_review_pair())  # no raise
+
+
+def test_check_reviewer_disjointness_rejects_same_persona():
+    bad = _impl_review_pair(reviewer_persona="backend-engineer-1")  # == implementer
+    with pytest.raises(planner.PlannerDagInvalid) as exc:
+        planner.check_reviewer_disjointness(bad)
+    msg = str(exc.value)
+    # The message must name reviewer task_id, the shared persona, and the reviewed task_id.
+    assert "reviewer-disjointness" in msg
+    assert "t-2" in msg and "t-1" in msg and "backend-engineer-1" in msg
+
+
+def test_check_reviewer_disjointness_rejects_orphan_reviews():
+    bad = _impl_review_pair(reviews="t-99")  # not in list
+    with pytest.raises(planner.PlannerDagInvalid, match="orphan-reviews"):
+        planner.check_reviewer_disjointness(bad)
+
+
+def test_check_reviewer_disjointness_rejects_self_review():
+    tasks = _impl_review_pair()
+    tasks[1]["reviews"] = "t-2"  # reviews itself
+    with pytest.raises(planner.PlannerDagInvalid, match="self-review"):
+        planner.check_reviewer_disjointness(tasks)
+
+
+def test_check_reviewer_disjointness_rejects_missing_persona():
+    """A null/absent persona on either side is a DEFECT, never 'disjoint by absence'."""
+    tasks = _impl_review_pair()
+    del tasks[0]["assigned_persona"]  # reviewed task has no persona
+    with pytest.raises(planner.PlannerDagInvalid, match="reviewer-disjointness"):
+        planner.check_reviewer_disjointness(tasks)
+
+
+def test_check_reviewer_disjointness_rejects_non_string_reviews():
+    tasks = _impl_review_pair()
+    tasks[1]["reviews"] = ["t-1"]  # list, not a single string
+    with pytest.raises(planner.PlannerDagInvalid, match="reviewer-disjointness"):
+        planner.check_reviewer_disjointness(tasks)
+
+
+def test_check_reviewer_disjointness_no_false_positive_shared_persona():
+    """Two IMPLEMENT tasks may share a persona — only a review task vs the task
+    it reviews is constrained."""
+    planner.check_reviewer_disjointness(
+        [
+            {"task_id": "a", "assigned_persona": "be-1", "parallel_group": 1},
+            {"task_id": "b", "assigned_persona": "be-1", "parallel_group": 1},
+        ]
+    )  # no raise
+
+
+def test_check_reviewer_disjointness_absent_reviews_is_non_review():
+    planner.check_reviewer_disjointness(_valid_tasks())  # no `reviews` anywhere → no raise
+
+
+def test_run_planner_rejects_reviewer_violation_at_validate_not_dispatch(setup):
+    """A same-persona reviewer is rejected during synthesis/validate (one retry
+    then escalate), NOT at dispatch — and nothing is persisted."""
+    bad = _impl_review_pair(reviewer_persona="backend-engineer-1")
+    synth = _synth_from(_fenced(bad))  # same bad list on both attempts
+    with pytest.raises(planner.PlannerEscalation) as exc:
+        planner.run_planner(
+            synthesize=synth,
+            db_path=setup["db_path"],
+            project_id=setup["project_id"],
+            created_by=setup["agent_id"],
+            existing_files=set(),
+            workspace_id=setup["workspace_id"],
+        )
+    assert exc.value.kind == "dag-invalid"
+    assert exc.value.attempts == 2  # one initial + exactly one retry
+    assert synth.state["calls"] == 2
+    assert tasks_mod.list_tasks(setup["db_path"], project_id=setup["project_id"]) == []
+
+
+def test_run_planner_persists_valid_disjoint_list(setup):
+    """A valid disjoint list passes the in-pipeline gate (persists) AND the
+    standalone check (the #60 dispatch-time arm) returns None on the same list."""
+    good = _impl_review_pair()
+    synth = _synth_from(_fenced(good))
+    ids = planner.run_planner(
+        synthesize=synth,
+        db_path=setup["db_path"],
+        project_id=setup["project_id"],
+        created_by=setup["agent_id"],
+        existing_files=set(),
+        workspace_id=setup["workspace_id"],
+    )
+    assert len(ids) == 2
+    assert planner.check_reviewer_disjointness(good) is None  # standalone arm agrees
+    # `reviews` is validation-time-only — never reaches the persisted row.
+    for tid in ids:
+        assert "reviews" not in tasks_mod.get_task(setup["db_path"], tid)

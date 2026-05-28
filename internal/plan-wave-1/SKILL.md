@@ -23,7 +23,9 @@ conflicting specialist findings explicitly; do not silently drop a dissenter.
 
 ## Output — one fenced ```json``` block, last block wins
 
-A JSON **array**, one object per task, each with the full field set:
+A JSON **array**, one object per task, each with the full field set. The
+example below shows an implement task **and** its reviewer — note the reviewer
+is a **different persona** and `reviews` + `depends_on` the implement task:
 
 ```json
 [
@@ -34,12 +36,22 @@ A JSON **array**, one object per task, each with the full field set:
     "depends_on": [],
     "reads": ["scripts/util.py"],
     "writes": ["scripts/foo.py"],
-    "description": "…"
+    "description": "Implement foo."
+  },
+  {
+    "task_id": "t-2",
+    "assigned_persona": "code-reviewer-1",
+    "parallel_group": 2,
+    "depends_on": ["t-1"],
+    "reviews": "t-1",
+    "reads": ["scripts/foo.py"],
+    "writes": [],
+    "description": "Review foo."
   }
 ]
 ```
 
-Field contract (all required):
+Field contract (all required unless noted):
 
 - `task_id` — unique within the list (synthesis-local id; the persisted DB id
   differs).
@@ -49,6 +61,10 @@ Field contract (all required):
 - `depends_on` — list of `task_id`s (default `[]`).
 - `reads` / `writes` — files the task reads / writes (drive the dag gates).
 - `description` — what the task does.
+- `reviews` — **review tasks only**: the `task_id` (a single string) of the
+  implement task this task reviews. **Omit** it on implement / non-review tasks.
+  A review task should also `depends_on` the task it `reviews` (so it lands in a
+  strictly later wave — see below).
 
 ## Bake the dag invariants in so the list passes first try
 
@@ -65,6 +81,19 @@ Construct the list to satisfy all gates:
   (`existing_files`, computed by `run_planner` via `git ls-files` — NOT from
   your docs) or is `writes` by a task in a **strictly earlier** wave. Declare
   `writes` conservatively (every file a task touches).
+- **Reviewer disjointness (atelier#59)** — a review task's `assigned_persona`
+  MUST be a **different persona** than the `assigned_persona` of the implement
+  task it `reviews`. A persona cannot impartially review its own work
+  (separation of duties — the integrity guarantee behind A4/P2/F9). `run_planner`
+  gates this via `check_reviewer_disjointness` and rejects a list where any
+  review task names its own implementer as reviewer (also rejects a `reviews`
+  that is self-referential or points at no in-list task). Pick a distinct roster
+  persona for each reviewer so the list passes first try.
+- **Review ordering** — give every review task `depends_on: ["<reviewed_task_id>"]`
+  so it runs in a strictly later wave than the work it reviews (the acyclic +
+  wave-consistency gates above enforce it). Ordering is **orthogonal** to
+  disjointness: `reviews` names *who* is reviewed (persona policy); `depends_on`
+  orders *when* (wave). Declare both on a review task.
 
 ## Failure semantics (§17 + #58)
 
@@ -75,5 +104,10 @@ Construct the list to satisfy all gates:
   **once** with the exact validator error so you can fix that specific defect
   (DAG-INVALID → one retry). A second failure escalates.
 
-Reviewer-disjointness (no persona reviewing its own task) is enforced
-separately by **#59** — out of scope here.
+- If you produce a list that **violates reviewer disjointness** (a review
+  task's persona equals its reviewed implementer's persona, or a `reviews`
+  reference is self-referential / dangling), `run_planner` rejects it on the
+  same DAG-INVALID single-retry path: it re-prompts you **once** with the exact
+  offending reviewer/reviewed task_ids + persona so you can re-assign the
+  reviewer to a different persona; a second failure escalates. The planner
+  **never** silently re-assigns personas for you — fix it in the list.

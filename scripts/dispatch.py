@@ -555,10 +555,20 @@ VALID_DISPATCH_MODES: frozenset[str] = frozenset({DISPATCH_MODE_SUBAGENT, DISPAT
 #: so the two modules cannot drift on the key name.
 _DISPATCH_TASK_ID_KEY = "id"
 
-#: Env var the minimal read-side consults. STOPGAP — sibling #62 owns the
-#: authoritative /atelier:run mode selection; until it lands this lets an
-#: operator force a mode for smoke/integration without a code edit.
+#: Env var the read-side consults as the HIGHEST-precedence override. Born as
+#: the #61 stopgap; #62 keeps it as the explicit operator override (env beats
+#: the persisted marker beats the default) so a smoke/integration run can still
+#: force a mode without touching the marker file.
 DISPATCH_MODE_ENV_VAR = "ATELIER_DISPATCH_MODE"
+
+#: The persisted-mode marker file (DECISION 1 of atelier#62). One line —
+#: ``"subagent"`` or ``"agent-team"`` — written under ``<root>/.ai/`` by
+#: :func:`persist_dispatch_mode` (the ``persist-mode`` CLI subcommand the
+#: /atelier:run skill calls after the user picks a mode). Lives under ``.ai/``
+#: alongside ``atelier.db`` — the per-workspace state dir — so the choice is
+#: scoped to the workspace, gitignored, and rebuilt per run rather than
+#: leaking across repos via the environment.
+DISPATCH_MODE_MARKER_RELPATH = Path(".ai") / "atelier.mode"
 
 #: Default ``~/.claude/teams`` root where CC writes each team's
 #: ``<team_id>/config.json``. Injectable on every function below so tests pass a
@@ -627,24 +637,80 @@ class UnknownDispatchModeError(DispatchError):
         )
 
 
-def resolve_dispatch_mode(env: Mapping[str, str] = os.environ) -> str:
-    """Resolve the dispatch mode from ``env`` (default :data:`os.environ`).
+def _read_mode_marker(root: Path | str = ".") -> str | None:
+    """Read the persisted dispatch-mode marker under ``<root>/.ai/atelier.mode``.
 
-    Reads :data:`DISPATCH_MODE_ENV_VAR` (``ATELIER_DISPATCH_MODE``); defaults to
-    :data:`DISPATCH_MODE_SUBAGENT` when unset/blank. Raises
-    :class:`UnknownDispatchModeError` on any non-canonical value so a typo fails
-    loud rather than silently selecting the default.
+    Returns the validated mode string on a clean hit, or ``None`` when the
+    marker is absent or blank (so :func:`resolve_dispatch_mode` falls through
+    to the default). A marker that exists but carries a NON-canonical value
+    is a real misconfiguration — it raises :class:`UnknownDispatchModeError`
+    rather than being silently ignored, matching the env-var contract (a typo
+    fails loud, it does not quietly select the default).
 
-    STOPGAP — sibling atelier#62 owns the authoritative /atelier:run mode
-    selection. This is intentionally tiny: NO mode-selection UI, NO precedence
-    logic beyond "env var or default". Do not grow it; grow #62.
+    Read errors other than "absent" (e.g. a directory where the file should
+    be) collapse to ``None`` — a corrupt marker must not crash dispatch; the
+    safe fallthrough is the default mode.
     """
-    raw = (env.get(DISPATCH_MODE_ENV_VAR) or "").strip()
+    marker = Path(root) / DISPATCH_MODE_MARKER_RELPATH
+    try:
+        raw = marker.read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError, OSError):
+        return None
     if not raw:
-        return DISPATCH_MODE_SUBAGENT
+        return None
     if raw not in VALID_DISPATCH_MODES:
         raise UnknownDispatchModeError(raw)
     return raw
+
+
+def persist_dispatch_mode(mode: str, root: Path | str = ".") -> None:
+    """Persist ``mode`` to the marker file ``<root>/.ai/atelier.mode``.
+
+    DECISION 1 of atelier#62: the /atelier:run skill, after asking the user to
+    pick a dispatch mode, calls this (via the ``persist-mode`` CLI subcommand)
+    so the later pure-Python dispatch can read the choice back through
+    :func:`resolve_dispatch_mode` without re-prompting.
+
+    ``mode`` is validated against :data:`VALID_DISPATCH_MODES` BEFORE any write
+    — an invalid mode raises :class:`UnknownDispatchModeError` and leaves the
+    marker untouched, so a typo never persists a wedged state. The ``.ai/``
+    directory is created if absent. The file is a single line (the mode +
+    trailing newline) so it is trivially human-inspectable and `cat`-able.
+    """
+    if mode not in VALID_DISPATCH_MODES:
+        raise UnknownDispatchModeError(mode)
+    marker = Path(root) / DISPATCH_MODE_MARKER_RELPATH
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{mode}\n", encoding="utf-8")
+
+
+def resolve_dispatch_mode(env: Mapping[str, str] = os.environ, root: Path | str = ".") -> str:
+    """Resolve the dispatch mode by precedence: env override → marker → default.
+
+    atelier#62 makes this the authoritative read-side. Precedence (highest
+    first):
+
+    1. :data:`DISPATCH_MODE_ENV_VAR` (``ATELIER_DISPATCH_MODE``) — the explicit
+       operator override (kept from the #61 stopgap for smoke/integration runs
+       and back-compat). A set-but-blank value is treated as unset.
+    2. The persisted marker ``<root>/.ai/atelier.mode`` written by
+       :func:`persist_dispatch_mode` (the /atelier:run mode the user picked).
+    3. :data:`DISPATCH_MODE_SUBAGENT` — the default when neither speaks.
+
+    A non-canonical value in EITHER the env var or the marker raises
+    :class:`UnknownDispatchModeError` (a typo fails loud rather than silently
+    selecting the default). ``root`` is injectable so tests pass a ``tmp_path``
+    rather than relying on CWD.
+    """
+    raw = (env.get(DISPATCH_MODE_ENV_VAR) or "").strip()
+    if raw:
+        if raw not in VALID_DISPATCH_MODES:
+            raise UnknownDispatchModeError(raw)
+        return raw
+    marked = _read_mode_marker(root)
+    if marked is not None:
+        return marked
+    return DISPATCH_MODE_SUBAGENT
 
 
 def _team_member_names(team_id: str, teams_root: Path | str = DEFAULT_TEAMS_ROOT) -> set[str]:
@@ -888,6 +954,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default="-",
         help="Output destination ('-' for stdout, otherwise a file path).",
     )
+
+    persist = sub.add_parser(
+        "persist-mode",
+        help=(
+            "Persist the chosen dispatch mode to <root>/.ai/atelier.mode "
+            "(called by the /atelier:run skill after the user picks a mode)."
+        ),
+    )
+    persist.add_argument(
+        "mode",
+        choices=sorted(VALID_DISPATCH_MODES),
+        help="The dispatch mode to persist ('subagent' or 'agent-team').",
+    )
+    persist.add_argument(
+        "--root",
+        default=".",
+        help="Workspace root containing the .ai/ dir (default: CWD).",
+    )
     return parser
 
 
@@ -922,6 +1006,13 @@ def _cmd_compose(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_persist_mode(args: argparse.Namespace) -> int:
+    persist_dispatch_mode(args.mode, root=args.root)
+    marker = Path(args.root) / DISPATCH_MODE_MARKER_RELPATH
+    sys.stdout.write(f"dispatch: persisted mode {args.mode!r} to {marker}\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -931,6 +1022,12 @@ def main(argv: list[str] | None = None) -> int:
         except (MissingRenderVarsError, UndefinedError) as exc:
             sys.stderr.write(f"dispatch: {exc}\n")
             return 1
+        except DispatchError as exc:
+            sys.stderr.write(f"dispatch: {exc}\n")
+            return 2
+    if args.cmd == "persist-mode":
+        try:
+            return _cmd_persist_mode(args)
         except DispatchError as exc:
             sys.stderr.write(f"dispatch: {exc}\n")
             return 2

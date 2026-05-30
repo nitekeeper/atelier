@@ -33,6 +33,50 @@ def get_tmux_cmd() -> list[str]:
     return ["tmux"]
 
 
+def tmux_available() -> bool:
+    """Return True iff tmux is usable on this machine, False on ANY failure.
+
+    A NON-raising yes/no availability probe — the read-side that
+    ``/atelier:run``'s agent-team mode-gate consults (atelier#62). This is
+    deliberately SEPARATE from the interactive :func:`check`: ``check``
+    offers to *install* tmux and raises :class:`PreflightError` when it
+    can't; ``tmux_available`` only *reports* and never raises, so a skill
+    can branch on the boolean without a try/except.
+
+    Two conditions must both hold:
+
+    1. ``tmux`` (or the WSL-wrapped tmux on Windows) resolves — on native
+       platforms via ``shutil.which('tmux')``; on Windows we cannot
+       ``which`` inside the WSL distro from the host, so we skip the PATH
+       probe and let the server probe (which runs through
+       :func:`get_tmux_cmd`'s WSL prefix) be the single source of truth.
+    2. A short server probe succeeds. ``tmux start-server`` returns rc 0
+       when tmux is usable and is safe when no server is running yet (it
+       just spins one up); it does NOT require an attached terminal, so it
+       is the right probe for a non-interactive availability check.
+
+    Reuses :func:`get_tmux_cmd` so the WSL-aware invocation prefix is not
+    re-invented here. Any exception (missing binary, timeout, OSError, a
+    non-zero return code) collapses to ``False`` — the caller decides what
+    to do; this function never propagates a failure.
+    """
+    # Native platforms: a missing binary on PATH is a fast definitive "no".
+    # On Windows the real tmux lives inside the WSL distro, not on the host
+    # PATH, so `which('tmux')` would spuriously report absent — defer to the
+    # server probe (which runs `wsl -- tmux ...`) instead.
+    if sys.platform != "win32" and which("tmux") is None:
+        return False
+    try:
+        result = subprocess.run(
+            [*get_tmux_cmd(), "start-server"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def _prompt(msg: str) -> bool:
     if not sys.stdin.isatty():
         raise PreflightError(

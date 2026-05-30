@@ -309,3 +309,90 @@ def test_detect_package_manager_pacman(mocker):
     )
     result = pf._detect_linux_package_manager()
     assert result == "pacman"
+
+
+# ── tmux_available (atelier#62 Part D — non-raising yes/no availability) ─────
+
+
+def test_tmux_available_false_when_which_returns_none(mocker):
+    """which('tmux') -> None on a native platform => False, no server probe."""
+    mocker.patch("sys.platform", "linux")
+    from importlib import reload
+
+    import scripts.preflight as pf
+
+    reload(pf)
+    mocker.patch("scripts.preflight.which", return_value=None)
+    run_mock = mocker.patch("subprocess.run")
+    assert pf.tmux_available() is False
+    # When the binary is absent we must NOT even reach the server probe.
+    run_mock.assert_not_called()
+
+
+def test_tmux_available_true_when_which_and_probe_ok(mocker):
+    """which finds tmux AND the server probe returns rc 0 => True."""
+    mocker.patch("sys.platform", "linux")
+    from importlib import reload
+
+    import scripts.preflight as pf
+
+    reload(pf)
+    mocker.patch("scripts.preflight.which", return_value="/usr/bin/tmux")
+    mocker.patch("subprocess.run", return_value=MagicMock(returncode=0))
+    assert pf.tmux_available() is True
+
+
+def test_tmux_available_false_when_probe_returns_nonzero(mocker):
+    """which finds tmux but the server probe returns rc != 0 => False."""
+    mocker.patch("sys.platform", "linux")
+    from importlib import reload
+
+    import scripts.preflight as pf
+
+    reload(pf)
+    mocker.patch("scripts.preflight.which", return_value="/usr/bin/tmux")
+    mocker.patch("subprocess.run", return_value=MagicMock(returncode=1))
+    assert pf.tmux_available() is False
+
+
+def test_tmux_available_false_when_probe_raises(mocker):
+    """A probe that RAISES (timeout / FileNotFoundError / OSError) must
+    collapse to False — tmux_available NEVER propagates an exception."""
+    mocker.patch("sys.platform", "linux")
+    from importlib import reload
+
+    import scripts.preflight as pf
+
+    reload(pf)
+    mocker.patch("scripts.preflight.which", return_value="/usr/bin/tmux")
+    for exc in (
+        subprocess.TimeoutExpired(["tmux", "start-server"], 10),
+        FileNotFoundError(),
+        OSError("boom"),
+    ):
+        mocker.patch("subprocess.run", side_effect=exc)
+        assert pf.tmux_available() is False
+
+
+def test_tmux_available_windows_skips_which_uses_probe(mocker):
+    """On Windows the real tmux is inside WSL (not on host PATH), so
+    tmux_available must NOT short-circuit on which('tmux') -> None; it relies
+    on the WSL-wrapped server probe (get_tmux_cmd prefix)."""
+    mocker.patch("sys.platform", "win32")
+    mocker.patch.dict(os.environ, {}, clear=True)
+    from importlib import reload
+
+    import scripts.preflight as pf
+
+    reload(pf)
+    # which would return None for tmux on the Windows host — but we must not
+    # gate on it. Force None to prove the Windows path ignores it.
+    mocker.patch("scripts.preflight.which", return_value=None)
+    run_mock = mocker.patch("subprocess.run", return_value=MagicMock(returncode=0))
+    assert pf.tmux_available() is True
+    # The probe was actually invoked (which-None did NOT short-circuit), and it
+    # used the WSL prefix.
+    run_mock.assert_called_once()
+    invoked = run_mock.call_args.args[0]
+    assert invoked[:2] == ["wsl", "--"]
+    assert "tmux" in invoked

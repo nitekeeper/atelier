@@ -43,12 +43,14 @@ import pytest
 from scripts.dispatch import (
     DISPATCH_MODE_AGENT_TEAM,
     DISPATCH_MODE_ENV_VAR,
+    DISPATCH_MODE_MARKER_RELPATH,
     DISPATCH_MODE_SUBAGENT,
     DispatchError,
     UnknownDispatchModeError,
     _team_member_names,
     build_spawn_fn,
     dispatch_task,
+    persist_dispatch_mode,
     resolve_dispatch_mode,
 )
 
@@ -102,22 +104,91 @@ def _briefing_for(text: str = "BRIEFING"):
 # ── resolve_dispatch_mode: env set vs default vs bad ────────────────────────
 
 
-def test_resolve_dispatch_mode_defaults_to_subagent():
-    assert resolve_dispatch_mode(env={}) == DISPATCH_MODE_SUBAGENT
+def test_resolve_dispatch_mode_defaults_to_subagent(tmp_path):
+    # Empty env AND no marker under `root` => default. Pin `root` to an empty
+    # tmp dir so the test is hermetic regardless of the repo's .ai/ state.
+    assert resolve_dispatch_mode(env={}, root=tmp_path) == DISPATCH_MODE_SUBAGENT
     # Blank/whitespace is treated as unset.
-    assert resolve_dispatch_mode(env={DISPATCH_MODE_ENV_VAR: "   "}) == DISPATCH_MODE_SUBAGENT
-
-
-def test_resolve_dispatch_mode_reads_env():
     assert (
-        resolve_dispatch_mode(env={DISPATCH_MODE_ENV_VAR: "agent-team"}) == DISPATCH_MODE_AGENT_TEAM
+        resolve_dispatch_mode(env={DISPATCH_MODE_ENV_VAR: "   "}, root=tmp_path)
+        == DISPATCH_MODE_SUBAGENT
     )
-    assert resolve_dispatch_mode(env={DISPATCH_MODE_ENV_VAR: "subagent"}) == DISPATCH_MODE_SUBAGENT
 
 
-def test_resolve_dispatch_mode_rejects_unknown():
+def test_resolve_dispatch_mode_reads_env(tmp_path):
+    assert (
+        resolve_dispatch_mode(env={DISPATCH_MODE_ENV_VAR: "agent-team"}, root=tmp_path)
+        == DISPATCH_MODE_AGENT_TEAM
+    )
+    assert (
+        resolve_dispatch_mode(env={DISPATCH_MODE_ENV_VAR: "subagent"}, root=tmp_path)
+        == DISPATCH_MODE_SUBAGENT
+    )
+
+
+def test_resolve_dispatch_mode_rejects_unknown(tmp_path):
     with pytest.raises(UnknownDispatchModeError):
-        resolve_dispatch_mode(env={DISPATCH_MODE_ENV_VAR: "team"})
+        resolve_dispatch_mode(env={DISPATCH_MODE_ENV_VAR: "team"}, root=tmp_path)
+
+
+# ── mode persistence: persist_dispatch_mode + resolve precedence (atelier#62) ─
+
+
+def test_persist_dispatch_mode_writes_marker(tmp_path):
+    """persist_dispatch_mode writes a single-line marker under .ai/atelier.mode,
+    creating .ai/ if absent."""
+    persist_dispatch_mode("agent-team", root=tmp_path)
+    marker = tmp_path / DISPATCH_MODE_MARKER_RELPATH
+    assert marker.exists()
+    assert marker.read_text(encoding="utf-8").strip() == "agent-team"
+
+
+def test_persist_dispatch_mode_rejects_invalid_without_writing(tmp_path):
+    """An invalid mode raises UnknownDispatchModeError and leaves NO marker —
+    a typo never persists a wedged state."""
+    with pytest.raises(UnknownDispatchModeError):
+        persist_dispatch_mode("teammode", root=tmp_path)
+    assert not (tmp_path / DISPATCH_MODE_MARKER_RELPATH).exists()
+
+
+def test_resolve_marker_beats_default(tmp_path):
+    """With no env var, the persisted marker wins over the subagent default."""
+    persist_dispatch_mode("agent-team", root=tmp_path)
+    assert resolve_dispatch_mode(env={}, root=tmp_path) == DISPATCH_MODE_AGENT_TEAM
+
+
+def test_resolve_env_override_beats_marker(tmp_path):
+    """The env override beats the persisted marker (back-compat / smoke runs).
+
+    NON-VACUOUS: the marker says agent-team; if env did NOT win, this would
+    return agent-team and the assertion would fail."""
+    persist_dispatch_mode("agent-team", root=tmp_path)
+    assert (
+        resolve_dispatch_mode(env={DISPATCH_MODE_ENV_VAR: "subagent"}, root=tmp_path)
+        == DISPATCH_MODE_SUBAGENT
+    )
+
+
+def test_resolve_default_when_neither_env_nor_marker(tmp_path):
+    """No env, no marker => subagent default."""
+    assert not (tmp_path / DISPATCH_MODE_MARKER_RELPATH).exists()
+    assert resolve_dispatch_mode(env={}, root=tmp_path) == DISPATCH_MODE_SUBAGENT
+
+
+def test_resolve_rejects_corrupt_marker_value(tmp_path):
+    """A marker file with a non-canonical value fails loud (not silent default)."""
+    marker = tmp_path / DISPATCH_MODE_MARKER_RELPATH
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("nonsense\n", encoding="utf-8")
+    with pytest.raises(UnknownDispatchModeError):
+        resolve_dispatch_mode(env={}, root=tmp_path)
+
+
+def test_persist_then_resolve_round_trip_both_modes(tmp_path):
+    """Round-trip: persist each canonical mode and read it back via resolve."""
+    for mode in (DISPATCH_MODE_SUBAGENT, DISPATCH_MODE_AGENT_TEAM):
+        persist_dispatch_mode(mode, root=tmp_path)
+        assert resolve_dispatch_mode(env={}, root=tmp_path) == mode
 
 
 # ── _team_member_names: first-touch detection helper ────────────────────────

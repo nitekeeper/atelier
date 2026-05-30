@@ -26,6 +26,30 @@ Branch on the returned `action`:
   pre-flight (`startup_check()` will now return `proceed-memex` or
   `proceed-local` depending on the user's choice).
 
+## Dispatch-mode selection (after pre-flight, before any work request)
+
+Once `startup_check` returns a `proceed-*` action and BEFORE the Trigger contract's Ask gate fires for any new-work request, establish the session's **dispatch mode**. This gate ALWAYS asks — there is no silent default. Present exactly these two options and wait for the user to pick one:
+
+- **(1) sub-agent** — lightweight. Each worker is a fire-and-forget background `Agent`; no persistent team is created. **tmux is NOT required.** Best for a single implementer / reviewer pass.
+- **(2) agent-team** — a persistent team (`TeamCreate` once per cycle, then per-task spawn / `SendMessage`). **tmux is REQUIRED** for the team panes.
+
+After the user picks:
+
+1. **agent-team → tmux gate (hard-fail when unavailable).** Before proceeding, check tmux availability:
+   ```
+   python3 -c "from scripts.preflight import tmux_available; print(tmux_available())"
+   ```
+   - If it prints `False`: **STOP.** Do not proceed and do not silently fall back. Tell the user verbatim: *"tmux is required for agent-team mode; install it and re-run, or choose sub-agent mode."* Re-offer the two options.
+   - If it prints `True`: continue to step 3 with `agent-team`.
+2. **sub-agent → no tmux requirement.** Proceed directly to step 3 with `subagent`; never run the tmux gate for sub-agent mode.
+3. **Persist the chosen mode** so the later Python dispatch reads it back (env override → marker → default; see `scripts/dispatch.py::resolve_dispatch_mode`):
+   ```
+   python3 scripts/dispatch.py persist-mode <mode>
+   ```
+   where `<mode>` is exactly `subagent` or `agent-team`. This writes the `.ai/atelier.mode` marker. Then continue to the Trigger contract below.
+
+This gate establishes HOW work is dispatched; the Trigger contract below still governs WHETHER a given message is new work. A user who pre-authorizes a mode in CLAUDE.md / saved preferences satisfies this gate without a live pick (same authority rule as the Ask gate).
+
 ## Internal procedures
 
 Most dev-arc work and project CRUD lives in `internal/<name>/SKILL.md` files. These are NOT Claude Code slash commands — they are plain markdown procedures only reachable via the Read tool. Whenever this skill references `internal/<name>/SKILL.md` below, the agent should: (1) Read that file, (2) follow the procedure inline. The 22 internal procedures cover the dev arc (`internal/dev-design`, `internal/dev-plan`, `internal/dev-tdd`, …) and project DB CRUD (`internal/project`, `internal/task`, `internal/meeting`, …).

@@ -23,6 +23,7 @@ short-lived nature of write operations.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -322,11 +323,20 @@ def write_document(
     get a row with NULL in that column; SQL FK constraints are not
     enforced on NULL values.
 
-    `source_url`, `relations`, and the `metadata` dict are accepted for
-    signature parity with `backend.write_document` (the facade) and with
-    the Memex backend, but Local mode currently no-ops on them: no
-    relations table exists in the slim schema. `metadata` defaults to None
-    (Nit-1) for caller ergonomics.
+    `source_url` and `relations` are accepted for signature parity with
+    `backend.write_document` (the facade) and the Memex backend, but Local
+    mode currently no-ops on them: no relations table exists in the slim
+    schema.
+
+    `metadata` (atelier#62) is persisted to `project_documents.metadata`
+    (added in `007_project_documents_metadata.sql`) as a JSON object so the
+    spec-versioning chain ({"version": n, "supersedes": prior_id}) survives
+    a Local-mode round-trip — matching the Memex backend, which folds
+    metadata into the Index row's metadata blob. A None / empty-dict
+    `metadata` stores SQL NULL (back-compat: plain creates carry no
+    metadata). `get_document` returns the stored JSON string back via
+    `SELECT *`; callers decode it (see `documents.write_spec_amendment`).
+    `metadata` defaults to None (Nit-1) for caller ergonomics.
 
     `source_ref` is persisted to `project_documents.source_ref` (added in
     `002_source_ref_and_fts.sql`) so Plan 4's idempotent migrator can find
@@ -334,13 +344,17 @@ def write_document(
     """
     root = _workspace_root()
     _, rel_path = _archive_raw(body or "", title, root=root)
+    # Serialize metadata to a JSON string for the TEXT column. An empty /
+    # None dict stores SQL NULL so plain creates stay byte-identical to the
+    # pre-#62 behavior (no `{}` literal cluttering the column).
+    metadata_json = json.dumps(metadata) if metadata else None
     c = _conn()
     try:
         cur = c.execute(
             "INSERT INTO project_documents (workspace_id, project_id, "
             "domain, subdomain, title, filename, created_by, source_ref, "
-            "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "metadata, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 workspace_id,
                 project_id,
@@ -350,6 +364,7 @@ def write_document(
                 rel_path,
                 caller_agent_id,
                 source_ref,
+                metadata_json,
                 _now(),
                 _now(),
             ),

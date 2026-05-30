@@ -26,12 +26,20 @@ v1.0.13 `type` column is gone in v1.1.0 (replaced by `domain` +
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts import backend
 from scripts.domain_vocabulary import TYPE_TO_DOMAIN
+
+# The §6.4 storage coordinates of a 9-section PM spec doc: domain=project,
+# subdomain=spec (design spec 2026-05-25-atelier-team-mode-design.md §6.4).
+# write_spec_amendment uses this pair as the "clean way to tell" a spec doc
+# apart from an arbitrary project document.
+_SPEC_DOMAIN = "project"
+_SPEC_SUBDOMAIN = "spec"
 
 _BARE_WORD = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -161,6 +169,103 @@ def get_document(db_path: str, doc_id: int) -> dict | None:
     if row is None:
         return None
     return _row_to_legacy_dict(row)
+
+
+def _decode_metadata(row: dict) -> dict:
+    """Decode a document row's `metadata` field into a dict.
+
+    Local mode stores `project_documents.metadata` as a JSON TEXT column
+    (migration 007); Memex mode returns it folded as a dict already. This
+    normalizes both: a JSON string is parsed, an already-dict value is
+    returned as-is, None / missing / unparseable yields an empty dict (so
+    callers can always `.get("version")` without a type check).
+    """
+    raw = row.get("metadata")
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def write_spec_amendment(
+    db_path: str,
+    prior_doc_id: int,
+    title: str,
+    body: str,
+    created_by: str,
+) -> dict:
+    """Amend a spec document by creating a NEW versioned row that supersedes it.
+
+    Spec versioning (atelier#62, design spec §6.4). An amendment NEVER mutates
+    the prior row in place — it creates a fresh `project_documents` row carrying
+    `metadata = {"version": prior_version + 1, "supersedes": prior_doc_id}`, so
+    the full version chain stays auditable and the superseded spec remains
+    readable via `get_document(prior_doc_id)`.
+
+    Contract:
+      (a) Fetches the prior doc via `get_document`. Raises `ValueError` if it
+          does not exist (amending a phantom is a caller error).
+      (b) Refuses non-spec docs: a 9-section PM spec is stored as
+          `domain=project, subdomain=spec` (§6.4). If the prior doc's
+          (domain, subdomain) is not that pair we raise `ValueError` rather
+          than silently version an arbitrary document — this is the "clean way
+          to tell" the contract asks for.
+      (c) Creates a NEW row via the backend facade (`backend.write_document`,
+          never a direct `backend_local` call — CLAUDE.md routing rule) with
+          the bumped version metadata. `prior_version` is read from the prior
+          doc's metadata, defaulting to 1 when absent (a pre-#62 spec with no
+          metadata is treated as version 1, so its first amendment is v2).
+      (d) Returns the new row dict, including its decoded `metadata`.
+
+    The new row inherits the prior doc's `workspace_id` / `project_id` /
+    `domain` / `subdomain` so it lands in the same scope and stays a spec.
+    """
+    prior = get_document(db_path, prior_doc_id)
+    if prior is None:
+        raise ValueError(
+            f"write_spec_amendment: prior_doc_id={prior_doc_id} not found — "
+            "cannot amend a document that does not exist."
+        )
+    if prior.get("domain") != _SPEC_DOMAIN or prior.get("subdomain") != _SPEC_SUBDOMAIN:
+        raise ValueError(
+            f"write_spec_amendment: doc {prior_doc_id} is not a spec "
+            f"(domain={prior.get('domain')!r}, subdomain={prior.get('subdomain')!r}); "
+            f"only docs stored as domain={_SPEC_DOMAIN!r}, subdomain={_SPEC_SUBDOMAIN!r} "
+            "(the §6.4 9-section spec coordinates) can be amended."
+        )
+    prior_meta = _decode_metadata(prior)
+    prior_version = prior_meta.get("version")
+    if not isinstance(prior_version, int) or prior_version < 1:
+        prior_version = 1
+    new_metadata = {"version": prior_version + 1, "supersedes": prior_doc_id}
+    result = backend.write_document(
+        workspace_id=prior.get("workspace_id"),
+        project_id=prior.get("project_id"),
+        domain=_SPEC_DOMAIN,
+        subdomain=_SPEC_SUBDOMAIN,
+        title=title,
+        body=body,
+        metadata=new_metadata,
+        caller_agent_id=created_by,
+    )
+    # Re-read through get_document so the returned dict is the persisted row
+    # (with metadata round-tripped through storage), not the write echo.
+    new_id = result["row_id"]
+    new_row = get_document(db_path, new_id)
+    if new_row is None:
+        # Defensive: the write succeeded (row_id returned) but the read-back
+        # missed — surface the echo with decoded metadata rather than None.
+        result["metadata"] = new_metadata
+        return result
+    new_row["metadata"] = _decode_metadata(new_row)
+    return new_row
 
 
 def update_document(db_path: str, doc_id: int, **kwargs) -> dict | None:

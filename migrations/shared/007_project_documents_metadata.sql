@@ -1,0 +1,43 @@
+-- migrations/shared/007_project_documents_metadata.sql
+-- project_documents.metadata — JSON blob for spec versioning (atelier#62).
+--
+-- DECISION 2 of atelier#62: spec amendments need a place to record the
+-- version chain (which doc supersedes which, and the running version number)
+-- WITHOUT mutating prior rows in place — every amendment is a NEW
+-- project_documents row carrying:
+--
+--   metadata = {"version": <n>, "supersedes": <prior_doc_id>}
+--
+-- We store this as a single TEXT column holding a JSON object rather than two
+-- dedicated columns (version INTEGER, supersedes INTEGER) for two reasons:
+--   1. The Memex backend already folds document metadata into the Index row's
+--      `metadata` blob (see scripts/backend.py write_document adapter) — a
+--      single JSON column keeps Local-mode storage shaped like what Memex
+--      mode round-trips, so `documents.write_spec_amendment` reads one field
+--      on both backends.
+--   2. It is open for extension — future amendment metadata (e.g. an
+--      "amendment_reason" or "amended_by") slots into the same JSON without a
+--      further migration.
+--
+-- Semantics + style mirror 004/006 (additive ALTER TABLE ADD COLUMN):
+--   * Additive ADD COLUMN — idempotent via the migration registry
+--     (`migrations.filename` UNIQUE gate in scripts/migrate.py).
+--   * NULL by default — every pre-#62 row and every plain create
+--     (create_document) leaves metadata NULL; only write_spec_amendment
+--     populates it. Back-compat with all existing callers.
+--   * NO CHECK constraint — the JSON shape is validated in the application
+--     layer (scripts/documents.py), matching 004/006's posture that
+--     structured operator data belongs to the app layer, not a closed SQL
+--     enum/shape.
+--   * NO PRAGMA user_version bump. user_version is the team-mode BRIDGE
+--     schema pin (set to 1 by 003, triple-pinned to SCHEMA_VERSION in
+--     dispatch.py / bridge_send.py / bridge_read.py / the rules SKILL
+--     frontmatter). This column is orthogonal to the bridge wire format —
+--     exactly like 004/005/006, it changes the documents schema without
+--     touching the bridge version pin.
+--
+-- The FTS5 index (project_documents_fts, migration 002) indexes only
+-- (title, subdomain, filename) — its sync triggers do NOT reference
+-- metadata, so adding this column needs no FTS trigger change.
+
+ALTER TABLE project_documents ADD COLUMN metadata TEXT;

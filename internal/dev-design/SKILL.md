@@ -25,25 +25,21 @@ No gate — requires only that a project exists. Run `project:read <project_id>`
    For this skill `allowed` is always `true` (no gate configured). Record `current_phase` for later use, then proceed to the next step.
    - If the project does not exist, stop and tell the user to create one first with `internal/project/SKILL.md` (`create`).
 
-2. **Grilling phase** — ask one question at a time until all of the following are unambiguous:
-   - What problem does this project solve? Who experiences it?
-   - What does success look like? How will it be measured?
-   - What is explicitly out of scope?
-   - What are the non-negotiable constraints (performance, security, compliance, deadlines)?
-   - What systems or services does this touch?
-   - Are there security or privacy concerns?
-   - What alternatives were considered and why rejected?
-   - What are the open questions or unknowns?
-   Keep asking until you can answer all of the above without making any assumption.
+2. **Grilling phase** — walk the human **section by section** through the 9-section spec template below, asking one question at a time and grilling each section against its specificity bar until every section is unambiguous. The PM phase is the most important phase for downstream correctness — every later worker reads the spec from their field's perspective, and a vague spec produces vague work. Keep asking until each section meets its bar without you making any assumption.
 
-3. **Draft the design document** with these required sections (in order):
-   - **Goals** — what this project accomplishes; measurable outcomes
-   - **Non-Goals** — what this project explicitly does NOT do
-   - **Approach** — the chosen solution and why
-   - **Alternatives Considered** — at least two alternatives and why each was rejected
-   - **Cross-cutting concerns** — security, privacy, observability, rollback, compatibility
-   - **Assumptions and dependencies** — external systems, versions, preconditions
-   - **Open questions** — unresolved items with an owner for each
+3. **Draft the design document** using the 9-section spec template (in order). This is the authoritative template from the team-mode design spec §6.2 (`docs/specs/2026-05-25-atelier-team-mode-design.md` — "The 9-section spec template"); each section must clear its specificity bar:
+
+   | # | Section | Purpose | Specificity bar |
+   |---|---|---|---|
+   | 1 | **Goal** | Single-sentence outcome statement | Testable; no compound goals |
+   | 2 | **Scope** | What is in | Each scope bullet is concretely demonstrable |
+   | 3 | **Non-goals** | What is explicitly out | Each non-goal closes a likely interpretation ambiguity |
+   | 4 | **Acceptance criteria** | How "done" is measured | Each criterion is testable (boolean or measurable) |
+   | 5 | **Constraints** | What we may not do (perf, compat, etc.) | Named, not hand-waved |
+   | 6 | **Stakeholders** | Who cares + their interest | Named role (not "the team") |
+   | 7 | **Dependencies / Prerequisites** | What must exist before we can ship | Named systems / artifacts / decisions |
+   | 8 | **Risks / Unknowns** | What we don't know + what could blow up | Each risk has a mitigation or an "accept" disposition |
+   | 9 | **Success metrics** | How we know it worked after ship | Quantified or boolean |
 
 4. Present the draft to the human. Ask: "Does this capture everything? What should change?"
    Revise until the human explicitly approves.
@@ -59,5 +55,8 @@ No gate — requires only that a project exists. Run `project:read <project_id>`
 ## Hard rules
 - Never produce the design document before grilling is complete.
 - Never advance the phase without explicit human approval.
-- Alternatives Considered must contain at least two alternatives.
-- The security/cross-cutting section is never empty — if no concerns, state why explicitly.
+- The document MUST contain all 9 sections from the §6.2 template, in order (Goal; Scope; Non-goals; Acceptance criteria; Constraints; Stakeholders; Dependencies / Prerequisites; Risks / Unknowns; Success metrics). No section may be omitted.
+- Every section must clear its specificity bar. If a section genuinely has nothing to record (e.g. no external dependencies), state that explicitly rather than leaving it blank — a blank section is treated as "not yet grilled," not as "none."
+- Acceptance criteria (§4) must be testable (boolean or measurable); Risks / Unknowns (§8) must give each risk a mitigation or an explicit "accept" disposition.
+
+> **Note (creation vs. amendment).** This procedure CREATES the spec via `documents.py create` (step 6) — that path is unchanged. When an existing spec needs a versioned revision rather than a fresh doc, amend it through `scripts.documents.write_spec_amendment(db_path, prior_doc_id, title, body, created_by)` (atelier#62) — it writes a NEW `project_documents` row carrying `metadata={"version": n, "supersedes": <prior_id>}` and never mutates the prior row in place, preserving the spec's version chain. Creation here is unchanged; amendment is the separate spec-versioning path.

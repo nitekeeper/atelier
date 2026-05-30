@@ -78,13 +78,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, UndefinedError
 
@@ -486,6 +487,340 @@ def read_heartbeats(db_path: str | Path) -> list[tuple[str, str, str]]:
     finally:
         db.close()
     return [(r["team_id"], r["role_id"], r["last_seen_iso"]) for r in rows]
+
+
+# ── Mode-specific dispatch seam (atelier#61) ───────────────────────────────
+#
+# scripts/pm_dispatch.py's WaveDispatcher is MODE-AGNOSTIC: it reaches the
+# outside world only through three injected seams (``spawn_fn`` / ``poll_fn`` /
+# ``escalate_fn``) and carries zero mode knowledge — its ``spawn_fn`` docstring
+# literally says "atelier#61 owns spawning". This section IS that owner: it
+# turns the abstract "start one worker attempt" into the concrete mode-specific
+# tool action — an ``Agent`` spawn in sub-agent mode, or a
+# ``TeamCreate``-then-``Agent``/``SendMessage`` sequence in agent-team mode.
+#
+# ── Why an injected Protocol rather than direct tool calls ──
+# ``scripts/dispatch.py`` is pure Python. It CANNOT call the Claude Code harness
+# tools (``Agent`` / ``TeamCreate`` / ``SendMessage``) directly — those exist
+# only inside an active Claude Code agent context. So every tool action is
+# routed through an injected :class:`DispatchTools` boundary: a ``Protocol`` the
+# orchestrator/bridge binds in production and TESTS fake with a recorder. This
+# mirrors kaizen's ``scripts/team_executor.py::TeamTools`` seam (same shape:
+# an injected Protocol of the minimal tool methods, faked in tests, bound to a
+# queue-bridge wrapper in production).
+#
+# ── First-touch rule (mirrors kaizen #59) ──
+# CC team-mode does NOT auto-spawn a teammate on ``SendMessage`` — sending to an
+# un-spawned teammate just appends to a JSON inbox and the recipient never wakes
+# up. So the FIRST send to each teammate MUST be an ``Agent`` spawn
+# (run_in_background) carrying the full briefing as the prompt; SUBSEQUENT sends
+# use ``SendMessage``. We decide which by reading
+# ``<teams_root>/<team_id>/config.json`` and inspecting its ``members[].name``
+# list: a role-id already in ``members`` => already spawned => ``SendMessage``;
+# absent (or a missing/malformed config.json) => first-touch => ``Agent`` spawn.
+#
+# ── SCOPE (deliberate deferral — see #61) ──
+# IN scope here: the mode-branching decision logic, the injected
+# :class:`DispatchTools` Protocol, first-touch detection, the
+# WaveDispatcher-compatible :func:`build_spawn_fn` factory, and the minimal
+# :func:`resolve_dispatch_mode` read-side. This mirrors how #60 shipped
+# WaveDispatcher — a tested seam with the PRODUCTION BINDING DEFERRED.
+#
+# OUT of scope here (a separate follow-up issue owns these — NOT an accidental
+# omission):
+#   * the production queue-bridge transport (a ``bridge_requests`` table, a new
+#     DB migration, an orchestrator polling daemon/skill that turns enqueued
+#     requests into real ``Agent``/``TeamCreate``/``SendMessage`` calls) — the
+#     analog of kaizen's ``QueueBridgeWrapper``;
+#   * the ``poll_fn`` / terminal-reply-envelope read implementation (the read
+#     half of the WaveDispatcher seam — owned by the reply-collection follow-up);
+#   * any LIVE WaveDispatcher production construction — every instantiation today
+#     is in tests, exactly as #60 left it.
+# The authoritative /atelier:run dispatch-mode SELECTION is owned by sibling
+# #62; :func:`resolve_dispatch_mode` here is a tiny env-var stopgap, NOT that UI.
+
+
+#: The two canonical dispatch-mode string values. ``"subagent"`` =>
+#: fire-and-forget ``Agent`` spawns (one process per worker attempt, no team).
+#: ``"agent-team"`` => a single ``TeamCreate`` per cycle, then per-task
+#: ``Agent``-spawn-on-first-touch / ``SendMessage``-thereafter. We accept the
+#: issue's ``"agent-team"`` spelling as canonical (hyphenated, matching the
+#: issue title) and reject every other value fail-loud.
+DISPATCH_MODE_SUBAGENT = "subagent"
+DISPATCH_MODE_AGENT_TEAM = "agent-team"
+VALID_DISPATCH_MODES: frozenset[str] = frozenset({DISPATCH_MODE_SUBAGENT, DISPATCH_MODE_AGENT_TEAM})
+
+#: The task-dict key carrying the worker's primary id. Mirrors
+#: ``pm_dispatch._task_id`` (which reads ``task["id"]``); pinned as a constant
+#: so the two modules cannot drift on the key name.
+_DISPATCH_TASK_ID_KEY = "id"
+
+#: Env var the minimal read-side consults. STOPGAP — sibling #62 owns the
+#: authoritative /atelier:run mode selection; until it lands this lets an
+#: operator force a mode for smoke/integration without a code edit.
+DISPATCH_MODE_ENV_VAR = "ATELIER_DISPATCH_MODE"
+
+#: Default ``~/.claude/teams`` root where CC writes each team's
+#: ``<team_id>/config.json``. Injectable on every function below so tests pass a
+#: ``tmp_path`` rather than monkeypatching ``$HOME``.
+DEFAULT_TEAMS_ROOT = Path.home() / ".claude" / "teams"
+
+
+class DispatchTools(Protocol):
+    """The injected tool boundary mode-specific dispatch routes through.
+
+    ``scripts/dispatch.py`` is pure Python and cannot call the Claude Code
+    harness tools directly — so every tool action goes through this Protocol.
+    PRODUCTION later binds a wrapper that performs the real
+    ``Agent``/``TeamCreate``/``SendMessage`` calls (via the deferred
+    queue-bridge transport — see the section docstring); TESTS fake it with a
+    call-recorder. This mirrors kaizen's
+    :class:`scripts.team_executor.TeamTools` seam.
+
+    Every method is synchronous from the dispatcher's point of view: spawns are
+    fire-and-forget (``run_in_background`` semantics), and the worker's terminal
+    reply is read back through the WaveDispatcher's SEPARATE ``poll_fn`` seam,
+    never as a return value here. (That is why none of these methods return a
+    response string — unlike kaizen's ``send_message``, which is request/reply.
+    Here the reply path is the envelope-poll, not the tool return.)
+    """
+
+    def create_team(self, name: str, members: list[str]) -> str:
+        """``TeamCreate`` — create a named team. Returns the ``team_id`` used to
+        route subsequent spawns/sends. Called EXACTLY ONCE per cycle (see
+        :func:`build_spawn_fn`)."""
+        ...
+
+    def spawn_teammate(self, team_id: str, name: str, prompt: str) -> None:
+        """First-touch ``Agent`` spawn of teammate ``name`` INTO ``team_id``,
+        run-in-background, fire-and-forget, with ``prompt`` as the full briefing.
+        Required because CC does NOT auto-spawn on ``SendMessage`` (kaizen #59)."""
+        ...
+
+    def send_message(self, team_id: str, to: str, message: str) -> None:
+        """``SendMessage`` to an ALREADY-spawned teammate ``to`` in ``team_id``.
+        Only valid once the teammate appears in the team's ``members[].name``
+        (i.e. a prior :meth:`spawn_teammate` materialised it)."""
+        ...
+
+    def spawn_subagent(self, task_id: Any, attempt: int, prompt: str) -> None:
+        """Sub-agent mode: a fire-and-forget ``Agent`` (run-in-background) for
+        ONE worker attempt. NOTHING team-related — no team, no membership, no
+        first-touch. ``prompt`` is the full briefing."""
+        ...
+
+
+class UnknownDispatchModeError(DispatchError):
+    """Raised when a dispatch mode is not one of :data:`VALID_DISPATCH_MODES`.
+
+    A :class:`DispatchError` subclass (operator-facing fail-loud), mirroring
+    how ``pm_dispatch.NullParallelGroupError`` subclasses it — a bad mode is a
+    configuration error to fix at source, not a worker outcome to absorb.
+    """
+
+    def __init__(self, mode: Any) -> None:
+        self.mode = mode
+        super().__init__(
+            f"unknown dispatch mode {mode!r}; expected one of "
+            f"{sorted(VALID_DISPATCH_MODES)}. (Mode selection is owned by "
+            "atelier#62; ATELIER_DISPATCH_MODE is the #61 stopgap.)"
+        )
+
+
+def resolve_dispatch_mode(env: Mapping[str, str] = os.environ) -> str:
+    """Resolve the dispatch mode from ``env`` (default :data:`os.environ`).
+
+    Reads :data:`DISPATCH_MODE_ENV_VAR` (``ATELIER_DISPATCH_MODE``); defaults to
+    :data:`DISPATCH_MODE_SUBAGENT` when unset/blank. Raises
+    :class:`UnknownDispatchModeError` on any non-canonical value so a typo fails
+    loud rather than silently selecting the default.
+
+    STOPGAP — sibling atelier#62 owns the authoritative /atelier:run mode
+    selection. This is intentionally tiny: NO mode-selection UI, NO precedence
+    logic beyond "env var or default". Do not grow it; grow #62.
+    """
+    raw = (env.get(DISPATCH_MODE_ENV_VAR) or "").strip()
+    if not raw:
+        return DISPATCH_MODE_SUBAGENT
+    if raw not in VALID_DISPATCH_MODES:
+        raise UnknownDispatchModeError(raw)
+    return raw
+
+
+def _team_member_names(team_id: str, teams_root: Path | str = DEFAULT_TEAMS_ROOT) -> set[str]:
+    """Return the set of ``members[].name`` from ``<teams_root>/<team_id>/config.json``.
+
+    First-touch detection (kaizen #59) hinges on this: a teammate whose role-id
+    is in this set has already been spawned (=> ``SendMessage``); one that is
+    absent has not (=> first-touch ``Agent`` spawn).
+
+    Graceful by contract — a MISSING config.json (CC has not written it yet, or
+    the team has no members) is treated as "no members yet" (empty set =>
+    first-touch), NOT an error. Malformed JSON, a non-dict root, a non-list
+    ``members``, or a member entry without a string ``name`` are all tolerated
+    the same way: skip the bad entry / return what is parseable. We never raise
+    here — a read error must not crash a dispatch; the worst case is a redundant
+    re-spawn, which is strictly safer than a never-delivered ``SendMessage`` to
+    an un-spawned teammate.
+    """
+    cfg_path = Path(teams_root) / team_id / "config.json"
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        return set()
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return set()
+    if not isinstance(data, Mapping):
+        return set()
+    members = data.get("members")
+    if not isinstance(members, list):
+        return set()
+    names: set[str] = set()
+    for member in members:
+        if isinstance(member, Mapping):
+            name = member.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+    return names
+
+
+def dispatch_task(
+    mode: str,
+    *,
+    tools: DispatchTools,
+    task: Mapping[str, Any],
+    attempt: int,
+    briefing: str,
+    team_id: str | None = None,
+    teammate_name: str | None = None,
+    teams_root: Path | str = DEFAULT_TEAMS_ROOT,
+) -> None:
+    """Dispatch ONE worker attempt, branching on ``mode`` internally.
+
+    This is the single mode-branching entry point (#61 acceptance criterion 1):
+    the SAME mode-agnostic ``briefing`` text feeds either path — the decision is
+    purely about WHICH TOOL CALL to make, never about the prompt content (see
+    :func:`compose_briefing`, which stays mode-agnostic).
+
+    * ``mode == "subagent"`` — ``tools.spawn_subagent(task_id, attempt,
+      briefing)``. Fire-and-forget ``Agent`` (run-in-background). Nothing
+      team-related; ``team_id`` / ``teammate_name`` are ignored.
+    * ``mode == "agent-team"`` — first-touch detected by reading
+      ``<teams_root>/<team_id>/config.json`` members[].name (missing file =>
+      first-touch):
+        - first-touch     => ``tools.spawn_teammate(team_id, teammate_name,
+          briefing)`` (an ``Agent`` spawn — NOT a naked ``SendMessage``, which
+          CC would silently drop into an inbox; kaizen #59);
+        - already spawned => ``tools.send_message(team_id, to=teammate_name,
+          message=briefing)``.
+      Requires both ``team_id`` and ``teammate_name``.
+    * any other ``mode`` => :class:`UnknownDispatchModeError`.
+
+    Note the asymmetry vs. ``compose_briefing``: this function does NOT build
+    the briefing — the caller (or :func:`build_spawn_fn`) passes it pre-rendered
+    so the mode-agnostic composer and the mode-specific dispatcher stay cleanly
+    separated.
+    """
+    if mode == DISPATCH_MODE_SUBAGENT:
+        tools.spawn_subagent(task[_DISPATCH_TASK_ID_KEY], attempt, briefing)
+        return
+    if mode == DISPATCH_MODE_AGENT_TEAM:
+        if team_id is None or teammate_name is None:
+            raise DispatchError(
+                "agent-team dispatch requires both team_id and teammate_name; "
+                f"got team_id={team_id!r}, teammate_name={teammate_name!r}"
+            )
+        already_spawned = teammate_name in _team_member_names(team_id, teams_root)
+        if already_spawned:
+            tools.send_message(team_id, to=teammate_name, message=briefing)
+        else:
+            # First-touch: MUST be an Agent spawn, never a naked SendMessage
+            # (CC would drop it into an inbox the un-spawned teammate never
+            # reads — kaizen #59).
+            tools.spawn_teammate(team_id, teammate_name, briefing)
+        return
+    raise UnknownDispatchModeError(mode)
+
+
+def build_spawn_fn(
+    mode: str,
+    *,
+    tools: DispatchTools,
+    briefing_for: Callable[[Mapping[str, Any], int], str],
+    members: list[str] | None = None,
+    team_name: str | None = None,
+    teammate_name_for: Callable[[Mapping[str, Any]], str] | None = None,
+    teams_root: Path | str = DEFAULT_TEAMS_ROOT,
+) -> Callable[[Mapping[str, Any], int], None]:
+    """Build a WaveDispatcher-compatible ``spawn_fn(task, attempt) -> None``.
+
+    The returned callable matches ``pm_dispatch.WaveDispatcher``'s ``spawn_fn``
+    seam exactly, so a later production-binding issue can drop it straight in —
+    WITHOUT wiring a live WaveDispatcher here (that construction stays deferred,
+    per #60's precedent and this module's SCOPE note).
+
+    ``briefing_for(task, attempt) -> str`` is the briefing source: production
+    passes a ``compose_briefing`` wrapper (keeping the composer mode-agnostic);
+    tests pass a trivial stub. Each spawn re-renders via this callable so an
+    attempt-specific briefing is possible.
+
+    For ``mode == "agent-team"`` the factory enforces **TeamCreate-once**: it
+    calls ``tools.create_team(team_name, members)`` LAZILY on the FIRST spawn
+    and captures the returned ``team_id`` in the closure; every subsequent spawn
+    reuses that id (so ``create_team`` fires exactly once per cycle regardless of
+    how many tasks/attempts the wave engine dispatches). ``team_name`` and
+    ``members`` are required for agent-team mode. ``teammate_name_for(task) ->
+    str`` maps a task to its teammate role-id (defaults to ``str(task["id"])``).
+
+    For ``mode == "subagent"`` no team is created and ``team_name`` / ``members``
+    are ignored.
+
+    Raises :class:`UnknownDispatchModeError` immediately on an invalid mode (so
+    a misconfiguration fails at factory-build time, not on the first dispatch).
+    """
+    if mode not in VALID_DISPATCH_MODES:
+        raise UnknownDispatchModeError(mode)
+
+    if mode == DISPATCH_MODE_AGENT_TEAM and team_name is None:
+        raise DispatchError(
+            "agent-team mode requires team_name to build the spawn_fn "
+            "(TeamCreate is called once per cycle with it)."
+        )
+
+    name_for = teammate_name_for or (lambda task: str(task[_DISPATCH_TASK_ID_KEY]))
+
+    # Mutable cell capturing the once-per-cycle team_id. A list is the minimal
+    # closure-mutable container; ``team_id_cell[0] is None`` is the "not yet
+    # created" sentinel that gates the single create_team call.
+    team_id_cell: list[str | None] = [None]
+
+    def spawn_fn(task: Mapping[str, Any], attempt: int) -> None:
+        if mode == DISPATCH_MODE_SUBAGENT:
+            dispatch_task(
+                DISPATCH_MODE_SUBAGENT,
+                tools=tools,
+                task=task,
+                attempt=attempt,
+                briefing=briefing_for(task, attempt),
+            )
+            return
+        # agent-team — create the team exactly once, lazily, then reuse the id.
+        if team_id_cell[0] is None:
+            team_id_cell[0] = tools.create_team(team_name, list(members or []))
+        dispatch_task(
+            DISPATCH_MODE_AGENT_TEAM,
+            tools=tools,
+            task=task,
+            attempt=attempt,
+            briefing=briefing_for(task, attempt),
+            team_id=team_id_cell[0],
+            teammate_name=name_for(task),
+            teams_root=teams_root,
+        )
+
+    return spawn_fn
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────

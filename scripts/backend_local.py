@@ -37,6 +37,15 @@ from typing import Any
 # the facade validates kwargs before dispatch; this module re-validates so a
 # caller who bypasses the facade by importing `backend_local` directly still
 # gets the same surface contract.
+#
+# The PM dispatch-state columns (attempts / last_attempt_at / abandon_category
+# / abandoned_ack_at — migration 006 / atelier#60) are deliberately NOT in this
+# set: like status / claimed_at / completed_at they are state-machine managed
+# (attempts is increment-only; the rest are lifecycle stamps) and are written
+# only via the dedicated mutators below (`increment_attempt`,
+# `stamp_last_attempt`, `set_abandoned`, `set_abandoned_ack`), never via
+# free-form `update_task`. Keeping them out preserves this set's parity with
+# `backend._UPDATE_TASK_ALLOWED_COLUMNS`.
 _UPDATE_TASK_ALLOWED_COLUMNS: frozenset[str] = frozenset(
     {"title", "description", "priority", "notes", "assigned_to", "parallel_group"}
 )
@@ -818,6 +827,118 @@ def _raise_task_missing(task_id: int) -> dict:
     """Helper — collapses the `if row is None: raise` ladder for the
     no-change-payload short-circuit in `update_task`."""
     raise ValueError(f"task_id={task_id} not found")
+
+
+# ── PM dispatch-state mutators (atelier#60 / migration 006) ──────────────────
+#
+# The wave-5 PM dispatch engine needs durable per-task dispatch state. These
+# columns (attempts / last_attempt_at / abandon_category / abandoned_ack_at)
+# are STATE-MACHINE managed — like status / claimed_at / completed_at they are
+# deliberately NOT in `_UPDATE_TASK_ALLOWED_COLUMNS` (no free-form generic
+# write): `attempts` is increment-only, the others are lifecycle stamps owned
+# by the wave loop. Each mutator below is per-column STATIC SQL (mirroring
+# `update_task_status`) so the wave loop never hand-writes SQL and the column
+# identity always comes from this file, never from a kwarg.
+
+
+def increment_attempt(*, task_id: int) -> dict:
+    """Atomically bump `tasks.attempts` by one (the §5.2 5-attempt budget).
+
+    A wall-clock soft-kill counts as an attempt, so the wave loop calls this
+    once per dispatch (and once on soft-kill). `attempts = attempts + 1` is a
+    single static UPDATE — no read-modify-write race even under WAL
+    concurrency. Returns the updated row; raises ValueError if absent.
+    """
+    now = _now()
+    c = _conn()
+    try:
+        c.execute(
+            "UPDATE tasks SET attempts = attempts + 1, updated_at = ? WHERE id = ?",
+            (now, task_id),
+        )
+        c.commit()
+        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    finally:
+        c.close()
+    if row is None:
+        raise ValueError(f"task_id={task_id} not found")
+    return dict(row)
+
+
+def stamp_last_attempt(*, task_id: int) -> dict:
+    """Stamp `tasks.last_attempt_at` with the current UTC time.
+
+    Pairs with the per-attempt 30-min wall-clock cap so the scheduler can
+    compute stall age (now - last_attempt_at) without a side table. Returns
+    the updated row; raises ValueError if absent.
+    """
+    now = _now()
+    c = _conn()
+    try:
+        c.execute(
+            "UPDATE tasks SET last_attempt_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, task_id),
+        )
+        c.commit()
+        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    finally:
+        c.close()
+    if row is None:
+        raise ValueError(f"task_id={task_id} not found")
+    return dict(row)
+
+
+def set_abandoned(*, task_id: int, category: str) -> dict:
+    """Mark a task abandoned: status -> 'abandoned', record the abandon
+    category, and stamp a terminal `completed_at` (COALESCE so the first
+    terminal transition wins).
+
+    `category` is the parsed TM-006 abandon-grammar token; it is validated
+    upstream by `scripts/dispatch.py` `validate_envelope` against the abandon
+    grammar regex, so no CHECK is enforced here (matching 004's app-layer
+    posture). An abandoned task is wave-terminal immediately — the optional
+    `abandoned_ack_at` (see `set_abandoned_ack`) is audit-only and does not
+    gate the barrier. Returns the updated row; raises ValueError if absent.
+    """
+    now = _now()
+    c = _conn()
+    try:
+        c.execute(
+            "UPDATE tasks SET status = 'abandoned', abandon_category = ?, "
+            "completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE id = ?",
+            (category, now, now, task_id),
+        )
+        c.commit()
+        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    finally:
+        c.close()
+    if row is None:
+        raise ValueError(f"task_id={task_id} not found")
+    return dict(row)
+
+
+def set_abandoned_ack(*, task_id: int) -> dict:
+    """Stamp `tasks.abandoned_ack_at` with the current UTC time (PM/human
+    acknowledgement of an abandoned task).
+
+    AUDIT ONLY: this does NOT change `status` and does NOT gate wave dispatch
+    — the task was already wave-terminal when `set_abandoned` ran. Returns the
+    updated row; raises ValueError if absent.
+    """
+    now = _now()
+    c = _conn()
+    try:
+        c.execute(
+            "UPDATE tasks SET abandoned_ack_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, task_id),
+        )
+        c.commit()
+        row = c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    finally:
+        c.close()
+    if row is None:
+        raise ValueError(f"task_id={task_id} not found")
+    return dict(row)
 
 
 def delete_task(*, task_id: int) -> bool:

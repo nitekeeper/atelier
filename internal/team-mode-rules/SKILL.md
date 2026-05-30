@@ -1,6 +1,6 @@
 ---
 schema_version: 1
-version: 1.1
+version: 1.2
 description: Team-mode hard rules — atelier multi-party channel contract. Read by `scripts/dispatch.py` and prepended verbatim to every worker briefing.
 ---
 
@@ -36,6 +36,7 @@ You are a worker (or team-lead) operating inside an atelier team-mode run. This 
 |---------|------------|--------------------------------------------------------------------------|
 | 1.0     | 2026-05-25 | Initial release. Eight TM-NNN MUSTs, reply envelope, abandon grammar, token budgets, heartbeat clause. |
 | 1.1     | 2026-05-25 | Removed token budget caps (inaugural briefing + per-message payload). Rationale: token usage is task-dependent and not meaningfully cappable; heartbeat clause remains as separate liveness mechanism. Per-message BYTE cap (8192 B) stays in schema + bridge_send. |
+| 1.2     | 2026-05-29 | Added `attempt` to the reply-envelope schema (table + JSON example). PM's wave-dispatch validator (atelier#60, `scripts/pm_dispatch_envelope.py` check 3) cross-checks it against the dispatched attempt for anti-spoofing; workers MUST emit it. Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged). |
 
 A `schema_version` bump REQUIRES a CHANGELOG row in the same commit. Dispatch refuses to spawn teammates whose runtime-reported version mismatches the migration's `PRAGMA user_version`.
 
@@ -98,6 +99,7 @@ Every worker's final message per attempt is a single JSON envelope with this sch
 {
   "type": "task_result",
   "task_id": "<tasks.id you were dispatched against>",
+  "attempt": "<integer; the dispatch attempt number this reply answers>",
   "status": "done" | "blocked" | "abandoned" | "needs-input",
   "artifacts": [
     {"path": "<repo-relative path>", "sha": "<git-blob or content sha256>"}
@@ -111,6 +113,7 @@ Every worker's final message per attempt is a single JSON envelope with this sch
 |---------------|-------------------------------------------------------------------------------|
 | `type`        | Discriminator. MUST equal `"task_result"`.                                    |
 | `task_id`     | The `tasks.id` you were dispatched against. Bare integer or stringified.      |
+| `attempt`     | Integer; the dispatch attempt number this reply answers (PM cross-checks it against the dispatched attempt for anti-spoofing). |
 | `status`      | One of the four closure tokens (TM-006). No other value is accepted.          |
 | `artifacts`   | List of files you wrote or modified. `path` is repo-relative; `sha` lets reviewers verify you wrote what you claim. Empty array allowed only for `blocked`/`needs-input`. |
 | `notes_md`    | Short markdown narrative. ≤ 2k chars. Goes to the durable backend output doc. |

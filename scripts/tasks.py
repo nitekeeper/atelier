@@ -258,6 +258,70 @@ def complete_task(db_path: str, task_id: int) -> dict:
     return update_task_status(db_path, task_id, status="complete")
 
 
+# ── PM dispatch-state mutators (atelier#60 / migration 006) ──────────────────
+#
+# Thin wrappers the wave-5 dispatch loop calls so it never hand-writes SQL.
+# These mutate the state-machine columns added by migration 006
+# (attempts / last_attempt_at / abandon_category / abandoned_ack_at). The
+# wave-scheduler ENGINE stays mode-agnostic (atelier#61 owns mode dispatch);
+# these helpers carry the mode routing.
+#
+# Local mode is fully implemented via the dedicated `backend_local` mutators.
+# Memex-mode parity is a documented followup — mirroring the existing gap
+# noted at the top of this module (`backend_memex.update_task_status` does not
+# yet set claimed_at/completed_at). The columns live in `migrations/shared/`
+# so they exist in both backends' SQLite; only the Memex-mode write path is
+# pending. Until then these raise a clear `NotImplementedError` in Memex mode
+# rather than silently writing to the wrong store via `backend_local`.
+
+
+def _dispatch_state_memex_guard(fn_name: str) -> None:
+    if mode_detector.detect_mode() == "memex":
+        raise NotImplementedError(
+            f"tasks.{fn_name}: PM dispatch-state columns (atelier#60 / migration "
+            "006) are Local-mode only for now; Memex-mode parity is a followup "
+            "(mirrors the backend_memex.update_task_status gap)."
+        )
+
+
+def increment_attempt(db_path: str, task_id: int) -> dict:
+    """Bump `tasks.attempts` by one (the 5-attempt budget). A wall-clock
+    soft-kill counts as an attempt, so the wave loop calls this once per
+    dispatch attempt."""
+    _dispatch_state_memex_guard("increment_attempt")
+    from scripts import backend_local
+
+    return backend_local.increment_attempt(task_id=task_id)
+
+
+def stamp_last_attempt(db_path: str, task_id: int) -> dict:
+    """Stamp `tasks.last_attempt_at` with the current UTC time so the
+    scheduler can compute stall age against the 30-min wall-clock cap."""
+    _dispatch_state_memex_guard("stamp_last_attempt")
+    from scripts import backend_local
+
+    return backend_local.stamp_last_attempt(task_id=task_id)
+
+
+def set_abandoned(db_path: str, task_id: int, category: str) -> dict:
+    """Mark a task abandoned (status -> 'abandoned' + abandon_category).
+    `category` is the parsed TM-006 abandon-grammar token; the task becomes
+    wave-terminal immediately (the ack stamp is audit-only)."""
+    _dispatch_state_memex_guard("set_abandoned")
+    from scripts import backend_local
+
+    return backend_local.set_abandoned(task_id=task_id, category=category)
+
+
+def set_abandoned_ack(db_path: str, task_id: int) -> dict:
+    """Stamp `tasks.abandoned_ack_at` (PM/human ack of an abandoned task).
+    Audit only — does not change status or gate wave dispatch."""
+    _dispatch_state_memex_guard("set_abandoned_ack")
+    from scripts import backend_local
+
+    return backend_local.set_abandoned_ack(task_id=task_id)
+
+
 # ── Reads ──────────────────────────────────────────────────────────────────
 
 

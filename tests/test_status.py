@@ -116,15 +116,21 @@ def _seed_task(
     attempts=0,
     last_attempt_at=None,
     created_at="2026-05-29T00:00:00Z",
+    team_pk=None,
 ):
-    """Insert one task row with explicit dispatch-state columns (006)."""
+    """Insert one task row with explicit dispatch-state columns (006).
+
+    ``team_pk`` (010) is the run/cycle correlation id; NULL by default to mirror
+    a legacy/pre-010 row. The per-cycle status scoping filters on this column
+    when present.
+    """
     conn = sqlite3.connect(workspace["db"])
     conn.execute("PRAGMA foreign_keys=ON")
     cur = conn.execute(
         "INSERT INTO tasks (project_id, title, description, status, "
-        "parallel_group, attempts, last_attempt_at, created_by, "
+        "parallel_group, attempts, last_attempt_at, team_pk, created_by, "
         "created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             workspace["project_id"],
             title,
@@ -133,6 +139,7 @@ def _seed_task(
             parallel_group,
             attempts,
             last_attempt_at,
+            team_pk,
             "atelier-pm-1",
             created_at,
             created_at,
@@ -668,6 +675,128 @@ def test_missing_team_renders_without_crashing(workspace):
     text = render_status(workspace["db"], team_id="ghost-team", team_pk="ghost-pk")
     assert "(no tasks for this team)" in text
     assert "(no team members on the roster)" in text
+
+
+# ── (2b) per-cycle team_pk scoping (010 / atelier#90 part 2) ─────────────────
+
+
+def test_status_scopes_by_team_pk_not_project(workspace):
+    """When ONE project hosts TWO concurrent cycles (distinct team_pk values)
+    with DISTINCT wave shapes, ``render_status(team_pk='run-A')`` reports ONLY
+    run-A's active wave + in-flight count — NOT the project-wide conflated sum.
+
+    Pre-010 (no team_pk column / ``_tasks_for_team`` ignores team_pk) this fails:
+    the snapshot scopes by project, so run-A's render would surface run-B's wave
+    and count BOTH cycles' in-flight workers.
+
+    NON-VACUITY (this is the load-bearing detail): run-A's active wave (wave 5)
+    is HIGHER than run-B's active wave (wave 1). The active-wave number is the
+    LOWEST non-terminal wave, so the PROJECT-WIDE active wave (if the team_pk
+    predicate were dropped) would be wave 1 — run-B's — NOT run-A's wave 5. So
+    a predicate that silently ignored team_pk would render run-A's snapshot as
+    ``active wave: 1`` with run-B's ``in-flight workers: 2``, both DIFFERENT
+    from the scoped run-A answer (wave 5, 1 in-flight). The run-A assertions
+    below therefore genuinely bind the team_pk scoping rather than coinciding
+    with the project-wide render.
+    """
+    fresh = _iso(datetime.now(timezone.utc) - timedelta(seconds=30))
+
+    # run-A: wave 0 fully terminal, wave 5 active with EXACTLY 1 in-flight. Note
+    # wave 5 is ABOVE run-B's active wave (1), so the project-wide active wave
+    # (lowest non-terminal across BOTH cycles) is run-B's wave 1 — NOT wave 5.
+    _seed_task(
+        workspace, title="A-w0", parallel_group=0, status="complete", attempts=1, team_pk="run-A"
+    )
+    _seed_task(
+        workspace,
+        title="A-w5-live",
+        parallel_group=5,
+        status="in_progress",
+        attempts=1,
+        last_attempt_at=fresh,
+        team_pk="run-A",
+    )
+
+    # run-B: a DISTINCT, LOWER wave shape — active wave is wave 1 with 2 in-flight.
+    _seed_task(
+        workspace,
+        title="B-w1-live-1",
+        parallel_group=1,
+        status="in_progress",
+        attempts=1,
+        last_attempt_at=fresh,
+        team_pk="run-B",
+    )
+    _seed_task(
+        workspace,
+        title="B-w1-live-2",
+        parallel_group=1,
+        status="in_progress",
+        attempts=2,
+        last_attempt_at=fresh,
+        team_pk="run-B",
+    )
+
+    _seed_team_and_roster(workspace, roles=[_LEAD_ROLE])
+
+    text_a = render_status(workspace["db"], team_id=_TEAM_ID, team_pk="run-A")
+    # run-A's active wave is wave 5 with exactly 1 in-flight worker.
+    assert "active wave: 5 (1 task(s) in wave)" in text_a
+    assert "in-flight workers: 1" in text_a
+    # Non-vacuous: the project-wide active wave would be run-B's wave 1 (lower)
+    # if team_pk scoping were dropped — it must NOT leak into run-A's snapshot,
+    # nor must run-B's in-flight count of 2.
+    assert "active wave: 1" not in text_a
+    assert "in-flight workers: 2" not in text_a
+    assert "in-flight workers: 3" not in text_a
+    # Header surfaces the cycle scope.
+    assert "scope: cycle (team_pk)" in text_a
+
+    text_b = render_status(workspace["db"], team_id=_TEAM_ID, team_pk="run-B")
+    # run-B's active wave is wave 1 with exactly 2 in-flight workers.
+    assert "active wave: 1 (2 task(s) in wave)" in text_b
+    assert "in-flight workers: 2" in text_b
+    assert "active wave: 5" not in text_b
+
+
+def test_status_falls_back_to_project_scope_for_legacy_null_team_pk(workspace):
+    """A project whose tasks ALL carry team_pk=NULL (legacy / pre-010 /
+    single-cycle that never stamped) renders project-wide via the COUNT-probe
+    fallback — identical numbers to the pre-fix project-scope path.
+
+    Guards against the 'WHERE team_pk=? returns ZERO rows for legacy projects'
+    regression: an unconditional team_pk predicate would render an empty
+    snapshot for every pre-010 project.
+    """
+    fresh = _iso(datetime.now(timezone.utc) - timedelta(seconds=30))
+    # All tasks NULL team_pk; active wave is wave 1 with 2 in-flight.
+    _seed_task(workspace, title="w0", parallel_group=0, status="complete", attempts=1)
+    _seed_task(
+        workspace,
+        title="w1a",
+        parallel_group=1,
+        status="in_progress",
+        attempts=1,
+        last_attempt_at=fresh,
+    )
+    _seed_task(
+        workspace,
+        title="w1b",
+        parallel_group=1,
+        status="in_progress",
+        attempts=2,
+        last_attempt_at=fresh,
+    )
+    _seed_team_and_roster(workspace, roles=[_LEAD_ROLE])
+
+    # An arbitrary team_pk that matches ZERO rows must NOT empty the snapshot —
+    # the COUNT-probe sees 0 team_pk matches and falls back to project scope.
+    text = render_status(workspace["db"], team_id=_TEAM_ID, team_pk="run-legacy")
+    assert "active wave: 1 (2 task(s) in wave)" in text
+    assert "in-flight workers: 2" in text
+    # The fallback path must announce project-wide scope, not cycle scope.
+    assert "scope: project (team_pk unpopulated)" in text
+    assert "scope: cycle (team_pk)" not in text
 
 
 # ── CLI entrypoint ──────────────────────────────────────────────────────────

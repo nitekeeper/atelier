@@ -59,12 +59,18 @@ crashed prior run are FILESYSTEM-ONLY cleanup — the operator removes them with
 ``rm -rf ~/.claude/teams/<team_id>/`` (the harness tool cannot reach another
 session's dir).
 
-OVER-REPORTING IS SAFE (tracked follow-up). Until atelier's NORMAL happy-path
-teardown also enqueues a ``team_delete`` row (or sets ``teams.status='closed'``),
-a cleanly-completed team may be over-reported as an orphan. That is SAFE: the
-enqueued ``TeamDelete`` is idempotent — deleting an already-gone team is a
-no-op. Filter (ii) above is precisely the hedge that shrinks this window as the
-normal teardown path matures.
+OVER-REPORTING IS SAFE (window now closed by the normal teardown path).
+atelier#90 part-1 landed the NORMAL happy-path teardown record:
+``scripts/team_teardown.record_team_teardown`` (driven by
+internal/dev-finish/SKILL.md in agent-team mode) now enqueues a ``team_delete``
+row AND sets ``teams.status='closed'`` on clean completion — so a
+cleanly-completed team is subtracted by BOTH filter (i) (once dev-finish
+services the pending row to ``status='ready'``) AND filter (ii) (immediately, via
+the ``teams.status='closed'`` hedge). Any residual over-report (e.g. a crash
+between completion and the dev-finish teardown call) remains SAFE: the enqueued
+``TeamDelete`` is idempotent — deleting an already-gone team is a no-op. Filter
+(ii) above is precisely the hedge that closes the window the instant the normal
+teardown sets the status, even before its pending ``team_delete`` row is flipped.
 
 MODE — best-effort, never throws
 --------------------------------

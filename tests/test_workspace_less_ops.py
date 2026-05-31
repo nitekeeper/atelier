@@ -5,9 +5,11 @@ Covers:
 - Migration 005: `project_documents.workspace_id` and `project_id` are
   nullable; existing FTS5 virtual table + sync triggers survive the
   table rebuild.
-- `backend.write_document` accepts None for both (Local mode); raises
-  NotImplementedError in Memex mode (§6.7 key construction needs
-  `_no-workspace_` placeholder — out of scope here).
+- `backend.write_document` accepts None for both: in Local mode the row
+  lands with NULL workspace_id/project_id; in Memex mode the workspace-less
+  write now lands via the §6.7 `_no-workspace_` key (atelier#90 part-3) —
+  the former NotImplementedError gate is gone (see
+  `test_facade_write_document_memex_accepts_workspaceless`).
 - `backend.find_project` / `list_projects` raise ValueError on
   `workspace_id=None` — workspace-scoped methods that REQUIRE a
   workspace context per §10.1.
@@ -256,38 +258,48 @@ def test_find_project_error_message_suggests_iteration(workspace_root):
     assert "list_workspaces" in str(excinfo.value)
 
 
-# ── Memex-mode workspace-less write deferral ───────────────────────────────
+# ── Memex-mode workspace-less write (atelier#90 part-3) ────────────────────
 
 
-def test_facade_write_document_memex_rejects_workspaceless(monkeypatch):
-    """In Memex mode, `write_document(workspace_id=None, ...)` MUST raise
-    NotImplementedError with a clear message pointing at the §6.7 key-
-    construction obstacle. The facade gate fires BEFORE any Memex Core
-    call, so no partial write side-effects."""
+def test_facade_write_document_memex_accepts_workspaceless(monkeypatch):
+    """In Memex mode, `write_document(workspace_id=None, project_id=None)`
+    is now SUPPORTED (atelier#90 part-3): the facade reaches the Memex
+    backend write instead of raising NotImplementedError. It folds NO
+    `workspace_id` into adapted_metadata (absence, not None) and threads an
+    explicit `workspace_less` discriminator so the backend takes the §6.7
+    `_no-workspace_` key branch — NOT the singleton fallback."""
     from scripts import mode_detector
 
     # Force the facade to think we're in Memex mode without actually
-    # invoking Memex Core — the gate must fire before any backend hit.
+    # invoking Memex Core — the gate is gone, the write must reach backend.
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
     # Patch _backend_is_memex used by the facade router.
     monkeypatch.setattr(backend, "_backend", lambda: backend_memex)
     monkeypatch.setattr(backend, "_backend_is_memex", lambda be: True)
-    # Also stub the Memex backend write so the test doesn't accidentally
-    # depend on it being callable (the gate should fire first).
     with patch.object(backend_memex, "write_document") as memex_write:
-        with pytest.raises(NotImplementedError, match="workspace_id=None"):
-            backend.write_document(
-                workspace_id=None,
-                project_id=None,
-                domain="log",
-                subdomain="daily",
-                title="Should fail",
-                body="x",
-                metadata={},
-                caller_agent_id="atelier-pm-1",
-            )
-        # Confirm the Memex write was never reached.
-        memex_write.assert_not_called()
+        memex_write.return_value = {"row_id": 1, "index_id": "x"}
+        backend.write_document(
+            workspace_id=None,
+            project_id=None,
+            domain="log",
+            subdomain="daily",
+            title="Workspace-less log",
+            body="x",
+            metadata={},
+            caller_agent_id="atelier-pm-1",
+        )
+        # The Memex write WAS reached (no gate fired).
+        memex_write.assert_called_once()
+        kwargs = memex_write.call_args.kwargs
+        # A genuinely workspace-less write does NOT plant workspace_id in
+        # adapted_metadata (absence-vs-None must survive so the backend
+        # takes the §6.7 no-workspace branch, not the singleton fallback).
+        assert "workspace_id" not in kwargs["metadata"]
+        assert "project_id" not in kwargs["metadata"]
+        # Pin the discriminator itself at the mock boundary: the both-None
+        # call MUST thread workspace_less=True (the project-aware AND-clause
+        # in backend.write_document is True only when BOTH are absent/None).
+        assert kwargs.get("workspace_less") is True
 
 
 def test_facade_write_document_memex_accepts_workspace_with_null_project(monkeypatch):

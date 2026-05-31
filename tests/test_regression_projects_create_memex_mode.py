@@ -97,3 +97,72 @@ def test_create_project_in_memex_mode_does_not_query_local_workspaces(memex_mode
     assert row["name"] == "Reg Bug 1"
     assert written["workspace_id"] == 1
     assert written["slug"] == "reg-bug-1"
+
+
+def test_write_task_in_memex_mode_folds_team_pk_into_metadata(memex_mode):
+    """atelier#90 part 2 — `backend.write_task(..., team_pk='run-A')` in
+    Memex mode must NOT throw.
+
+    `backend_memex.write_task` has a NARROWER signature with NO `team_pk`
+    column (tasks live in the Memex Index, which has no such column), so the
+    facade folds `team_pk` into `adapted_metadata` (exactly like `subdomain`)
+    rather than passing it as an unknown kwarg. Passing it through would raise
+    `TypeError: write_task() got an unexpected keyword argument 'team_pk'`.
+
+    status's per-cycle FILTER is Local-only, but the WRITE path must survive
+    Memex mode — this binds that.
+    """
+    captured: dict = {}
+
+    def fake_memex_write_task(*, metadata=None, **kwargs):
+        # Capture the metadata blob the facade folded team_pk into; echo a
+        # minimal write result so create_task / callers see a row shape.
+        captured["metadata"] = dict(metadata) if metadata else None
+        captured["kwargs"] = kwargs
+        return {"row_id": 7, "index_id": "idx-7"}
+
+    with patch.object(backend_memex, "write_task", side_effect=fake_memex_write_task):
+        # Must NOT raise (no unexpected-kwarg TypeError); team_pk is folded.
+        result = backend.write_task(
+            workspace_id=1,
+            project_id=1,
+            title="cycle-tagged",
+            description="d",
+            subdomain="bug",
+            created_by="atelier-pm-1",
+            team_pk="run-A",
+        )
+
+    assert result["row_id"] == 7
+    # team_pk was folded into the metadata blob, NOT passed as a raw kwarg.
+    assert "team_pk" not in captured["kwargs"], (
+        "team_pk must NOT reach backend_memex.write_task as a kwarg (it has no such parameter)"
+    )
+    assert captured["metadata"] is not None
+    assert captured["metadata"]["team_pk"] == "run-A"
+    # subdomain is folded alongside it (the established adapter pattern).
+    assert captured["metadata"]["subdomain"] == "bug"
+
+
+def test_write_task_in_memex_mode_omits_team_pk_when_none(memex_mode):
+    """Back-compat: when `team_pk` is None the facade must NOT plant a
+    `team_pk: None` key in the Memex metadata blob (mirrors the `subdomain
+    is not None` fold guard) — so a no-team_pk write looks exactly as before."""
+    captured: dict = {}
+
+    def fake_memex_write_task(*, metadata=None, **kwargs):
+        captured["metadata"] = dict(metadata) if metadata else None
+        return {"row_id": 8, "index_id": "idx-8"}
+
+    with patch.object(backend_memex, "write_task", side_effect=fake_memex_write_task):
+        backend.write_task(
+            workspace_id=1,
+            project_id=1,
+            title="untagged",
+            description="d",
+            subdomain=None,
+            created_by="atelier-pm-1",
+        )
+
+    # No subdomain + no team_pk → no adapted_metadata at all (None passed).
+    assert captured["metadata"] is None

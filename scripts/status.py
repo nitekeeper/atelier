@@ -105,27 +105,57 @@ def _project_id_for_team(conn: sqlite3.Connection, team_id: str) -> str | None:
     return None if row is None else row["project_id"]
 
 
-def _tasks_for_team(conn: sqlite3.Connection, team_pk: str, team_id: str) -> list[dict[str, Any]]:
+def _tasks_for_team(
+    conn: sqlite3.Connection, team_pk: str, team_id: str
+) -> tuple[list[dict[str, Any]], bool]:
     """Load the task rows this team's cycle is scheduling.
 
-    ``team_pk`` is the run/cycle correlation id (NOT FK'd anywhere); the tasks
-    table has no team_pk column, so we scope tasks by the team's PROJECT — the
-    durable join the wave scheduler itself uses (``tasks.project_id``). The
-    ``teams.project_id`` column is TEXT while ``tasks.project_id`` is the
-    project rowid; we compare as TEXT via CAST so the bound value matches
-    regardless of which side stored a stringified int. ``team_pk`` is accepted
-    for signature/forward parity (a future per-run tasks scoping) and to keep
-    the public contract stable; today it is unused in the query.
+    ``team_pk`` is the run/cycle correlation id (NOT FK'd anywhere). Since
+    migration 010 the ``tasks`` table carries a ``team_pk`` column, so when a
+    project hosts >1 concurrent cycle (``teams.project_id`` has no UNIQUE
+    constraint) we can scope the snapshot to THIS cycle's tasks instead of
+    conflating the whole project.
+
+    Scoping is COUNT-probe gated so legacy / pre-010 / never-stamped projects
+    still render exactly as before (the fallback is MANDATORY, not optional):
+
+      * First scope to the team's PROJECT — the durable join the wave scheduler
+        itself uses (``tasks.project_id``). ``teams.project_id`` is TEXT while
+        ``tasks.project_id`` is the project rowid, so we compare as TEXT via
+        CAST so the bound value matches regardless of which side stored a
+        stringified int.
+      * Then run a COUNT probe for rows whose ``team_pk`` matches. If >0, add an
+        ``AND team_pk=?`` predicate to scope per-cycle. If 0 (all rows NULL /
+        a never-stamped legacy project / an unknown team_pk), fall back to the
+        project-only WHERE so the snapshot renders exactly as today.
+
+    Returns ``(rows, scoped_by_team_pk)`` so the renderer can surface which
+    scoping applied. All SQL is static + ``?``-bound (bandit B608-clean).
     """
     project_id = _project_id_for_team(conn, team_id)
     if project_id is None:
-        return []
-    rows = conn.execute(
-        "SELECT * FROM tasks WHERE CAST(project_id AS TEXT) = CAST(? AS TEXT) "
-        "ORDER BY parallel_group, created_at, id",
-        (project_id,),
-    ).fetchall()
-    return [dict(r) for r in rows]
+        return [], False
+    # COUNT probe: does THIS cycle's team_pk match any task under the project?
+    probe = conn.execute(
+        "SELECT COUNT(*) FROM tasks "
+        "WHERE CAST(project_id AS TEXT) = CAST(? AS TEXT) AND team_pk = ?",
+        (project_id, team_pk),
+    ).fetchone()
+    scoped = bool(probe[0]) if probe is not None else False
+    if scoped:
+        rows = conn.execute(
+            "SELECT * FROM tasks "
+            "WHERE CAST(project_id AS TEXT) = CAST(? AS TEXT) AND team_pk = ? "
+            "ORDER BY parallel_group, created_at, id",
+            (project_id, team_pk),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE CAST(project_id AS TEXT) = CAST(? AS TEXT) "
+            "ORDER BY parallel_group, created_at, id",
+            (project_id,),
+        ).fetchall()
+    return [dict(r) for r in rows], scoped
 
 
 def _recipients_for_team(conn: sqlite3.Connection, team_id: str) -> list[str]:
@@ -422,7 +452,7 @@ def render_status(db_path: str, *, team_id: str, team_pk: str) -> str:
     conn = _open(db_path)
     try:
         project_id = _project_id_for_team(conn, team_id)
-        tasks = _tasks_for_team(conn, team_pk, team_id)
+        tasks, scoped_by_team_pk = _tasks_for_team(conn, team_pk, team_id)
         recipients = _recipients_for_team(conn, team_id)
     finally:
         conn.close()
@@ -437,12 +467,16 @@ def render_status(db_path: str, *, team_id: str, team_pk: str) -> str:
         "=== atelier run status ===",
         f"team_id: {team_id}",
         f"team_pk: {team_pk}",
-        # The snapshot scopes tasks by PROJECT (the tasks table has no
-        # team/run/cycle column — only project_id). Surfacing project_id makes
-        # the scope explicit: when >1 team/cycle runs in one project, the active
-        # wave + in-flight count cover the WHOLE project's tasks. See
-        # skills/status/SKILL.md "Scope".
+        # Surfacing project_id makes the join explicit: tasks scope by
+        # project_id (the durable wave-scheduler join). The scope line below
+        # then says WHICH cycle's slice rendered.
         f"project_id: {project_id if project_id is not None else '(unresolved)'}",
+        # When tasks carry this cycle's team_pk (migration 010), the snapshot
+        # scopes the active wave + in-flight count to THIS cycle. Otherwise
+        # (legacy / pre-010 / never-stamped project) it falls back to
+        # project-wide, which may conflate other cycles sharing the project.
+        # See skills/status/SKILL.md "Scope".
+        ("scope: cycle (team_pk)" if scoped_by_team_pk else "scope: project (team_pk unpopulated)"),
         "",
     ]
 

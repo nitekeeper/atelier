@@ -396,6 +396,7 @@ def write_task(
     source_ref: str | None = None,
     relations: Sequence[dict] = (),
     parallel_group: int | None = None,
+    team_pk: str | None = None,
 ) -> dict:
     """Persist a row into the v1.1.0 `tasks` table.
 
@@ -416,14 +417,21 @@ def write_task(
     `parallel_group` is an optional operator-meaningful integer tag
     (atelier#34 / migration 004) consumed by the planner+dispatch work
     in atelier#39. NULL by default — back-compat with all pre-#34 callers.
+
+    `team_pk` is an optional run/cycle correlation id (atelier#90 /
+    migration 010) — a free-form TEXT tag (NOT FK'd) that lets
+    `scripts/status.py` scope a snapshot per-cycle when one project hosts
+    >1 concurrent team/cycle. NULL by default — a NULL means
+    'unknown/legacy cycle', which status treats as the project-wide
+    fallback.
     """
     c = _conn()
     try:
         cur = c.execute(
             "INSERT INTO tasks (project_id, title, description, subdomain, "
             "status, priority, notes, created_by, assigned_to, source_ref, "
-            "parallel_group, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)",
+            "parallel_group, team_pk, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 title,
@@ -435,6 +443,7 @@ def write_task(
                 assigned_to,
                 source_ref,
                 parallel_group,
+                team_pk,
                 _now(),
                 _now(),
             ),

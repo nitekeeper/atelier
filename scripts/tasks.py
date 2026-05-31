@@ -90,6 +90,7 @@ def create_task(
     workspace_id: int = 1,
     subdomain: str | None = None,
     parallel_group: int | None = None,
+    team_pk: str | None = None,
 ) -> dict:
     """Create a task. `priority` accepts INT (preferred) or the legacy
     TEXT form ('critical'|'high'|'medium'|'low'); both are coerced to
@@ -106,6 +107,10 @@ def create_task(
     `parallel_group` is an optional operator-meaningful integer tag
     (atelier#34 — reintroduced via migration 004). NULL by default;
     consumed by atelier#39's planner+dispatch wave grouping.
+
+    `team_pk` is an optional run/cycle correlation id (atelier#90 —
+    migration 010). NULL by default; consumed by `scripts/status.py`'s
+    per-cycle scoping when one project hosts >1 concurrent team/cycle.
     """
     result = backend.write_task(
         workspace_id=workspace_id,
@@ -118,6 +123,7 @@ def create_task(
         priority=_coerce_priority(priority),
         notes=notes,
         parallel_group=parallel_group,
+        team_pk=team_pk,
     )
     # backend.write_task returns the full row in Local mode; in Memex mode
     # it returns `{"row_id": ..., "index_id": ...}`. Re-fetch via get_task

@@ -103,7 +103,7 @@ METHOD_KWARGS: dict[str, list[dict]] = {
             "subdomain": None,
             "created_by": "a",
         },
-        # All optionals: assigned_to, priority, notes, relations.
+        # All optionals: assigned_to, priority, notes, relations, team_pk.
         {
             "workspace_id": 1,
             "project_id": 1,
@@ -115,6 +115,7 @@ METHOD_KWARGS: dict[str, list[dict]] = {
             "priority": 5,
             "notes": "n",
             "relations": [{"target_id": 2, "kind": "blocks"}],
+            "team_pk": "run-A",
         },
     ],
     "write_meeting": [

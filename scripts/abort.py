@@ -49,20 +49,27 @@ MODE GATE (mode_detector.detect_mode):
   worktree handling), and the abort-report doc DOES persist durably (AC#2). In
   NON-local — the migration-006 dispatch-state mutators raise
   ``NotImplementedError``, so we WARN that state mutations are Local-mode only,
-  SKIP the DB mutations, ATTEMPT the abort-report write, and return 0 (a clear
-  nonzero only on a genuine error).
+  SKIP the DB mutations, WRITE the abort-report, and return 0.
 
-  ABORT-REPORT DURABILITY IS LOCAL-MODE-ONLY (known, documented limitation).
-  The abort-report is a WORKSPACE-LESS document (``workspace_id=None``,
-  migration 005). The Memex facade ``backend.write_document`` raises
-  ``NotImplementedError`` for ``workspace_id=None`` (the §6.7 ``_no-workspace_``
-  key construction is unimplemented for Memex), so on the non-local path the
-  write CANNOT land — ``_write_report`` logs a WARN and returns None. This is
-  acceptable because team-mode dispatch state (the thing being aborted) is
-  itself Local-mode-only, so a non-local abort has no live team-mode run to tear
-  down; the durable AC#2 invariant is asserted on the Local path. If a
-  workspace-less Memex consumer ever arrives, route the abort-report through a
-  Memex-supported signature here.
+  EXIT CODE: abort ALWAYS exits 0 once a teardown completes — the abort-report
+  is a BEST-EFFORT write (it must never fail the teardown that already
+  succeeded). A failed report write (a genuine Memex outage → a None backend
+  echo) does NOT change the exit code; it is observable ONLY via the stderr
+  ERROR line emitted on that path. A nonzero exit therefore signals an
+  argparse / dispatch failure before the teardown ran, not a missing report.
+
+  ABORT-REPORT DURABILITY NOW HOLDS IN BOTH MODES (atelier#90 part-3). The
+  abort-report is a WORKSPACE-LESS document (``workspace_id=None``,
+  migration 005). The Memex facade ``backend.write_document`` now lands a
+  workspace-less write under the §6.7 ``_no-workspace_`` key (the
+  ``NotImplementedError`` gate is gone), so on the non-local path the report
+  PERSISTS just as it does in Local mode — AC#2 holds cross-mode. Only the
+  REPORT write crosses modes; team-mode dispatch state (teams.status /
+  team_delete enqueue / audit) stays Local-mode-only, so those mutations are
+  still SKIPPED in non-local mode (there is no live team-mode run to tear down
+  outside Local mode). ``_write_report``'s try/except is now a true last-resort
+  guard for a GENUINE Memex outage — a non-persisting report is an ERROR
+  condition, not an accepted limitation.
 
 CLI: ``python3 -m scripts.abort --team-pk PK [--team-id ID] [--hard]
 [--reason TEXT] [--clean-worktree] [--db PATH | --bridge-db PATH]``.
@@ -381,18 +388,23 @@ def _do_abort(
             "team_audit 'aborted' event: SKIPPED (non-local mode).",
             "worktree: untouched (non-local mode).",
         ]
-        # The abort-report is workspace-less; the Memex facade does not yet
-        # support a workspace_id=None write, so this is best-effort in non-local
-        # mode (see the module MODE GATE note). A None return is WARNed inside
-        # _write_report; durable AC#2 persistence is the Local-path invariant.
+        # The abort-report is workspace-less; the Memex facade now lands a
+        # workspace_id=None write under the §6.7 `_no-workspace_` key
+        # (atelier#90 part-3), so AC#2 durability holds in non-local mode too
+        # (see the module MODE GATE note). A None return signals a GENUINE Memex
+        # outage — an ERROR condition that is LOGGED but, because the report is
+        # best-effort, does NOT change the exit code: abort still returns 0 once
+        # the (skipped, non-local) teardown completes. The ERROR is observable
+        # ONLY via the stderr line below — see the module EXIT CODE note.
         report = _write_report(
             team_id=team_id, team_pk=team_pk, mode=mode, reason=reason, torn_down=torn_down
         )
         if report is None:
             print(
-                "abort: WARN abort-report did not persist in non-local mode "
-                "(workspace-less doc write is Local-mode-only; see module docs). "
-                "Run abort in Local mode for a durable postmortem.",
+                "abort: ERROR abort-report failed to persist in non-local mode "
+                "(workspace-less Memex write should land under the §6.7 "
+                "`_no-workspace_` key — a None return indicates a genuine Memex "
+                "outage). The teardown completed but the postmortem is missing.",
                 file=sys.stderr,
             )
         return 0

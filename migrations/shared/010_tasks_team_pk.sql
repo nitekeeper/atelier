@@ -1,0 +1,43 @@
+-- migrations/shared/010_tasks_team_pk.sql
+-- Add tasks.team_pk run/cycle correlation linkage (atelier#90 part 2).
+--
+-- Lets scripts/status.py scope active-wave + in-flight counts per-cycle
+-- instead of project-wide, when a single project hosts >1 concurrent
+-- team/cycle (teams.project_id has no UNIQUE constraint).
+--
+-- Style mirrors 004/006 (NOT the 009 table-rebuild):
+--   * Single additive ALTER; idempotent via the migration registry
+--     (`migrations.filename` UNIQUE gate in scripts/migrate.py).
+--   * TEXT to match the correlation-id type used everywhere else
+--     (bridge_requests.team_pk is TEXT; teams.team_id/project_id are TEXT).
+--   * NULLABLE, no DEFAULT: SQLite cannot ADD a NOT NULL column to a
+--     populated table without a constant default. NULL IS the correct
+--     backfill — it means 'unknown/legacy cycle', which the status filter
+--     treats as the project-wide fallback (a COUNT-probe gates the
+--     team_pk predicate).
+--   * NO FK: team_pk is a free correlation id, NOT a row in any table
+--     (bridge_requests.team_pk is also un-FK'd per 008/009).
+--   * NO user_version bump: additive tasks columns are orthogonal to the
+--     bridge wire pin (matches 004/005/006/007 'left at 1' posture).
+--   * NO CHECK: correlation data is validated in the application layer.
+--   * NO index today: the status query is Local-only and within-project
+--     task counts are bounded; a sequential scan of the project-filtered
+--     rows is cheaper than maintaining an index. If a consumer ever needs
+--     a covering index, add
+--     CREATE INDEX idx_tasks_project_team ON tasks(project_id, team_pk,
+--       parallel_group, created_at, id) in a follow-up (the existing
+--     idx_tasks_wave no longer fully covers the per-cycle scoped path once a
+--     team_pk equality predicate is inserted between project_id and
+--     parallel_group; it still fully covers the project-wide fallback path,
+--     which carries no team_pk predicate).
+--
+-- MUST STAY A PLAIN ADD COLUMN — do NOT convert this to a table-rebuild
+-- (CREATE tasks__new / INSERT __new SELECT * / DROP / RENAME) to bolt on a
+-- NOT NULL / CHECK / FK. A rebuild reseeds sqlite_sequence from MAX(id) of
+-- the copied rows, reintroducing the AUTOINCREMENT-id-reuse hazard that 009
+-- had to defend against (see feedback-sqlite-rebuild-autoincrement). A
+-- rebuild ALSO creates a NEW table object, which breaks the exact table-SET
+-- assertions in test_migrate.py / test_migration_split.py. A column-add
+-- changes neither the table set nor sqlite_sequence — keep it.
+
+ALTER TABLE tasks ADD COLUMN team_pk TEXT;

@@ -128,15 +128,19 @@ def write_document(
     """Persist a project document and any declared relations.
 
     Per spec §10.4 (atelier#53), `workspace_id` and `project_id` are
-    BOTH nullable. The canonical use case is the daily-log domain,
-    which may be workspace-less and/or project-less per §6.7's
+    BOTH nullable. The canonical use case is the daily-log / abort-report
+    domains, which may be workspace-less and/or project-less per §6.7's
     `_no-workspace_/(no-project)/...` key reservation. Local mode
     accepts both NULL (migration 005 relaxed the NOT NULL constraints).
-    Memex mode raises `NotImplementedError` when `workspace_id is None`
-    because the §6.7 key construction needs the literal `_no-workspace_`
-    placeholder + Memex Index synthetic-workspace handling — out of
-    scope for atelier#53 and tracked as a follow-up when a real
-    workspace-less Memex consumer arrives.
+    Memex mode now lands a workspace-less write under the §6.7
+    `_no-workspace_` key (atelier#90 part-3): when `workspace_id is None`
+    the facade does NOT plant `workspace_id` in the metadata blob (the
+    absence-vs-None distinction must survive so the backend takes the
+    no-workspace branch, not the singleton fallback) and threads an
+    EXPLICIT `workspace_less` discriminator into the Memex backend so a
+    genuinely workspace-less write is told apart from a legacy
+    not-workspace-threaded one (the latter still derives via the
+    singleton fallback).
 
     Memex-mode signature is narrower (no explicit `workspace_id` /
     `subdomain` kwargs); the adapter folds those into `metadata` so the
@@ -147,15 +151,6 @@ def write_document(
     assert_valid_domain(domain)
     be = _backend()
     if _backend_is_memex(be):
-        if workspace_id is None:
-            raise NotImplementedError(
-                "write_document with workspace_id=None is not supported in "
-                "Memex mode yet — the §6.7 key construction needs the "
-                "literal `_no-workspace_` placeholder + synthetic-workspace "
-                "handling in the Memex Index. Use Local mode for workspace-"
-                "less daily logs, or open a follow-up issue when a Memex "
-                "consumer arrives."
-            )
         adapted_metadata = dict(metadata or {})
         # workspace_id / project_id / subdomain / source_ref belong on
         # the Index row's metadata blob in Memex mode — they're not
@@ -164,16 +159,35 @@ def write_document(
         # caller passing `metadata={"workspace_id": 99}` wins over the
         # kwarg-level 42 — surprising at first but matches "caller knows
         # best" semantics already used for write_task/write_meeting.
-        # None project_id is skipped from the fold so the metadata blob
-        # doesn't carry an explicit `project_id: null` (it just remains
-        # absent, which the Memex Index query plan reads as "any project").
-        adapted_metadata.setdefault("workspace_id", workspace_id)
+        # None workspace_id / project_id are skipped from the fold so the
+        # metadata blob doesn't carry an explicit `workspace_id: null` /
+        # `project_id: null` (they just remain absent — the Memex Index
+        # query plan reads absence as "any", and the absence is what lets
+        # `_atelier_write` take the §6.7 no-workspace branch instead of
+        # the singleton fallback).
+        if workspace_id is not None:
+            adapted_metadata.setdefault("workspace_id", workspace_id)
         if project_id is not None:
             adapted_metadata.setdefault("project_id", project_id)
         if subdomain is not None:
             adapted_metadata.setdefault("subdomain", subdomain)
         if source_ref is not None:
             adapted_metadata.setdefault("source_ref", source_ref)
+        # Explicit discriminator: a write is genuinely workspace-less ONLY
+        # when there is no workspace context AND no project to derive one
+        # from — i.e. no caller-supplied workspace_id in metadata AND
+        # project_id is None. Relying on metadata-absence alone would HIJACK
+        # every legacy not-workspace-threaded write into that namespace — a
+        # silent data-routing regression — so the discriminator is explicit.
+        # It is ALSO project-aware: a MIXED call (workspace_id=None,
+        # project_id != None) is NOT workspace-less — the backend derives a
+        # concrete workspace_id from the project (backend_memex.write_document
+        # ~line 874), so forcing workspace_less=True here would emit a
+        # `_no-workspace_` key while the payload column carried that real
+        # derived id — an internally inconsistent row. With project_id present
+        # the discriminator is False, so `_atelier_write` derives the
+        # project's real workspace slug for the §6.7 key (consistent).
+        workspace_less = "workspace_id" not in adapted_metadata and project_id is None
         return be.write_document(
             domain=domain,
             title=title,
@@ -182,6 +196,7 @@ def write_document(
             caller_agent_id=caller_agent_id,
             source_url=source_url,
             relations=list(relations) if relations else None,
+            workspace_less=workspace_less,
         )
     # Local mode accepts the wide signature directly, including NULL
     # workspace_id / project_id for §10.4 workspace-less / project-less
@@ -215,6 +230,7 @@ def write_task(
     source_ref: str | None = None,
     relations: Sequence[dict] = (),
     parallel_group: int | None = None,
+    team_pk: str | None = None,
 ) -> dict:
     """Persist a task row and any declared relations.
 
@@ -223,12 +239,22 @@ def write_task(
     blob matching `write_document`'s adapter pattern, and `workspace_id`
     is derived inside `_atelier_write` from the metadata blob per
     atelier#55 — no more hardcoded workspace-slug literal).
+
+    `team_pk` (atelier#90 / migration 010) is the run/cycle correlation
+    id consumed by `scripts/status.py` per-cycle scoping. In Local mode it
+    lands in the new `tasks.team_pk` column; in Memex mode `tasks` has no
+    such column, so — exactly like `subdomain` — it is folded into
+    `adapted_metadata` (when not None) so Memex-mode task creation never
+    throws. status is Local-only, so the FILTER only matters in Local
+    mode, but the WRITE must survive both modes.
     """
     be = _backend()
     if _backend_is_memex(be):
         adapted_metadata: dict = {}
         if subdomain is not None:
             adapted_metadata["subdomain"] = subdomain
+        if team_pk is not None:
+            adapted_metadata["team_pk"] = team_pk
         return be.write_task(
             title=title,
             description=description,
@@ -255,6 +281,7 @@ def write_task(
         source_ref=source_ref,
         relations=relations,
         parallel_group=parallel_group,
+        team_pk=team_pk,
     )
 
 

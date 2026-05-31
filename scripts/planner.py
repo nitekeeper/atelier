@@ -263,6 +263,7 @@ def persist_tasks(
     project_id: int,
     created_by: str,
     workspace_id: int = 1,
+    team_pk: str | None = None,
 ) -> list[int]:
     """Persist a VALIDATED task list via the backend facade.
 
@@ -271,12 +272,25 @@ def persist_tasks(
     atelier#34) and ``assigned_to`` (the planner-assigned persona). Returns the
     created DB row ids in input order.
 
+    ``team_pk`` (atelier#90 / migration 010) is the run/cycle correlation id
+    stamped on every persisted row so ``scripts/status.py`` can scope a
+    snapshot per-cycle. NULL by default — a NULL leaves the rows
+    project-scoped (the status fallback), so this is a SAFE no-op when the
+    orchestrator does not thread a correlation id.
+
+    ORDERING SUBTLETY: ``persist_tasks`` runs at ``plan:approved`` BEFORE
+    ``build_wave_dispatcher_for_project``, so ``team_pk`` must be known before
+    the planner persists. It already is — the orchestrator allocates the same
+    correlation string for the bridge queue (it scopes the whole cycle's
+    bridge_requests per ``scripts/atelier_entrypoint.py``) and passes that same
+    string here; no dispatch-time backfill is required on the live flow.
+
     All-or-nothing: if any row fails mid-loop, the rows already created are
     deleted before the exception propagates, so a partial task list never
-    reaches the PM dispatcher. Only ``parallel_group`` is durable; the
-    ``depends_on``/``reads``/``writes`` graph is validation-time metadata (the
-    dispatcher orders by ``(parallel_group ASC, created_at ASC)`` per §5.4 and
-    never needs the edges persisted)."""
+    reaches the PM dispatcher. Only ``parallel_group`` + ``team_pk`` are
+    durable; the ``depends_on``/``reads``/``writes`` graph is validation-time
+    metadata (the dispatcher orders by ``(parallel_group ASC, created_at ASC)``
+    per §5.4 and never needs the edges persisted)."""
     created: list[int] = []
     try:
         for t in tasks:
@@ -290,6 +304,7 @@ def persist_tasks(
                 assigned_to=t.get("assigned_persona"),
                 workspace_id=workspace_id,
                 parallel_group=t["parallel_group"],
+                team_pk=team_pk,
             )
             created.append(row["id"])
     except Exception:
@@ -310,6 +325,7 @@ def run_planner(
     root: str | Path | None = None,
     existing_files: set[str] | None = None,
     workspace_id: int = 1,
+    team_pk: str | None = None,
     max_attempts: int = 2,
 ) -> list[int]:
     """Drive wave-1 synthesis → gate → persist with the §17/#58 retry policy.
@@ -329,6 +345,16 @@ def run_planner(
 
     ``max_attempts`` is the total synthesis-attempt cap (default 2 = one initial
     + one DAG-invalid retry); a hard cap so a defective planner can never loop.
+
+    ``team_pk`` (atelier#90 / migration 010) is the run/cycle correlation id
+    forwarded to :func:`persist_tasks` so every persisted task is stamped with
+    its cycle. It is known BEFORE the planner runs — the orchestrator allocates
+    the same string for the bridge queue (it scopes the whole cycle's
+    bridge_requests) and threads it here; the planner persists at
+    ``plan:approved``, which is before ``build_wave_dispatcher_for_project``, so
+    the stamp lands at creation with no dispatch-time backfill. NULL by default
+    (single-cycle / non-team flows leave rows project-scoped — the SAFE status
+    fallback).
     """
     if existing_files is None:
         existing_files = snapshot_existing_files(root) if root is not None else set()
@@ -353,6 +379,7 @@ def run_planner(
             project_id=project_id,
             created_by=created_by,
             workspace_id=workspace_id,
+            team_pk=team_pk,
         )
     # Defensive: the loop always returns or raises.
     raise PlannerEscalation(  # pragma: no cover

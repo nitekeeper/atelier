@@ -112,6 +112,38 @@ Construct the list to satisfy all gates:
   reviewer to a different persona; a second failure escalates. The planner
   **never** silently re-assigns personas for you — fix it in the list.
 
+## Stamp the cycle's `team_pk` at persist time (atelier#90)
+
+When you invoke `run_planner` in **agent-team mode**, pass the cycle's `team_pk`
+— the SAME run/cycle correlation id the orchestrator already allocates for the
+`bridge_requests` queue (it scopes the whole cycle's bridge rows; see
+`internal/dev-dispatch/SKILL.md` step 3, `build_wave_dispatcher_for_project(...,
+team_pk=<cycle_id>, ...)`). Thread that exact string into the planner:
+
+```python
+run_planner(
+    synthesize=<synthesis-dispatch wrapper>,
+    db_path=<local_db>,
+    project_id=<project_id>,
+    created_by=<pm_agent_id>,
+    team_pk=<cycle_id>,   # SAME string later handed to the dispatcher
+)
+```
+
+`run_planner` forwards `team_pk` to `persist_tasks` → `tasks.create_task` → the
+backend facade, stamping every persisted row's `tasks.team_pk` column (migration
+010). This lets `skills/status/SKILL.md` scope its snapshot **per-cycle** when a
+single project hosts >1 concurrent team/cycle (`teams.project_id` has no UNIQUE
+constraint), instead of conflating the whole project.
+
+ORDERING: persistence happens at `plan:approved`, BEFORE
+`build_wave_dispatcher_for_project`. The `team_pk` is already known at that point
+— it is the bridge-queue correlation id the orchestrator allocates up front — so
+the stamp lands at task creation with no dispatch-time backfill. If you OMIT
+`team_pk` (sub-agent mode, single-cycle, or any non-team flow), rows persist with
+`team_pk=NULL`, which `status` reads as the project-wide fallback — a SAFE no-op,
+the feature is simply inert for that run.
+
 ## After persistence — hand off to the live wave engine (atelier#85)
 
 Once `run_planner` persists the validated list and the human approves the plan

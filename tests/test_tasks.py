@@ -109,6 +109,47 @@ def test_create_task(setup):
     assert task["assigned_to"] is None
 
 
+def test_create_task_persists_team_pk_local(setup):
+    """`create_task(..., team_pk='run-A')` persists `tasks.team_pk='run-A'`
+    via the facade (A2) in Local mode (migration 010). Readback via raw
+    sqlite confirms the column landed."""
+    db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
+    task = create_task(
+        db,
+        project_id=project_id,
+        title="cycle-tagged task",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+        team_pk="run-A",
+    )
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT team_pk FROM tasks WHERE id = ?", (task["id"],)).fetchone()
+    conn.close()
+    assert row is not None
+    assert row["team_pk"] == "run-A"
+
+
+def test_create_task_team_pk_defaults_to_null_local(setup):
+    """Back-compat: `create_task` WITHOUT `team_pk` persists `tasks.team_pk`
+    as NULL (legacy / single-cycle rows the status filter treats as the
+    project-wide fallback)."""
+    db, agent_id, project_id = setup["db_path"], setup["agent_id"], setup["project_id"]
+    task = create_task(
+        db,
+        project_id=project_id,
+        title="untagged task",
+        created_by=agent_id,
+        workspace_id=setup["workspace_id"],
+    )
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT team_pk FROM tasks WHERE id = ?", (task["id"],)).fetchone()
+    conn.close()
+    assert row is not None
+    assert row["team_pk"] is None
+
+
 def test_create_task_coerces_string_priority(setup):
     """v1.0.13 callers passed 'critical'|'high'|'medium'|'low'; the
     coercion helper maps those to the v1.1.0 INTEGER column."""

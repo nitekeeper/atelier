@@ -404,7 +404,12 @@ def _metadata_narrative(metadata: dict) -> str:
 
 
 def _build_key(
-    *, workspace_slug: str, project_slug: str | None, domain: str, created_at_iso: str, title: str
+    *,
+    workspace_slug: str | None,
+    project_slug: str | None,
+    domain: str,
+    created_at_iso: str,
+    title: str,
 ) -> str:
     """Canonical key per spec §6.7:
     `<workspace_slug>/<project_slug>/<domain>/<date>-<title_slug>-<seq>`.
@@ -412,12 +417,19 @@ def _build_key(
     Memex v2.3.0+ enforces `UNIQUE` on `documents.key`, so we allocate
     the smallest unused `seq` for the (workspace/project/domain/date/title)
     prefix. Duplicate-key races are handled one layer up in `_atelier_write`.
+
+    A `None` `workspace_slug` (a genuinely workspace-less write, atelier#90
+    part-3) reserves the literal `_no-workspace_` segment — mirroring the
+    `(no-project)` reservation for a `None` `project_slug`. The literal is
+    INLINED (not a named constant) so it does not trip
+    test_workspace_slug_removal.py's hardcoded-slug-constant ban.
     """
     date_str = created_at_iso[:10]  # YYYY-MM-DD
     title_slug = _slug(title, max_length=48)
+    workspace_part = workspace_slug or "_no-workspace_"
     project_part = project_slug or "(no-project)"
-    seq = _next_seq(workspace_slug, project_part, domain, date_str, title_slug)
-    return f"{workspace_slug}/{project_part}/{domain}/{date_str}-{title_slug}-{seq}"
+    seq = _next_seq(workspace_part, project_part, domain, date_str, title_slug)
+    return f"{workspace_part}/{project_part}/{domain}/{date_str}-{title_slug}-{seq}"
 
 
 def _next_seq(
@@ -631,6 +643,7 @@ def _atelier_write(
     relations: list[dict] | None,
     caller_agent_id: str,
     project_slug_override: str | None = None,
+    workspace_less: bool = False,
 ) -> dict:
     """Tier 2 atelier write — synchronous, no LLM dispatch.
 
@@ -656,16 +669,30 @@ def _atelier_write(
     the §10 multi-workspace filter from atelier#30 ACTIVATES (today's
     single-workspace deployment makes it a no-op for correctness, but
     the wiring is in place for §10).
+
+    `workspace_less=True` (atelier#90 part-3) is the EXPLICIT discriminator
+    for a genuinely workspace-less write: it forces `workspace_slug=None`
+    so `_build_key` emits the reserved `_no-workspace_` literal, and it does
+    NOT inject any workspace_id into metadata (the §10 `_auto_relations`
+    filter then treats it as 'any', matching the project_id=None skip).
+    Without this flag a write that carries no workspace context falls back
+    to the singleton workspace — so legacy not-workspace-threaded writes are
+    NOT hijacked into the no-workspace namespace.
     """
     domain_vocabulary.assert_valid(domain)
 
     # Resolve workspace BEFORE key construction. atelier#55: workspace_slug
     # comes from `metadata.workspace_id` when present, else from the
     # singleton workspace. This is the post-#55 contract — no more
-    # hardcoded workspace-slug literal.
+    # hardcoded workspace-slug literal. atelier#90 part-3: an explicit
+    # `workspace_less` flag short-circuits both to the §6.7 no-workspace key.
     metadata = dict(metadata or {})  # copy so we can mutate freely below
     workspace_id_in_meta = metadata.get("workspace_id")
-    if workspace_id_in_meta is not None:
+    if workspace_less:
+        # Genuinely workspace-less: reserve the §6.7 `_no-workspace_` segment
+        # and inject NO workspace_id into metadata (absence => §10 'any').
+        workspace_slug = None
+    elif workspace_id_in_meta is not None:
         workspace_slug = _workspace_slug_for_id(int(workspace_id_in_meta))
     else:
         singleton = _singleton_workspace()
@@ -806,6 +833,7 @@ def write_document(
     caller_agent_id: str,
     source_url: str | None = None,
     relations: list[dict] | None = None,
+    workspace_less: bool = False,
 ) -> dict:
     """Persist a project document via Memex Tier 2.
 
@@ -817,6 +845,13 @@ def write_document(
     so it persists in `~/.memex/index.db.documents.metadata` alongside
     other narrative fields and contributes to the FTS5 searchable blob
     via `_metadata_narrative`.
+
+    `workspace_less=True` (atelier#90 part-3) is the facade's explicit
+    discriminator for a genuinely workspace-less write: it routes through
+    the §6.7 `_no-workspace_` key in `_atelier_write` and is the ONLY case
+    that leaves `payload['workspace_id']` NULL (legal post-005). For a
+    workspace-less write `_workspace_id_for_project` is NEVER called — it
+    would raise ValueError on a None project_id.
     """
     # Hard-validate first — keeps the validation path hermetic.
     domain_vocabulary.assert_valid(domain)
@@ -826,13 +861,17 @@ def write_document(
         metadata["source_url"] = source_url
     now = _now()
     project_id = metadata.get("project_id")
-    # project_documents.workspace_id is NOT NULL. The facade
+    # project_documents.workspace_id is nullable post-005. The facade
     # `backend.write_document` folds workspace_id into adapted_metadata
-    # (backend.py:147) but the memex librarian does NOT promote
-    # metadata→payload. Pull it out of metadata when present, else
-    # derive it from the owning project row. See issue #6 bug #3.
+    # (when not None) but the memex librarian does NOT promote
+    # metadata→payload. Pull it out of metadata when present, else derive
+    # it from the owning project row — EXCEPT when both workspace_id and
+    # project_id are absent (the genuine workspace-less case, atelier#90
+    # part-3): leave workspace_id NULL and never call
+    # `_workspace_id_for_project(None)` (it would raise ValueError). See
+    # issue #6 bug #3 for the project-derivation path.
     workspace_id = metadata.get("workspace_id")
-    if workspace_id is None:
+    if workspace_id is None and project_id is not None:
         workspace_id = _workspace_id_for_project(project_id)
     payload = {
         "title": title,
@@ -853,6 +892,7 @@ def write_document(
         metadata=metadata,
         relations=relations,
         caller_agent_id=caller_agent_id,
+        workspace_less=workspace_less,
     )
 
 

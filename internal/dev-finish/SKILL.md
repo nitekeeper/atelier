@@ -81,7 +81,58 @@ Requires `qa:approved`.
    python3 atelier/scripts/workflow.py <db_path> advance <project_id> handoff:complete
    ```
 
-6. **Retro — surface phase bypasses:**
+6. **(agent-team mode only) Record the team teardown:**
+
+   > This step applies ONLY when this cycle ran in **agent-team mode** (a real
+   > `team` was created — see `skills/run/SKILL.md`). Sub-agent / Memex finishes
+   > create no team, so SKIP this step entirely and continue to the Retro. Scope
+   > here is the TEARDOWN RECORD ONLY — do NOT add team-mode merge/PR/resume
+   > logic to this section (that lives in a separate follow-up).
+
+   On clean completion the team is torn down just like a deliberate abort, so
+   `scripts/sweep_leaked_teams.py` does not later over-report it as an orphan.
+
+   a. **Resolve the team_id.** Resolve it from this cycle's most-recent ready
+      `create_team` bridge row (the canonical post-creation team_id lives in the
+      RESPONSE), reusing `abort.resolve_team_id`'s query:
+      ```python
+      # Run as: python3 -c "<contents below>" (replace <team_pk>, <db_path>)
+      from scripts.abort import resolve_team_id
+      print(resolve_team_id("<db_path>", "<team_pk>") or "")
+      ```
+      `<team_pk>` is the cycle's run/cycle correlation id the orchestrator
+      already holds for the bridge queue. A blank result means no team_id could
+      be resolved — pass `--team-id` explicitly only if you already hold it.
+
+   b. **Invoke the teardown record:**
+      ```
+      PYTHONPATH=. python3 -m scripts.team_teardown --team-pk <team_pk> [--team-id <team_id>]
+      ```
+      This enqueues exactly ONE `team_delete` bridge row (`status='pending'`,
+      scoped to `<team_pk>`) and sets `teams.status='closed'` (the forward-safe
+      hedge the sweep already honors). It is mode-gated: in non-local mode it
+      WARNs and returns 0 without mutating (team-state mutators are Local-only).
+      The CLI prints the enqueued `team_delete row id=<N>` to stderr.
+
+   c. **Service the pending `team_delete` row** EXACTLY like
+      `skills/abort/SKILL.md` step 4 — the bridge-poll servicer does NOT handle
+      the `team_delete` lifecycle kind (`internal/bridge-poll/SKILL.md`'s
+      closed-enum switch), so the completion SKILL services it itself. Call the
+      harness `TeamDelete` tool for the team, then flip the enqueued row to
+      `status='ready'`:
+      ```sql
+      UPDATE bridge_requests
+      SET status = 'ready',
+          completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE id = :team_delete_row_id;
+      ```
+      Until you flip the row, `teams.status='closed'` already closes the sweep's
+      over-report window via the hedge; flipping it promptly also lets filter (i)
+      of `find_orphan_team_ids` subtract the team. Any cross-session team config
+      directory left on disk is filesystem-only cleanup: `rm -rf
+      ~/.claude/teams/<team_id>/`.
+
+7. **Retro — surface phase bypasses:**
 
    ```python
    # Run as: python3 -c "<contents below>" (replace <project_id>)

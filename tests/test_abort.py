@@ -16,6 +16,14 @@ Both teardown paths run one shared core whose AC#2 invariant is:
   * a 'aborted' team_audit event is written,
 and the worktree is never destroyed when dirty.
 
+AC#2 durability now holds in BOTH modes (atelier#90 part-3): the
+abort-report is a workspace-less doc (workspace_id=None) and the Memex
+facade `backend.write_document` lands it via the §6.7 `_no-workspace_`
+key, so `test_non_local_mode_abort_report_persists` pins cross-mode
+persistence. Only the report write crosses modes — teams.status /
+team_delete enqueue / 'aborted' audit remain Local-mode-only skips in
+non-local mode (`test_non_local_mode_skips_state_mutations_and_returns_zero`).
+
 The worktree policy is exercised through the two private seams
 (`_worktree_is_dirty` / `_remove_worktree`) monkeypatched per-test, because the
 fixture's bare `.git` directory is not a real linked worktree — patching the
@@ -392,30 +400,67 @@ def test_non_local_mode_skips_state_mutations_and_returns_zero(workspace, monkey
     assert backend.list_team_audit(team_id=TEAM_ID, event_type="aborted") == []
 
 
-def test_non_local_mode_abort_report_is_best_effort(workspace, monkeypatch):
-    """Pin the DOCUMENTED non-local abort-report durability behavior: the
-    workspace-less doc write goes through the mode-dispatched backend, which in
-    Memex mode raises NotImplementedError for workspace_id=None, so the report
-    does NOT persist and abort still returns 0 (best-effort, never raising).
+def test_non_local_mode_abort_report_persists(workspace, monkeypatch):
+    """Pin the atelier#90 part-3 behavior: the workspace-less abort-report
+    doc now PERSISTS in non-local (Memex) mode via the §6.7 `_no-workspace_`
+    key — the NotImplementedError gate is gone. abort.main still returns 0,
+    and the report write is reached (it is no longer swallowed to None).
 
-    We simulate the Memex facade's known limitation by patching write_document
-    to raise NotImplementedError (matching backend.py's real workspace_id=None
-    guard) and assert _write_report swallows it to None — the behavior the
-    module MODE GATE note documents as Local-mode-only durability.
+    Crucially this drives the REAL facade (`backend.write_document`) — only
+    the leaf Memex-Core seams are stubbed via the canonical hermetic stub
+    set — so BEFORE the fix the facade gate raises NotImplementedError and
+    NO doc is captured (RED), and AFTER the fix the workspace-less write
+    lands under the §6.7 `_no-workspace_/(no-project)/postmortem/` key
+    (GREEN). State mutations (teams.status / team_delete enqueue / audit)
+    stay Local-only skips in non-local mode — only the REPORT write crosses
+    the facade now.
     """
+    from scripts import backend_memex
+
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
     monkeypatch.setattr(abort, "_worktree_is_dirty", lambda cwd: True)
     monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: True)
 
-    def _raise_not_impl(**kwargs):
-        raise NotImplementedError("workspace_id=None unsupported in Memex mode")
+    # Canonical hermetic Memex-Core stub set: capture librarian_output so we
+    # can assert the §6.7 key, and short-circuit the index.documents seq
+    # scan (which needs ~/.memex/config.json). The genuine workspace-less
+    # branch must NOT reach the singleton fallback, so ban it.
+    captured: dict = {}
+    monkeypatch.setattr(backend_memex, "_memex_validate_output", lambda d: d)
+    monkeypatch.setattr(
+        backend_memex,
+        "_memex_write_entry",
+        lambda **k: (
+            captured.update(k),
+            {
+                "status": "ingested",
+                "index_id": "x",
+                "key": k["librarian_output"]["key"],
+                "row_id": 1,
+            },
+        )[1],
+    )
+    monkeypatch.setattr(backend_memex, "_memex_embed", lambda t: None)
+    monkeypatch.setattr(backend_memex, "_resolve_project_slug", lambda pid: None)
+    monkeypatch.setattr(backend_memex, "_next_seq", lambda *a, **k: 1)
+    monkeypatch.setattr(
+        backend_memex,
+        "_singleton_workspace",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("workspace-less abort-report reached singleton fallback")
+        ),
+    )
 
-    monkeypatch.setattr(abort.backend, "write_document", _raise_not_impl)
-
-    # Best-effort: the swallowed write does not crash the abort; rc is 0.
+    # The workspace-less write now lands; abort still returns 0.
     assert abort.main(["--team-pk", TEAM_PK]) == 0
-    # And nothing persisted (the store has no abort docs).
-    assert _abort_report_docs(workspace["db"]) == []
+
+    # The abort-report write was REACHED and persisted (not swallowed) —
+    # workspace-less postmortem doc under the §6.7 reserved key.
+    assert captured, "abort-report write never reached the Memex backend (gate still firing?)"
+    key = captured["librarian_output"]["key"]
+    assert key.startswith("_no-workspace_/(no-project)/postmortem/"), key
+    assert captured["payload"]["workspace_id"] is None
+    assert captured["payload"]["project_id"] is None
 
 
 # ── team_id resolution ──────────────────────────────────────────────────────

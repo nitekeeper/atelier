@@ -59,21 +59,34 @@ The snapshot reports three things:
    terminal reply yet render an explicit `(no valid terminal envelope yet)`
    line.
 
-## Scope (project-level, one-team-per-project)
+## Scope (per-cycle when stamped, else project-wide)
 
-The snapshot scopes tasks by **project**, not by team/run/cycle. The `tasks`
-table has no team/run/cycle column — only `project_id` — and `teams.project_id`
-has no UNIQUE constraint, so a project can host more than one team/cycle. The
-rendered `project_id` header makes the scope explicit.
+The snapshot scopes tasks by **cycle** (`team_pk`) when the project's tasks carry
+this cycle's `team_pk`, and falls back to **project-wide** otherwise. Since
+migration 010 the `tasks` table has a `team_pk` correlation column (the run/cycle
+id, NOT FK'd); `teams.project_id` still has no UNIQUE constraint, so a project can
+host more than one team/cycle. The rendered `project_id` header plus a `scope:`
+line make which scoping applied explicit.
 
-- When ONE team/cycle is active in the project (the normal case), the active
-  wave + in-flight count are exact, and consistent with how the wave scheduler
-  reads tasks.
-- When MORE than one team/cycle is live in the SAME project, the wave number and
-  in-flight count are computed over ALL that project's tasks and may conflate
-  other cycles. There is no durable task↔team linkage to scope more precisely
-  today; a future `tasks.team_pk` column (tracked follow-up) would let `status`
-  scope per-run. Read the wave/in-flight numbers as project-wide in that case.
+`status` runs a COUNT probe for tasks under the project whose `team_pk` matches the
+`<pk>` you pass:
+
+- **`scope: cycle (team_pk)`** — the probe found rows for this cycle, so the active
+  wave + in-flight count are scoped to THIS cycle's tasks. When >1 team/cycle runs
+  in one project, each `status --team-pk <pk>` call reports only its own cycle,
+  with no cross-cycle conflation. This is exact and consistent with how the wave
+  scheduler reads tasks.
+- **`scope: project (team_pk unpopulated)`** — the probe found ZERO rows for this
+  `team_pk` (legacy / pre-010 tasks, or a single-cycle project that never stamped
+  `team_pk`, or an unknown `<pk>`). The snapshot falls back to project-wide,
+  computing the wave number + in-flight count over ALL the project's tasks exactly
+  as before 010. Read those numbers as project-wide. The fallback is MANDATORY so
+  every pre-010 project still renders rather than showing an empty snapshot.
+
+Tasks are stamped with `team_pk` at plan time — the planner (`run_planner` →
+`persist_tasks` → `tasks.create_task` → the backend facade) threads the cycle's
+correlation id onto every persisted row. A run that does not thread a `team_pk`
+(single-cycle / non-team flows) leaves the rows NULL and renders project-wide.
 
 ## Hard rules
 

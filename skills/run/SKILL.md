@@ -139,7 +139,8 @@ Bypass entries are recorded in the `phase_bypasses` table and surfaced by `inter
 | `design:approved` | Draft the implementation plan. | `internal/dev-plan/SKILL.md` |
 | `plan:open` | Continue refining the plan with the user. | `internal/dev-plan/SKILL.md` |
 | `plan:approved` | Write the first failing test (single-agent). | `internal/dev-tdd/SKILL.md` |
-| `plan:approved` (parallel tasks) | Dispatch fresh subagents per task with two-stage review instead of implementing directly. | `internal/dev-subagent/SKILL.md` |
+| `plan:approved` (parallel tasks, **sub-agent** mode) | Dispatch fresh subagents per task with two-stage review instead of implementing directly. | `internal/dev-subagent/SKILL.md` |
+| `plan:approved` (parallel tasks, **agent-team** mode) | Drive the live wave engine: `build_wave_dispatcher_for_project` + per-turn bridge-poll servicer; surfaces the meeting / side-query / roster / persona-gap-escalation behaviors. | `internal/dev-dispatch/SKILL.md` |
 | `tdd:red` | Write minimal implementation to make tests pass. | `internal/dev-tdd/SKILL.md` |
 | `tdd:green` | Verify tests pass (vacuity check, full output read), then refactor with tests still passing. | `internal/dev-verify/SKILL.md`, then `internal/dev-tdd/SKILL.md` |
 | `tdd:clean` | Verify suite is clean, then continue TDD (new test) or advance to review. | `internal/dev-verify/SKILL.md`, then `internal/dev-tdd/SKILL.md` or `internal/dev-review/SKILL.md` |
@@ -171,8 +172,9 @@ The canonical Atelier development flow:
 ```
 design → plan → tdd (red ⇄ green ⇄ clean) → review → security → qa → handoff
               ↑
-              ├── dev-subagent (alternative to dev-tdd; enters at plan:approved, exits at tdd:clean)
-              └── diagnose (entered from any non-terminal phase, restored on resolve)
+              ├── dev-subagent  (sub-agent mode alternative to dev-tdd; enters at plan:approved, exits at tdd:clean)
+              ├── dev-dispatch  (agent-team mode alternative to dev-tdd; live WaveDispatcher.run, enters at plan:approved)
+              └── diagnose      (entered from any non-terminal phase, restored on resolve)
 ```
 
 All transitions are tracked in `memex.db` (`projects.phase` column). Transitions are validated by `atelier/scripts/workflow.py advance` against the `phase_transitions` table. Skills no longer block on out-of-phase invocation — instead they apply the Bypass procedure above.

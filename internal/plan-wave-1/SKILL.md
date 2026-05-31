@@ -111,3 +111,24 @@ Construct the list to satisfy all gates:
   offending reviewer/reviewed task_ids + persona so you can re-assign the
   reviewer to a different persona; a second failure escalates. The planner
   **never** silently re-assigns personas for you — fix it in the list.
+
+## After persistence — hand off to the live wave engine (atelier#85)
+
+Once `run_planner` persists the validated list and the human approves the plan
+(`plan:approved`), the orchestrator drives the tasks through the **live wave
+engine**, not by implementing directly:
+
+- **agent-team mode** → read **`internal/dev-dispatch/SKILL.md`** and follow it:
+  it constructs the production dispatcher
+  (`scripts/atelier_entrypoint.py::build_wave_dispatcher_for_project`, atelier#85),
+  services the `bridge_requests` queue per turn
+  (`internal/bridge-poll/SKILL.md`), calls `dispatcher.run(tasks)`, and surfaces
+  the meeting / side-query / roster / persona-gap-escalation behaviors
+  (atelier#87).
+- **sub-agent mode** → read `internal/dev-subagent/SKILL.md` (the per-task
+  two-stage-review hand-orchestration).
+
+The persisted `parallel_group` is the dispatch primitive the engine partitions
+on; the `depends_on` / `reads` / `writes` graph is validation-time metadata the
+orchestrator threads into `dispatcher.run` as the in-memory task dicts (for
+cascade-abandon), per `internal/pm-dispatch/SKILL.md`.

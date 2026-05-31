@@ -67,11 +67,14 @@ tests drive the fan-out against a mocked bridge.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Sequence
+import logging
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from scripts import backend, bridge_send
+
+_log = logging.getLogger(__name__)
 
 # ── Persona-gap escalation event types (atelier#64 AI-2-escalation) ─────────
 #
@@ -477,6 +480,76 @@ def record_meeting_failure_postmortem(
         event_type=MEETING_FAILURE_POSTMORTEM_EVENT_TYPE,
         payload={"gap_id": gap_id, "reason": reason},
     )
+
+
+# ── Live PM escalate_fn seam (atelier#87 — wire #64 escalation into the run) ─
+
+
+def build_persona_gap_escalate_fn(
+    *,
+    team_id: str,
+    base_sink: Callable[[Mapping[str, Any]], None] | None = None,
+) -> Callable[[Mapping[str, Any]], None]:
+    """Build a ``WaveDispatcher.escalate_fn`` that surfaces a wave abandonment to
+    the human via the one-shot persona-gap LEDGER latch (atelier#87).
+
+    #64 (PR #86) shipped :func:`escalate_persona_gap` as a dormant API — never
+    wired to the engine's ``escalate_fn`` seam (`scripts/pm_dispatch.py`). This
+    factory is that wire: pass the returned callable to
+    :func:`scripts.atelier_entrypoint.build_wave_dispatcher_for_project` (the
+    #85 call site) so every abandonment the engine emits both (a) hits the
+    guaranteed-emitting base sink and (b) records a one-shot escalation row the
+    orchestrator can surface to the human.
+
+    Layering (escalation is GUARANTEED, never silenced — consensus item 8):
+
+    1. **Base sink ALWAYS runs first**, on every call — defaults to the engine's
+       guaranteed ``pm_dispatch._default_escalate`` (a WARNING log). A
+       caller-supplied ``base_sink`` (e.g. an inline milestone note to the
+       operator) replaces the default but is still unconditional.
+    2. **Ledger latch is best-effort enrichment on top.** The escalation is keyed
+       on the abandoned task id (``gap_id = "task-<id>"``) and routed through
+       :func:`escalate_persona_gap`, which writes EXACTLY ONE
+       ``persona_gap_escalation`` row per (team, task) no matter how many rounds
+       abandon the same task. A ledger-write failure is logged and swallowed — it
+       MUST NOT suppress the already-fired base sink (the latch enriches the
+       audit trail; it is never a gate the escalation can be lost behind).
+
+    The ``escalation`` Mapping is the engine's record (see
+    ``WaveDispatcher._abandon_and_escalate``): ``task_id`` / ``worker`` /
+    ``attempt`` / ``category`` / ``last_status`` / ``upstream_task_id``. It is
+    DATA — read for the latch key + description, never executed.
+    """
+    # Lazy import: pm_dispatch imports a backend chain; importing it at module
+    # top would drag that into team_meeting's (cheap, bridge-only) import path.
+    if base_sink is None:
+        from scripts.pm_dispatch import _default_escalate
+
+        sink: Callable[[Mapping[str, Any]], None] = _default_escalate
+    else:
+        sink = base_sink
+
+    def escalate_fn(escalation: Mapping[str, Any]) -> None:
+        # (1) GUARANTEED base sink — unconditional, first, never suppressed.
+        sink(escalation)
+        # (2) Best-effort one-shot ledger latch keyed on the abandoned task id.
+        gap_id = f"task-{escalation.get('task_id')}"
+        description = (
+            f"task {escalation.get('task_id')} abandoned "
+            f"(category={escalation.get('category')}, "
+            f"last_status={escalation.get('last_status')!r}, "
+            f"worker={escalation.get('worker')!r})"
+        )
+        try:
+            escalate_persona_gap(team_id=team_id, gap_id=gap_id, description=description)
+        except Exception as exc:  # ledger is best-effort enrichment, NEVER a gate
+            _log.warning(
+                "persona-gap ledger escalation failed for %s (%s); base sink already fired",
+                gap_id,
+                exc,
+            )
+
+    return escalate_fn
 
 
 def _payload_of(row: dict[str, Any]) -> dict[str, Any]:

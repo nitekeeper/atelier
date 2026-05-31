@@ -188,3 +188,103 @@ def build_wave_dispatcher(
     if escalate_fn is not None:
         return WaveDispatcher(db_path, spawn_fn=spawn_fn, poll_fn=poll_fn, escalate_fn=escalate_fn)
     return WaveDispatcher(db_path, spawn_fn=spawn_fn, poll_fn=poll_fn)
+
+
+# ── Live orchestrator-entry call site (atelier#85) ──────────────────────────
+#
+# #81 (PR #84) shipped `build_wave_dispatcher` above as a tested-but-DORMANT
+# factory: it was never invoked from a live `/atelier:run` orchestrator path.
+# This is the missing call site — the function the orchestrator turn-loop
+# (`internal/dev-dispatch/SKILL.md`, routed from `skills/run/SKILL.md`) calls to
+# obtain the live dispatcher for the current cycle. It composes the SAME #81
+# production seams (`QueueBridgeDispatchTools` + `build_spawn_fn` +
+# `build_poll_fn`) but exposes the orchestrator-context knobs `build_wave_dispatcher`
+# hard-wires (a distinct reply-inbox `role_id_for`, a `teams_root` override for
+# first-touch detection, and a `sleep_fn` for the poll cadence) plus a safe
+# default `briefing_for`. It does NOT modify the #81 internals — it reuses them.
+
+
+def build_wave_dispatcher_for_project(
+    *,
+    db_path: str,
+    team_pk: str,
+    team_id: str,
+    briefing_for: Callable[[Mapping[str, Any], int], str] | None = None,
+    members: list[str] | None = None,
+    team_name: str | None = None,
+    teammate_name_for: Callable[[Mapping[str, Any]], str] | None = None,
+    role_id_for: Callable[[Mapping[str, Any]], str] | None = None,
+    escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
+    teams_root: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
+    root: str | Path = ".",
+    sleep_fn: Callable[[float], None] | None = None,
+):
+    """Build the live, mode-selected ``WaveDispatcher`` for one cycle from an
+    orchestrator/project context (atelier#85 — the missing #81 call site).
+
+    Resolution + wiring mirrors :func:`build_wave_dispatcher` (env override →
+    persisted ``.ai/atelier.mode`` marker → ``subagent`` default; production
+    queue-bridge seams) but exposes the knobs the orchestrator turn-loop needs:
+
+    * ``briefing_for(task, attempt) -> str`` — the spawn-prompt source. Defaults
+      to a deterministic per-task stub so the dispatcher is constructible from a
+      minimal call site; a real ``/atelier:run`` passes a
+      :func:`scripts.dispatch.compose_briefing` wrapper (keeping the composer the
+      single source of prompt text — it stays mode-agnostic per #61).
+    * ``teammate_name_for(task) -> str`` — task → spawn-identity role-id
+      (agent-team mode). Defaults to ``str(task["id"])``.
+    * ``role_id_for(task) -> str`` — task → the inbox role-id whose
+      ``bridge_messages`` channel carries the worker's terminal reply. Defaults to
+      ``teammate_name_for`` so spawn-identity and reply-inbox stay in lock-step
+      (the #81 default); the orchestrator overrides it when all replies land in a
+      single PM inbox.
+    * ``escalate_fn`` — threaded straight through (``None`` → the engine's
+      guaranteed-emitting default; #87 binds the persona-gap escalation seam here
+      via :func:`scripts.team_meeting.build_persona_gap_escalate_fn`).
+    * ``teams_root`` / ``sleep_fn`` — first-touch config root + poll cadence
+      (both injectable for deterministic tests).
+
+    Lazy imports keep ``scripts.dispatch`` / ``pm_dispatch`` (and their backend
+    chains) out of the bare ``startup_check`` import path.
+    """
+    from scripts.dispatch import (
+        DEFAULT_TEAMS_ROOT,
+        QueueBridgeDispatchTools,
+        build_poll_fn,
+        build_spawn_fn,
+        resolve_dispatch_mode,
+    )
+    from scripts.pm_dispatch import WaveDispatcher
+
+    if env is not None:
+        mode = resolve_dispatch_mode(env=env, root=root)
+    else:
+        mode = resolve_dispatch_mode(root=root)
+
+    name_for = teammate_name_for or (lambda task: str(task["id"]))
+    # role_id_for falls back to the spawn-identity mapper (the #81 default):
+    # spawn identity and reply inbox stay in lock-step unless the orchestrator
+    # routes all replies into a single PM inbox.
+    reply_for = role_id_for or name_for
+    brief_for = briefing_for or (lambda task, attempt: f"task {task['id']} (attempt {attempt})")
+    resolved_teams_root = teams_root if teams_root is not None else DEFAULT_TEAMS_ROOT
+
+    tools = QueueBridgeDispatchTools(team_pk, db_path=db_path)
+    spawn_fn = build_spawn_fn(
+        mode,
+        tools=tools,
+        briefing_for=brief_for,
+        members=members,
+        team_name=team_name,
+        teammate_name_for=name_for,
+        teams_root=resolved_teams_root,
+    )
+    poll_fn = build_poll_fn(db_path, team_id=team_id, role_id_for=reply_for)
+
+    kwargs: dict[str, Any] = {"spawn_fn": spawn_fn, "poll_fn": poll_fn}
+    if escalate_fn is not None:
+        kwargs["escalate_fn"] = escalate_fn
+    if sleep_fn is not None:
+        kwargs["sleep_fn"] = sleep_fn
+    return WaveDispatcher(db_path, **kwargs)

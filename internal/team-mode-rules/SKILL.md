@@ -37,6 +37,7 @@ You are a worker (or team-lead) operating inside an atelier team-mode run. This 
 | 1.0     | 2026-05-25 | Initial release. Eight TM-NNN MUSTs, reply envelope, abandon grammar, token budgets, heartbeat clause. |
 | 1.1     | 2026-05-25 | Removed token budget caps (inaugural briefing + per-message payload). Rationale: token usage is task-dependent and not meaningfully cappable; heartbeat clause remains as separate liveness mechanism. Per-message BYTE cap (8192 B) stays in schema + bridge_send. |
 | 1.2     | 2026-05-29 | Added `attempt` to the reply-envelope schema (table + JSON example). PM's wave-dispatch validator (atelier#60, `scripts/pm_dispatch_envelope.py` check 3) cross-checks it against the dispatched attempt for anti-spoofing; workers MUST emit it. Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged). |
+| 1.2.1   | 2026-05-31 | Heartbeat clause cross-reference: a missed heartbeat is a GO-OBSERVE signal for PM (kaizen F15 / atelier#78) — PM confirms via a final reply read before charging a failed attempt (read-first stall detection in `scripts/pm_dispatch.py` `_observe_before_kill`). PM-side orchestrator behavior, not a worker MUST — no new TM-NNN rule. Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged). |
 
 A `schema_version` bump REQUIRES a CHANGELOG row in the same commit. Dispatch refuses to spawn teammates whose runtime-reported version mismatches the migration's `PRAGMA user_version`.
 
@@ -155,6 +156,8 @@ bridge_send --channel <worker_channel> --kind heartbeat
 (In agent team mode the equivalent is a `SendMessage` to PM with `{"type":"heartbeat"}`.) The **threshold for stall detection** — i.e. how many missed heartbeats trigger PM's soft-kill — is **deferred to cycle 2** (see §23.6 of the design doc); for v1 PM treats heartbeats as informational liveness signal and applies the wall-clock cap as the binding stall trigger.
 
 Heartbeats record liveness ONLY: `(team_id, role_id, last_seen_iso)`. NO transcript or content snapshots. Retention is lifetime-of-team-row; cascade-deleted on team teardown.
+
+A missed heartbeat is a **GO-OBSERVE signal** for PM, never a unilateral kill — PM confirms via a **final reply read** before charging a failed attempt (kaizen F15 / atelier#78; see `internal/pm-dispatch/SKILL.md` → *Read-first on the deadline trip*).
 
 ## Self-verify protocol (summary — full procedure in `internal/dev-verify/SKILL.md`)
 

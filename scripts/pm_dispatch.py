@@ -66,6 +66,15 @@ Falsifier: if any code path re-queued a task without an attempt charge, or
 charged an attempt without the ``< MAX_ATTEMPTS`` guard before re-queue, (2)
 would break and the loop could spin. The single re-queue site is
 :meth:`_handle_failed_attempt`, which re-queues only under that guard.
+
+The atelier#78 read-first GO-OBSERVE gate at the deadline trip does NOT add a
+re-queue site: the done-but-silent SUCCESS branch routes the confirming-read
+envelope through :meth:`_handle_envelope`, whose ``done`` arm calls
+``complete_task`` (TERMINAL — NEVER re-queues) and charges NO extra attempt (the
+dispatch-time charge stands). The genuinely-stalled branch falls through to the
+SAME :meth:`_handle_failed_attempt`. So :meth:`_handle_failed_attempt` remains
+the SINGLE re-queue site and the per-task ``<= MAX_ATTEMPTS`` bound is preserved;
+the confirming read is one non-blocking poll, not a new wait loop.
 """
 
 from __future__ import annotations
@@ -411,6 +420,9 @@ class WaveDispatcher:
                     last_status="cascade",
                     upstream_task_id=upstream,
                     charge_attempt=False,  # item 9 — cascade does NOT spend budget
+                    # atelier#78 — carry the wave's surviving terminal state on
+                    # the cascade abandon too (mirrors the capacity-abandon path).
+                    surviving_state=self._snapshot_surviving(tracker),
                 )
                 tracker.record(str(_task_id(task)), "abandoned")
                 self.abandoned_ids.add(_task_id(task))
@@ -459,19 +471,71 @@ class WaveDispatcher:
                     self._handle_envelope(infl, envelope, tracker, pending)
                     progressed = True
                 elif now - infl.t0 >= WALL_CLOCK_S:
-                    # item 5 — PM-side wall-clock soft-kill, independent of any
-                    # worker signal (catches silent death). The attempt was
-                    # already charged at dispatch (migration 006: "incremented
-                    # once per dispatch; a wall-clock soft-kill counts as an
-                    # attempt" — the killed dispatch IS that attempt).
+                    # item 5 + atelier#78 — PM-side wall-clock READ-FIRST GO-OBSERVE.
+                    # A fired deadline is a GO-OBSERVE trigger, NOT an auto-kill
+                    # (kaizen F15 ported into the engine). Before charging the
+                    # soft-kill the engine performs ONE mandatory confirming
+                    # poll_fn re-read of the worker's terminal reply: a
+                    # done-but-silent worker (its terminal envelope landed on the
+                    # bridge between the last in-flight scan and the deadline) is
+                    # captured as a SUCCESS via _handle_envelope — re-validated
+                    # against the dispatched (task_id, attempt) before any status
+                    # routing, then complete_task with NO extra charge (the
+                    # dispatch-time charge stands as the successful attempt). Only
+                    # a genuinely-stalled worker (the confirming read still returns
+                    # no validated terminal envelope) is soft-killed and charged.
+                    # The decision keys on a REAL signal (presence of a validated
+                    # terminal envelope), never on elapsed time alone. The
+                    # confirming read is non-consuming (production build_poll_fn
+                    # passes update_cursor=False), so it cannot hide the row from
+                    # the real consumer or be attempt-laundered.
                     del in_flight[tid]
-                    self._handle_failed_attempt(
-                        infl, "soft-kill: wall-clock 30min exceeded", tracker, pending
-                    )
+                    final = self._observe_before_kill(infl)
+                    if final is not None:
+                        # DONE-BUT-SILENT — terminal success via _handle_envelope
+                        # (validate_envelope anti-spoof → complete_task,
+                        # charge_attempt=False, NO extra increment).
+                        self._handle_envelope(infl, final, tracker, pending)
+                    else:
+                        # GENUINELY STALLED — the already-charged dispatch stands
+                        # as the attempt (migration 006: "incremented once per
+                        # dispatch; a wall-clock soft-kill counts as an attempt").
+                        self._handle_failed_attempt(
+                            infl,
+                            "soft-kill: wall-clock 30min exceeded - final read empty/non-terminal",
+                            tracker,
+                            pending,
+                        )
                     progressed = True
 
             if in_flight and not progressed:
                 self.sleep_fn(POLL_INTERVAL_S)
+
+    # ── read-first GO-OBSERVE (atelier#78) ───────────────────────────────
+
+    def _observe_before_kill(self, infl: _InFlight) -> Mapping[str, Any] | None:
+        """Confirming re-read at the deadline trip: re-invoke the SAME injected
+        ``poll_fn`` ONCE for this in-flight attempt and return its result.
+
+        This is the engine-side GO-OBSERVE gate (kaizen F15): a fired wall-clock
+        is a trigger to OBSERVE the worker's final state, not an auto-kill. The
+        production ``poll_fn`` (:func:`scripts.dispatch.build_poll_fn`) reads the
+        bridge with ``update_cursor=False`` (idempotent — consumes nothing, so a
+        real consumer can still see the row) and binds ``validate_envelope`` to
+        the dispatched ``(task_id, attempt)`` (anti-spoof / anti-attempt-laundering),
+        returning a TERMINAL-ONLY envelope or ``None``. So this re-read is a
+        side-effect-free real-signal probe: a non-``None`` result means the
+        worker's terminal reply landed between the last in-flight scan and the
+        deadline (done-but-silent); ``None`` means genuinely stalled.
+
+        Fail-closed: any exception is swallowed to ``None`` (mirrors poll_fn's own
+        except at ``dispatch.py``) — a read error is "no terminal reply", which
+        HOLDS the GO-OBSERVE gate closed and charges the soft-kill, never silently
+        advancing on a read failure."""
+        try:
+            return self._poll_fn(infl.task, infl.attempt)
+        except Exception:
+            return None
 
     # ── per-attempt outcome handling ─────────────────────────────────────
 
@@ -565,6 +629,9 @@ class WaveDispatcher:
                 attempt=infl.attempt,
                 last_status=reason,
                 charge_attempt=False,  # already charged at dispatch
+                # atelier#78 — snapshot what survived BEFORE recording this task
+                # abandoned, so the escalation carries the wave's partial progress.
+                surviving_state=self._snapshot_surviving(tracker),
             )
             tracker.record(str(_task_id(infl.task)), "abandoned")
             self.abandoned_ids.add(_task_id(infl.task))
@@ -579,6 +646,34 @@ class WaveDispatcher:
             )
             pending.append(infl.task)
 
+    def _snapshot_surviving(self, tracker: WaveTracker) -> dict[str, Any]:
+        """Snapshot the wave's surviving terminal state for an abandon escalation
+        (atelier#78 — mirrors the meeting backstop's PARTIAL flag).
+
+        On a force-abandon the escalation MUST carry what SURVIVED, never a bare
+        reason string: which sibling tasks already reached a terminal-only
+        closure (``terminal_tasks``), which are still outstanding
+        (``outstanding_tasks``), and the wave id — so the operator/PM sees the
+        partial progress instead of a context-free termination. Sourced ONLY from
+        the in-memory :class:`WaveTracker` (``summary()`` / ``outstanding()``) —
+        NO new mutator, NO durable write (A2 facade intact; preserves Memex-mode
+        parity since the snapshot introduces no backend call)."""
+        summary = tracker.summary()
+        reports = summary.get("reports") or {}
+        terminal_tasks = sorted(
+            role_id for role_id, status in reports.items() if status in TERMINAL_ONLY_STATUSES
+        )
+        # `artifacts` is reserved for last-validated-envelope pointers; the
+        # in-memory tracker does not retain envelope bodies, so v1 emits [] (no
+        # new mutator to harvest them). The wave_id + terminal/outstanding split
+        # is the surviving-state signal operators consume.
+        return {
+            "wave_id": summary.get("wave_id"),
+            "terminal_tasks": terminal_tasks,
+            "outstanding_tasks": sorted(tracker.outstanding()),
+            "artifacts": [],
+        }
+
     def _abandon_and_escalate(
         self,
         task: Mapping[str, Any],
@@ -588,6 +683,7 @@ class WaveDispatcher:
         last_status: str,
         charge_attempt: bool,
         upstream_task_id: Any | None = None,
+        surviving_state: Mapping[str, Any] | None = None,
     ) -> None:
         """Record an abandonment AND emit its escalation on the SAME code path
         (consensus item 8 — escalation is GUARANTEED, never best-effort).
@@ -596,6 +692,10 @@ class WaveDispatcher:
         the escalation is appended + handed to ``escalate_fn`` unconditionally.
         ``charge_attempt`` is only True for paths that must spend budget here
         (none today — dispatch already charges; cascade item 9 never charges).
+
+        ``surviving_state`` (atelier#78) is the in-memory :meth:`_snapshot_surviving`
+        snapshot — when present it is attached to the escalation BEFORE
+        ``escalate_fn`` so the abandon carries what survived, never a bare reason.
         """
         if charge_attempt:
             tasks_mod.increment_attempt(self.db_path, _task_id(task))
@@ -610,5 +710,7 @@ class WaveDispatcher:
             "last_status": last_status,
             "upstream_task_id": upstream_task_id,
         }
+        if surviving_state is not None:
+            escalation["surviving_state"] = dict(surviving_state)
         self.escalations.append(escalation)
         self._escalate_fn(escalation)  # GUARANTEED — same path, unconditional

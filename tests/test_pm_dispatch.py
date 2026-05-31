@@ -703,3 +703,340 @@ def test_set_abandoned_is_local_only_guarded_in_memex_mode(workspace, monkeypatc
         tasks_mod.set_abandoned(workspace["db"], 1, category="blocked")
     with pytest.raises(NotImplementedError, match="Local-mode only"):
         tasks_mod.increment_attempt(workspace["db"], 1)
+
+
+# ── Engine: read-first GO-OBSERVE stall detection (atelier#78) ──────────────
+#
+# Port of kaizen F15: a wall-clock deadline trip is a GO-OBSERVE trigger, not an
+# auto-kill. Before charging the soft-kill the engine performs ONE mandatory
+# confirming poll_fn re-read; a done-but-silent worker (terminal envelope landed
+# between the last in-flight scan and the deadline) is captured as a SUCCESS, and
+# only a genuinely-stalled worker (still no validated terminal envelope) is
+# soft-killed. The discriminator keys on a VALIDATED terminal envelope, never on
+# elapsed time alone.
+
+
+def test_done_but_silent_on_deadline_captured_as_success_not_charged(workspace):
+    """IRON-LAW. A worker whose valid terminal envelope is only available on the
+    confirming re-read AT the deadline trip is captured as a SUCCESS, NOT charged
+    a failed attempt.
+
+    Construction: a per-attempt call counter in the poll_fn closure. The FIRST
+    call (the in-flight scan) advances the FakeClock past WALL_CLOCK_S (so the
+    deadline trips) and returns None; the SECOND call (the engine's confirming
+    re-read inside `_observe_before_kill`) returns the valid done envelope.
+
+    RED on un-patched main: with no confirming read the silent attempt is charged
+    failed → re-dispatched to budget exhaustion → status=='abandoned',
+    category=='capacity', attempts==MAX_ATTEMPTS, one escalation. GREEN after the
+    fix: status=='complete', attempts==1 (charged ONCE at dispatch), spawns==[1]
+    (no re-dispatch), zero escalations."""
+    tid = _seed_task(workspace, title="done-but-silent", parallel_group=0)
+
+    clock = FakeClock()
+    calls = {"n": 0}
+
+    def poll_fn(task, attempt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # In-flight scan: worker's terminal reply has not yet landed; trip
+            # the deadline by advancing past the cap.
+            clock.advance(WALL_CLOCK_S + 1.0)
+            return None
+        # Confirming re-read at the deadline: the terminal envelope landed
+        # between the scan and the deadline trip — done-but-silent.
+        return _done_envelope(task["id"], attempt)
+
+    spawns = []
+    escalations = []
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: spawns.append(attempt),
+        poll_fn=poll_fn,
+        escalate_fn=lambda e: escalations.append(e),
+        clock=clock,
+        sleep_fn=lambda s: None,
+    )
+    d.run([_task_row(workspace, tid)])
+
+    row = _task_row(workspace, tid)
+    assert row["status"] == "complete"
+    assert row["attempts"] == 1
+    assert spawns == [1]
+    assert len(d.escalations) == 0
+    assert escalations == []
+
+
+def test_genuinely_stalled_is_softkilled_and_charged(workspace):
+    """REGRESSION. A worker that is silent on BOTH the in-flight scan AND the
+    confirming re-read on every attempt (always None) is genuinely stalled →
+    soft-killed and charged each round → budget exhaustion abandon. This re-asserts
+    the pre-#78 `test_wall_clock_soft_kill_charges_attempt` behavior survives the
+    change (the confirming-read-is-None path == the old blind path)."""
+    tid = _seed_task(workspace, title="genuine-stall", parallel_group=0)
+
+    clock = FakeClock()
+
+    def poll_fn(task, attempt):
+        # Silent on EVERY call (both the scan and the confirming re-read): the
+        # confirming read also returns None → genuine stall.
+        clock.advance(WALL_CLOCK_S + 1.0)
+        return None
+
+    spawns = []
+    escalations = []
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: spawns.append(attempt),
+        poll_fn=poll_fn,
+        escalate_fn=lambda e: escalations.append(e),
+        clock=clock,
+        sleep_fn=lambda s: None,
+    )
+    d.run([_task_row(workspace, tid)])
+
+    row = _task_row(workspace, tid)
+    assert row["status"] == "abandoned"
+    assert row["abandon_category"] == "capacity"
+    assert row["attempts"] == MAX_ATTEMPTS
+    assert spawns == [1, 2, 3, 4, 5]
+    assert len(escalations) == 1
+
+
+def test_softkill_no_double_charge_with_confirming_read(workspace):
+    """EXACT-COUNT. The inserted confirming read must NOT call increment_attempt
+    / _charge_dispatch — a silent double-charge would push attempts past the
+    dispatch count.
+
+    Forward mutation-guard: passes on un-patched main because `_observe_before_kill`
+    does not exist there (no confirming-read code path to double-charge); it pins
+    the SHIPPED confirming-read path against future mutation — verified non-vacuous
+    by mutating the success branch to introduce a double-charge (attempts lands 3+).
+
+    Attempt 1: confirming read still None (real stall, charged once at dispatch).
+    Attempt 2: poll_fn returns done on the IN-FLIGHT scan (normal close, no
+    deadline). Assert spawns==[1, 2] and attempts==2 EXACTLY — a confirming-read
+    double-charge would land 3+."""
+    tid = _seed_task(workspace, title="no-double-charge", parallel_group=0)
+
+    clock = FakeClock()
+    calls = {"n": 0}
+
+    def poll_fn(task, attempt):
+        calls["n"] += 1
+        if attempt == 1:
+            # Attempt 1 stalls on BOTH the scan and the confirming re-read.
+            clock.advance(WALL_CLOCK_S + 1.0)
+            return None
+        # Attempt 2 closes normally on the in-flight scan.
+        return _done_envelope(task["id"], attempt)
+
+    spawns = []
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: spawns.append(attempt),
+        poll_fn=poll_fn,
+        clock=clock,
+        sleep_fn=lambda s: None,
+    )
+    d.run([_task_row(workspace, tid)])
+
+    row = _task_row(workspace, tid)
+    assert spawns == [1, 2]
+    assert row["attempts"] == 2
+    assert row["status"] == "complete"
+
+
+def test_done_but_silent_rejects_spoofed_envelope_still_stalled(workspace):
+    """NEGATIVE. At the deadline the confirming read returns a structurally-valid
+    envelope whose `attempt` MISMATCHES the dispatched value (attempt-laundering).
+    It MUST NOT be captured as success: validate_envelope (run inside
+    _handle_envelope) rejects it → failed-attempt path → task continues to budget
+    exhaustion → abandoned. Proves the capture is gated on a VALIDATED real
+    signal, not a bare non-None read.
+
+    Forward mutation-guard: passes on un-patched main because `_observe_before_kill`
+    does not exist there (no confirming re-read to spoof); it pins the SHIPPED
+    confirming-read path against future mutation — verified non-vacuous by mutating
+    the success branch to skip validate_envelope (the spoofed envelope would then be
+    coerced to success and the budget-exhaustion abandon would vanish)."""
+    tid = _seed_task(workspace, title="spoofed", parallel_group=0)
+
+    clock = FakeClock()
+    calls = {"n": 0}
+
+    def poll_fn(task, attempt):
+        calls["n"] += 1
+        # Odd calls = in-flight scan (trip the deadline, no reply). Even calls =
+        # confirming re-read returning a SPOOFED envelope (wrong attempt number).
+        if calls["n"] % 2 == 1:
+            clock.advance(WALL_CLOCK_S + 1.0)
+            return None
+        # Mismatched attempt: claims attempt+1 — validate_envelope rejects it.
+        return _done_envelope(task["id"], attempt + 1)
+
+    spawns = []
+    escalations = []
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: spawns.append(attempt),
+        poll_fn=poll_fn,
+        escalate_fn=lambda e: escalations.append(e),
+        clock=clock,
+        sleep_fn=lambda s: None,
+    )
+    d.run([_task_row(workspace, tid)])
+
+    row = _task_row(workspace, tid)
+    assert row["status"] == "abandoned"
+    assert row["abandon_category"] == "capacity"
+    assert row["attempts"] == MAX_ATTEMPTS
+    assert len(escalations) == 1
+
+
+def test_blocked_confirming_read_is_not_captured_as_success(workspace):
+    """THIRD-ARM. The confirming re-read discriminator has three arms: None (genuine
+    stall → soft-kill), a VALIDATED TERMINAL envelope (done-but-silent → success),
+    and a VALIDATED NON-TERMINAL envelope (blocked / needs-input). This pins the
+    third arm: a non-terminal confirming read is a STRUCTURALLY-VALID but NON-CLOSING
+    signal and MUST NOT be coerced to success — it routes through `_handle_envelope`,
+    whose status gate (`TERMINAL_ONLY_STATUSES = {done, abandoned}`) sends a `blocked`
+    status to `_handle_failed_attempt`, exactly like the None and spoofed arms.
+
+    At the deadline the confirming read returns a valid `blocked` envelope (correct
+    task_id + attempt, empty artifacts legal for blocked). On a budget that is
+    re-dispatched each round it must reach MAX_ATTEMPTS → abandon with
+    category=='capacity', one escalation — NOT status=='complete'.
+
+    Non-vacuous: this would catch a mutation that routes ANY non-None confirming read
+    to success (e.g. `_handle_envelope` dropped, or the deadline branch coercing a
+    bare non-None `final` straight to complete_task) — that mutation flips the
+    assertions to status=='complete' / attempts==1.
+
+    Defensive-depth note: the PRODUCTION `build_poll_fn` (scripts/dispatch.py) filters
+    non-terminal envelopes to None before the engine ever sees them, so this arm is
+    not reachable on the shipped poll_fn. The test pins the ENGINE's own defensive
+    routing so the contract holds if that upstream filter is ever loosened — the
+    engine never trusts the poll_fn to have pre-gated terminality."""
+    tid = _seed_task(workspace, title="blocked-confirming", parallel_group=0)
+
+    clock = FakeClock()
+    calls = {"n": 0}
+
+    def poll_fn(task, attempt):
+        calls["n"] += 1
+        # Odd calls = in-flight scan (trip the deadline, no reply). Even calls =
+        # confirming re-read returning a VALID but NON-TERMINAL `blocked` envelope.
+        if calls["n"] % 2 == 1:
+            clock.advance(WALL_CLOCK_S + 1.0)
+            return None
+        return _status_envelope(task["id"], attempt, "blocked")
+
+    spawns = []
+    escalations = []
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: spawns.append(attempt),
+        poll_fn=poll_fn,
+        escalate_fn=lambda e: escalations.append(e),
+        clock=clock,
+        sleep_fn=lambda s: None,
+    )
+    d.run([_task_row(workspace, tid)])
+
+    row = _task_row(workspace, tid)
+    assert row["status"] == "abandoned"
+    assert row["abandon_category"] == "capacity"
+    assert row["attempts"] == MAX_ATTEMPTS
+    assert spawns == [1, 2, 3, 4, 5]
+    assert len(escalations) == 1
+
+
+def test_force_abandon_snapshots_surviving_state(workspace):
+    """SNAPSHOT-CONTENT. A two-task wave: task A reports done on its in-flight
+    scan; task B is silent on every scan AND confirming read → budget-exhaustion
+    abandon. The abandon escalation for B MUST carry a non-empty `surviving_state`
+    dict whose `terminal_tasks` names task A's id (exact membership), NOT a bare
+    reason string. Falsifier: on main the escalation dict has no surviving_state
+    key."""
+    t_a = _seed_task(workspace, title="A-done", parallel_group=0)
+    t_b = _seed_task(workspace, title="B-stall", parallel_group=0)
+
+    clock = FakeClock()
+
+    def poll_fn(task, attempt):
+        if task["id"] == t_a:
+            # A closes on the in-flight scan, no clock advance.
+            return _done_envelope(task["id"], attempt)
+        # B is silent on the scan AND the confirming re-read; trip the deadline.
+        clock.advance(WALL_CLOCK_S + 1.0)
+        return None
+
+    escalations = []
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: None,
+        poll_fn=poll_fn,
+        escalate_fn=lambda e: escalations.append(e),
+        clock=clock,
+        sleep_fn=lambda s: None,
+    )
+    d.run([_task_row(workspace, t_a), _task_row(workspace, t_b)])
+
+    # A completed; B abandoned via capacity.
+    assert _task_row(workspace, t_a)["status"] == "complete"
+    assert _task_row(workspace, t_b)["status"] == "abandoned"
+
+    b_esc = [e for e in escalations if e["task_id"] == t_b]
+    assert len(b_esc) == 1
+    surviving = b_esc[0].get("surviving_state")
+    assert surviving is not None, "force-abandon escalation must snapshot surviving state"
+    assert surviving["wave_id"] == "wave-0"
+    # Exact membership: A (done) is in the terminal set; B is NOT yet recorded
+    # terminal at the snapshot instant (the snapshot is built INSIDE
+    # _abandon_and_escalate, BEFORE tracker.record marks B abandoned), so B is
+    # still outstanding. This is the meaningful "what survived" snapshot: A's
+    # success is captured, B's id appears in the still-outstanding set.
+    assert surviving["terminal_tasks"] == [str(t_a)]
+    assert surviving["outstanding_tasks"] == [str(t_b)]
+
+
+def test_non_vacuity_confirming_read_invoked(workspace):
+    """NON-VACUITY. A call-counter proves the confirming GO-OBSERVE read actually
+    FIRED at the deadline — not skipped with the test passing via the happy path.
+    A single silent task trips the wall-clock once then (confirming read) reports
+    done; poll_fn must have been invoked the in-flight-scan count PLUS one extra
+    confirming call (i.e. >= 2 here, where exactly 2 is the minimal proof). Guards
+    against a future edit that drops the confirming read but keeps tests green."""
+    tid = _seed_task(workspace, title="non-vacuity", parallel_group=0)
+
+    clock = FakeClock()
+    calls = {"n": 0}
+
+    def poll_fn(task, attempt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            clock.advance(WALL_CLOCK_S + 1.0)
+            return None
+        return _done_envelope(task["id"], attempt)
+
+    spawns = []
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: spawns.append(attempt),
+        poll_fn=poll_fn,
+        clock=clock,
+        sleep_fn=lambda s: None,
+    )
+    d.run([_task_row(workspace, tid)])
+
+    # Exactly 2 poll_fn invocations: the in-flight scan (1) + the confirming
+    # re-read at the deadline (2). Crucially spawns==[1] — a SINGLE dispatch:
+    # the success came from the confirming re-read at the deadline, NOT from a
+    # re-dispatch (which would land spawns==[1, 2] and call #2 on a NEW attempt).
+    # On the un-patched blind path call #1 returns None → the attempt is charged
+    # failed → re-dispatched → call #2 is a fresh in-flight scan, so spawns would
+    # be [1, 2]; asserting spawns==[1] makes this RED without the confirming read.
+    assert calls["n"] == 2
+    assert spawns == [1]
+    assert _task_row(workspace, tid)["status"] == "complete"

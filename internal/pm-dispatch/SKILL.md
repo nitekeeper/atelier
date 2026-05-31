@@ -114,6 +114,31 @@ catches a silently-dead worker that emits neither heartbeat nor envelope. When
 soft-kill **counts as that attempt** (the attempt was already charged at
 dispatch — it is never double-charged).
 
+### Read-first on the deadline trip (GO-OBSERVE, not auto-kill)
+
+A fired wall-clock is a **GO-OBSERVE trigger, not an auto-kill** (kaizen F15
+ported into the engine, atelier#78). Before the soft-kill is charged, the engine
+performs **one mandatory confirming `poll_fn` re-read** of the worker's terminal
+reply (`_observe_before_kill`), then branches on a **real signal**:
+
+- **Done-but-silent → SUCCESS.** If the confirming re-read returns a **validated
+  terminal envelope** — the worker's terminal reply landed on the bridge between
+  the last in-flight scan and the deadline — the attempt is captured as a
+  **success** via `_handle_envelope`: `complete_task`, **NOT** a failed attempt,
+  **NO extra charge** (the dispatch-time charge stands as the successful
+  attempt). It is re-validated against the dispatched `(task_id, attempt)` before
+  any status routing, so a late/mismatched envelope cannot launder a success.
+- **Genuinely stalled → soft-kill.** If the confirming re-read still returns no
+  validated terminal envelope (`None`), the worker is genuinely stalled →
+  `_handle_failed_attempt` soft-kills and the already-charged dispatch stands as
+  the attempt.
+
+The discriminator keys on a **real signal — the presence of a validated terminal
+envelope — never on elapsed time alone.** The confirming read is **non-consuming**
+(production `build_poll_fn` passes `update_cursor=False`), so it cannot hide the
+row from the real consumer or be attempt-laundered; it is **fail-closed** (a read
+error is treated as `None` → soft-kill, never a silent advance).
+
 Distinguish two intervals: the **30 s emit cadence** is the worker's advisory
 heartbeat rhythm; `POLL_INTERVAL_S` (0.2 s) is the engine's internal in-flight
 scan interval. Neither gates anything; only the wall-clock does.
@@ -169,6 +194,17 @@ escalation is **unconditionally** appended to `self.escalations` and handed to
 `escalate_fn`. The escalation record names `task_id`, `worker` (`assigned_to`),
 `attempt`, `category`, `last_status`, and `upstream_task_id`. Escalation is
 **guaranteed, never best-effort** — even the default sink emits a `WARNING`.
+
+**Force-abandon snapshots surviving state (atelier#78).** On a wall-clock /
+budget force-abandon (and on cascade-abandon), the escalation record additionally
+carries a `surviving_state` snapshot — **never a bare termination string**: the
+`wave_id`, the sibling tasks that already reached a terminal-only closure
+(`terminal_tasks`), the still-`outstanding_tasks`, and reserved `artifacts`
+pointers. It is built from the **in-memory `WaveTracker`** (`_snapshot_surviving`
+over `summary()` / `outstanding()`) — **no new mutator, no durable write** (A2
+facade intact, Memex-mode parity preserved). This mirrors the meeting backstop's
+PARTIAL flag (`team_meeting.py` `minutes_partial` / `partial_reason`): an abandon
+surfaces the wave's partial progress, not a context-free kill.
 
 ## `abandoned` is terminal immediately; `abandoned_ack_at` never gates
 
@@ -271,3 +307,15 @@ dispatch record (anti cross-task spoof + anti attempt-laundering) per TM-008.
   guaranteed, never best-effort.
 - `abandoned_ack_at` is audit-only and MUST NOT become a barrier precondition.
 - Workers MUST emit `attempt` in the reply envelope (validator check 3).
+- A wall-clock deadline trip MUST trigger **one confirming `poll_fn` read** before
+  the soft-kill is charged (GO-OBSERVE, kaizen F15 / atelier#78); a done-but-silent
+  worker is captured as **done** (no extra attempt charged), only a genuinely-stalled
+  worker is charged. The confirming read MUST be **non-consuming**
+  (`update_cursor=False`) and MUST **re-validate** the envelope (anti-spoof) before
+  any status routing — never trust a bare non-`None` read. It adds **no** new
+  re-queue site: `_handle_failed_attempt` stays the single re-queue site, so the
+  `<= MAX_ATTEMPTS` bound holds.
+- On a force-abandon (capacity or cascade) the escalation MUST **snapshot
+  surviving terminal state** (`surviving_state` from the in-memory `WaveTracker`),
+  never a bare reason string. The snapshot MUST introduce **no new mutator** (A2
+  facade; Memex-mode parity).

@@ -82,6 +82,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -887,6 +888,389 @@ def build_spawn_fn(
         )
 
     return spawn_fn
+
+
+# ── Production queue-bridge transport (atelier#81) ──────────────────────────
+#
+# The PRODUCTION binding of the :class:`DispatchTools` Protocol — the analog of
+# kaizen's ``scripts/cc_tool_bridge.py::QueueBridgeWrapper``. ``dispatch.py`` is
+# pure Python and cannot call the Claude Code harness tools (``Agent`` /
+# ``TeamCreate`` / ``SendMessage``) directly, so this wrapper ENQUEUES a row in
+# the ``bridge_requests`` table (migrations/shared/008) and the orchestrator
+# turn-loop SERVICES it (internal/bridge-poll/SKILL.md): reads the pending row,
+# performs the real tool call, writes ``response_json`` + flips ``status`` to
+# ``ready`` / ``error``.
+#
+# ── always-Local enforced in code ──
+# ``bridge_requests`` lives in shared/ (a SCHEMA home, not a backend choice), but
+# the request-queue is opened on the LOCAL ``.ai/atelier.db`` at RUNTIME — the
+# same handle bridge_send.py / bridge_read.py write the inter-agent message wire
+# through. "always Local" is enforced here by resolving the local DB path
+# explicitly, never routing through the Memex backend.
+#
+# ── WAL + busy_timeout ──
+# The wrapper's blocking create_team poll and the orchestrator servicer both
+# touch the same row, so the connection opens WAL + a busy_timeout so neither
+# deadlocks the other (mirrors kaizen's ``_connect`` PRAGMA bundle).
+
+#: The four DispatchTools method names — string-identical to the kind CHECK enum
+#: in migrations/shared/008_bridge_requests.sql so the servicer maps kind->method
+#: by NAME with zero translation. Re-validated at enqueue time (fail-closed: an
+#: out-of-set kind is rejected before it can reach the SQLite CHECK).
+BRIDGE_REQUEST_KINDS: frozenset[str] = frozenset(
+    {"create_team", "spawn_teammate", "send_message", "spawn_subagent"}
+)
+
+#: The bounded create_team poll budget, seconds. Mirrors kaizen's
+#: ``cc_tool_bridge.PER_CALL_TIMEOUT_S`` discipline (≈600s): on timeout the
+#: poller flips/observes 'error' and RAISES — never an unbounded spin.
+BRIDGE_PER_CALL_TIMEOUT_S: float = 600.0
+
+#: Poll cadence for the blocking create_team wait. SQLite has no notify, so we
+#: poll; cheap (a single indexed SELECT on the row's own id).
+BRIDGE_POLL_INTERVAL_S: float = 0.2
+
+#: SQLite busy_timeout (ms) so the create_team poll and the orchestrator
+#: servicer never spuriously raise ``database is locked`` writing the same row.
+BRIDGE_BUSY_TIMEOUT_MS: int = 5000
+
+#: Repo-relative Local-mode DB path. The request-queue is Local-only at runtime
+#: (cf. the section comment); resolved against the workspace git root the same
+#: way ``scripts.backend_local`` resolves ``.ai/atelier.db``.
+BRIDGE_DB_RELPATH = Path(".ai") / "atelier.db"
+
+
+class BridgeDispatchError(DispatchError):
+    """Raised when a queue-bridge harness call fails — a serviced-but-failed
+    row (``status='error'``), a create_team response missing its ``team_id``,
+    or a create_team poll that exceeds :data:`BRIDGE_PER_CALL_TIMEOUT_S`.
+
+    A :class:`DispatchError` subclass (operator-facing fail-loud) — a failed
+    transport call is a run-level failure, NOT a worker outcome to absorb.
+    """
+
+
+def _resolve_local_bridge_db() -> str:
+    """Resolve the LOCAL ``.ai/atelier.db`` path for the request queue.
+
+    Mirrors ``scripts.backend_local._workspace_root`` (walk to the git root)
+    so the queue always lives on the same Local DB the bridge message wire
+    uses — enforcing "bridge_requests is always Local" in code, never via the
+    Memex backend. Imported lazily to avoid dragging ``backend_local``'s
+    import-time cost (and its tmux-free git-root resolver) into every
+    ``dispatch.py`` import.
+    """
+    from scripts.git_utils import find_git_root
+
+    root = find_git_root(Path.cwd().resolve())
+    if root is None:
+        raise BridgeDispatchError(
+            "cannot resolve the Local bridge DB: not inside a git workspace. "
+            "The production queue-bridge transport requires CWD under the "
+            "atelier workspace (the same .ai/atelier.db the message wire uses)."
+        )
+    db = root / BRIDGE_DB_RELPATH
+    db.parent.mkdir(parents=True, exist_ok=True)
+    return str(db)
+
+
+def _open_bridge_db(db_path: str) -> sqlite3.Connection:
+    """Open the Local bridge DB with WAL + busy_timeout.
+
+    Both PRAGMAs are connection-scoped in SQLite, so every consumer of the
+    request queue MUST go through this helper (mirrors kaizen's
+    ``cc_tool_bridge._connect`` + ``scripts.backend_local._conn``). The
+    busy_timeout keeps the create_team poll and the orchestrator servicer from
+    deadlocking on the same row.
+    """
+    con = sqlite3.connect(db_path)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute(f"PRAGMA busy_timeout={BRIDGE_BUSY_TIMEOUT_MS}")
+    return con
+
+
+class QueueBridgeDispatchTools:
+    """Production :class:`DispatchTools` — enqueue harness calls onto the
+    ``bridge_requests`` queue (migrations/shared/008); the orchestrator
+    turn-loop services them (internal/bridge-poll/SKILL.md). The analog of
+    kaizen's ``scripts/cc_tool_bridge.py::QueueBridgeWrapper``.
+
+    Method ↔ kind mapping is BY NAME (the kind CHECK enum is string-identical
+    to these method names), so the servicer needs zero translation.
+
+    * :meth:`create_team` BLOCKS — enqueue, then poll its OWN row until status
+      is ``ready`` (parse ``response_json`` for the ``team_id`` and return it)
+      or ``error`` (raise). Bounded by :data:`BRIDGE_PER_CALL_TIMEOUT_S`; on
+      timeout it observes 'error' / raises, NEVER an unbounded spin.
+    * :meth:`spawn_teammate` / :meth:`send_message` / :meth:`spawn_subagent`
+      are FIRE-AND-FORGET — enqueue the row and return ``None`` immediately
+      (never poll). The worker's terminal reply is read back through the
+      SEPARATE :func:`build_poll_fn` envelope-poll, never as a return here.
+
+    Idempotency: only ``status='pending'`` rows are picked up by the servicer,
+    so a status flip is the "claimed" key — a re-dispatch never double-spawns.
+
+    ``team_pk`` scopes the queue to one cycle/run (the servicer's pending scan
+    filters on it); ``db_path`` defaults to the resolved Local ``.ai/atelier.db``
+    but is injectable so tests pass a ``tmp_path`` DB.
+    """
+
+    PER_CALL_TIMEOUT_S: float = BRIDGE_PER_CALL_TIMEOUT_S
+    POLL_INTERVAL_S: float = BRIDGE_POLL_INTERVAL_S
+
+    def __init__(
+        self,
+        team_pk: str,
+        *,
+        db_path: str | Path | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._team_pk = str(team_pk)
+        self._db_path = str(db_path) if db_path is not None else _resolve_local_bridge_db()
+        #: Injectable for deterministic tests (atelier bans argless time.now()).
+        self._clock = clock
+        self._sleep_fn = sleep_fn
+
+    # ── enqueue primitive ───────────────────────────────────────────────
+
+    def _enqueue(self, kind: str, args: Mapping[str, Any]) -> int:
+        """INSERT one pending ``bridge_requests`` row; return its id.
+
+        Fail-closed: an out-of-enum ``kind`` is rejected HERE (before the
+        SQLite CHECK would also reject it) so a caller bug surfaces as a clear
+        :class:`BridgeDispatchError`, not an opaque IntegrityError. Untrusted
+        input boundary: ``args`` is serialized to JSON as DATA — never executed.
+        """
+        if kind not in BRIDGE_REQUEST_KINDS:
+            raise BridgeDispatchError(
+                f"refusing to enqueue out-of-enum bridge kind {kind!r}; "
+                f"expected one of {sorted(BRIDGE_REQUEST_KINDS)}"
+            )
+        con = _open_bridge_db(self._db_path)
+        try:
+            cur = con.execute(
+                "INSERT INTO bridge_requests (team_pk, kind, args_json, status) "
+                "VALUES (?, ?, ?, 'pending')",
+                (self._team_pk, kind, json.dumps(dict(args))),
+            )
+            con.commit()
+            return int(cur.lastrowid)
+        finally:
+            con.close()
+
+    def _poll_row(self, row_id: int) -> tuple[str, str | None, str | None]:
+        """Return ``(status, response_json, error_text)`` for ``row_id``.
+
+        A vanished row is treated as a remote error (mirrors kaizen's
+        ``QueueBridgeWrapper._poll``) so the create_team poller raises rather
+        than spinning on a row the servicer deleted out from under it.
+        """
+        con = _open_bridge_db(self._db_path)
+        try:
+            row = con.execute(
+                "SELECT status, response_json, error_text FROM bridge_requests WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            if row is None:
+                return ("error", None, f"row {row_id} disappeared from the bridge queue")
+            return (row[0], row[1], row[2])
+        finally:
+            con.close()
+
+    # ── DispatchTools Protocol surface ──────────────────────────────────
+
+    def create_team(self, name: str, members: list[str]) -> str:
+        """``TeamCreate`` — BLOCKS until the servicer resolves the row.
+
+        Enqueue → poll our OWN row until ``ready`` (parse ``response_json`` for
+        the ``team_id`` string and return it) or ``error`` (raise). Bounded by
+        :data:`PER_CALL_TIMEOUT_S`: on timeout we raise
+        :class:`BridgeDispatchError` rather than spin forever.
+        """
+        row_id = self._enqueue("create_team", {"name": name, "members": list(members)})
+        deadline = self._clock() + self.PER_CALL_TIMEOUT_S
+        while True:
+            status, response_json, error_text = self._poll_row(row_id)
+            if status == "ready":
+                return self._extract_team_id(row_id, response_json)
+            if status == "error":
+                raise BridgeDispatchError(
+                    f"create_team row {row_id} failed: {error_text or '(no error_text)'}"
+                )
+            # status == 'pending' — bounded wait (NEVER unbounded).
+            if self._clock() >= deadline:
+                raise BridgeDispatchError(
+                    f"create_team row {row_id} timed out after {self.PER_CALL_TIMEOUT_S}s "
+                    "(orchestrator never serviced it to 'ready'/'error')"
+                )
+            self._sleep_fn(self.POLL_INTERVAL_S)
+
+    @staticmethod
+    def _extract_team_id(row_id: int, response_json: str | None) -> str:
+        """Parse + validate the ``team_id`` out of a ready create_team row."""
+        if not response_json:
+            raise BridgeDispatchError(
+                f"create_team row {row_id} reached 'ready' with an empty response_json"
+            )
+        try:
+            resp = json.loads(response_json)
+        except json.JSONDecodeError as exc:
+            raise BridgeDispatchError(
+                f"create_team row {row_id} response_json is not valid JSON: {exc}"
+            ) from exc
+        team_id = resp.get("team_id") if isinstance(resp, Mapping) else None
+        if not isinstance(team_id, str) or not team_id:
+            raise BridgeDispatchError(
+                f"create_team row {row_id} response missing a non-empty 'team_id' string: {resp!r}"
+            )
+        return team_id
+
+    def spawn_teammate(self, team_id: str, name: str, prompt: str) -> None:
+        """First-touch ``Agent`` spawn — fire-and-forget (enqueue, return None)."""
+        self._enqueue("spawn_teammate", {"team_id": team_id, "name": name, "prompt": prompt})
+
+    def send_message(self, team_id: str, to: str, message: str) -> None:
+        """``SendMessage`` to an already-spawned teammate — fire-and-forget."""
+        self._enqueue("send_message", {"team_id": team_id, "to": to, "message": message})
+
+    def spawn_subagent(self, task_id: Any, attempt: int, prompt: str) -> None:
+        """Sub-agent mode ``Agent`` spawn — fire-and-forget (enqueue, return None)."""
+        self._enqueue("spawn_subagent", {"task_id": task_id, "attempt": attempt, "prompt": prompt})
+
+
+def build_poll_fn(
+    db_path: str | Path,
+    *,
+    team_id: str,
+    role_id_for: Callable[[Mapping[str, Any]], str],
+) -> Callable[[Mapping[str, Any], int], Mapping[str, Any] | None]:
+    """Build a WaveDispatcher-compatible ``poll_fn(task, attempt) -> Mapping | None``.
+
+    The READ half of the WaveDispatcher seam (the write half is
+    :func:`build_spawn_fn` + :class:`QueueBridgeDispatchTools`). Reads the
+    worker's TERMINAL reply envelope from the EXISTING ``bridge_messages`` table
+    (via ``scripts.bridge_read.read_once`` — the inter-agent message wire, NOT
+    the request queue), validates it fail-closed, and returns the parsed
+    envelope Mapping iff the worker has reported a TERMINAL-ONLY closure.
+
+    Contract (matches ``pm_dispatch.WaveDispatcher``'s ``poll_fn`` seam):
+
+    * **Non-blocking.** A single ``read_once`` (which itself is a single
+      indexed SELECT) — the engine polls this; it must never block.
+    * **Returns ``None`` for "not done yet"** — NEVER ``{}``. ``None`` is the
+      seam's sentinel; ``{}`` would validate-fail downstream and be misread as
+      a malformed envelope. We return ``None`` when there is no reply, when the
+      reply fails :func:`scripts.pm_dispatch_envelope.validate_envelope`
+      (fail-closed — a malformed envelope HOLDS the barrier, never advances it),
+      and when the validated status is NON-terminal (``blocked`` /
+      ``needs-input`` also emit replies per 006 — filter on TERMINAL_ONLY).
+    * **Untrusted input.** The envelope is DATA — only parsed / validated /
+      compared, never executed. ``read_once`` fences the payload; we parse the
+      JSON body and hand it to the pure validator.
+
+    ``role_id_for(task) -> str`` maps a task to the teammate role-id whose
+    inbox carries its reply (defaults at the call site to the same
+    ``teammate_name_for`` used by :func:`build_spawn_fn`). ``team_id`` is the
+    cycle's team. ``db_path`` is the Local DB carrying ``bridge_messages``.
+    """
+    # Lazy import: pm_dispatch_envelope imports FROM scripts.dispatch
+    # (RULES_SKILL, TERMINAL_STATUSES), so importing it at module top level here
+    # would be a circular import. bridge_read does NOT import dispatch, but we
+    # keep it lazy for symmetry + cheap module import.
+    from scripts.bridge_read import read_once
+    from scripts.pm_dispatch_envelope import EnvelopeValidationError, validate_envelope
+
+    db_path_str = str(db_path)
+
+    def poll_fn(task: Mapping[str, Any], attempt: int) -> Mapping[str, Any] | None:
+        role_id = role_id_for(task)
+        # Non-blocking read of THIS teammate's inbox. update_cursor=False so a
+        # poll never advances the delivery cursor — the engine may poll the
+        # same attempt many times before it reports, and consuming the row
+        # would hide a later re-read. Heartbeats are excluded by default.
+        try:
+            rows = read_once(
+                db_path_str,
+                team_id=team_id,
+                role_id=role_id,
+                since_seq=0,
+                update_cursor=False,
+            )
+        except Exception:
+            # A read error (team not yet created, schema mismatch mid-setup,
+            # transient lock) is "no terminal reply yet" — HOLD the barrier,
+            # never advance on a read failure. Fail-closed.
+            return None
+
+        # Scan replies newest-first for the first VALID terminal-only envelope
+        # matching this (task, attempt). reply rows are 'kind=reply'; the
+        # bridge_read fence wraps the payload in <untrusted>…</untrusted> for
+        # DISPLAY, but the raw envelope JSON is what a worker sends — we parse
+        # the *inner* payload the worker wrote. read_once returns the fenced
+        # string, so we strip the fence to recover the worker's JSON body.
+        for row in reversed(rows):
+            if row.get("kind") != "reply":
+                continue
+            envelope = _parse_reply_envelope(row.get("payload"))
+            if envelope is None:
+                continue
+            try:
+                validated = validate_envelope(
+                    envelope,
+                    dispatched_task_id=task[_DISPATCH_TASK_ID_KEY],
+                    dispatched_attempt=attempt,
+                )
+            except EnvelopeValidationError:
+                # Fail-closed: a malformed / mismatched envelope is NOT a
+                # terminal closure. Keep scanning; if none validate, return
+                # None (HOLD the barrier) rather than {} ("done with no data").
+                continue
+            if validated.get("status") in TERMINAL_ONLY_STATUSES:
+                return validated
+            # A VALID but NON-terminal envelope (blocked / needs-input) also
+            # holds the barrier — keep scanning for a later terminal reply.
+        return None
+
+    return poll_fn
+
+
+# Recover the worker's JSON envelope from a bridge_read fenced payload. The
+# fence is ``<untrusted source="…" seq="…">{json}</untrusted>`` (bridge_read
+# HTML-escapes the inner body with quote=False). We strip the wrapper + unescape
+# the three element-content entities bridge_read._fence emits, then json.loads.
+_FENCE_OPEN_RE = re.compile(r'^<untrusted source="[^"]*" seq="[^"]*">')
+_FENCE_CLOSE = "</untrusted>"
+
+
+def _parse_reply_envelope(payload: Any) -> Mapping[str, Any] | None:
+    """Best-effort parse of a fenced bridge reply payload into a JSON Mapping.
+
+    Returns ``None`` (never raises) on any shape that is not a parseable JSON
+    object — the caller treats that as "no valid envelope here" and keeps
+    scanning. Untrusted input: the payload is DATA; we only unescape + parse it.
+    """
+    if not isinstance(payload, str):
+        return None
+    body = payload
+    m = _FENCE_OPEN_RE.match(body)
+    if m is not None:
+        # The payload was fenced by bridge_read._fence, which HTML-escapes the
+        # element content with html.escape(quote=False) — only & < > transform.
+        # Strip the wrapper, then reverse the escape in &amp;-LAST order so an
+        # &amp;lt; in the source round-trips correctly. We unescape ONLY on the
+        # fenced path: un-fenced raw JSON was never escaped, so unescaping it
+        # would corrupt legitimate &amp; / &lt; / &gt; content in the envelope.
+        body = body[m.end() :]
+        if body.endswith(_FENCE_CLOSE):
+            body = body[: -len(_FENCE_CLOSE)]
+        body = body.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, Mapping) else None
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────

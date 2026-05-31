@@ -100,6 +100,8 @@ def test_apply_shared_then_local_creates_all_tables(tmp_path):
         "bridge_delivery",
         "shutdown_requests",
         "team_audit_log",
+        # shared/ tables (008 — production dispatch binding; atelier#81)
+        "bridge_requests",
         # local-only/ tables
         "roles",
         "agents",

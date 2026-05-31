@@ -500,3 +500,341 @@ def test_build_spawn_fn_agent_team_requires_team_name(tmp_path):
             team_name=None,
             teams_root=tmp_path,
         )
+
+
+# ── atelier#81: production queue-bridge transport (QueueBridgeDispatchTools) ──
+#
+# These exercise the LIVE binding of the DispatchTools Protocol against the real
+# bridge_requests table (migrations/shared/008) — no mocks of the queue itself
+# (the orchestrator servicer is the only thing faked, via direct row UPDATEs).
+
+import sqlite3  # noqa: E402 — co-located with the production-wrapper tests below
+from pathlib import Path  # noqa: E402
+
+from scripts.dispatch import (  # noqa: E402
+    BRIDGE_REQUEST_KINDS,
+    BridgeDispatchError,
+    QueueBridgeDispatchTools,
+    build_poll_fn,
+)
+from scripts.migrate import apply_migrations  # noqa: E402
+
+_MIGRATIONS_SHARED = Path(__file__).resolve().parent.parent / "migrations" / "shared"
+
+
+@pytest.fixture
+def bridge_db(tmp_path):
+    """A real Local DB with shared/ migrations applied — carries both the
+    bridge_requests request-queue (008) and the bridge_messages wire (003)."""
+    db = tmp_path / "atelier.db"
+    apply_migrations(str(db), _MIGRATIONS_SHARED)
+    return str(db)
+
+
+def _rows(db_path, **where):
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        clause = " AND ".join(f"{k} = ?" for k in where)
+        sql = "SELECT * FROM bridge_requests"
+        if clause:
+            sql += f" WHERE {clause}"
+        sql += " ORDER BY id"
+        return [dict(r) for r in con.execute(sql, tuple(where.values())).fetchall()]
+    finally:
+        con.close()
+
+
+def _service_row(db_path, row_id, *, status, response=None, error=None):
+    """Stand in for the orchestrator servicer: flip a pending row to ready/error."""
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute(
+            "UPDATE bridge_requests SET status = ?, response_json = ?, error_text = ?, "
+            "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+            (status, json.dumps(response) if response is not None else None, error, row_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_kind_enum_string_identical_to_protocol_method_names():
+    """The 008 kind enum MUST be string-identical to the DispatchTools method
+    names so the servicer maps kind->method by name with zero translation."""
+    expected = {"create_team", "spawn_teammate", "send_message", "spawn_subagent"}
+    assert expected == BRIDGE_REQUEST_KINDS
+
+
+def test_fire_and_forget_methods_enqueue_and_return_none(bridge_db):
+    """spawn_teammate / send_message / spawn_subagent each enqueue exactly ONE
+    pending row and return None WITHOUT polling (fire-and-forget)."""
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+
+    assert tools.spawn_teammate("T", "sdet-1", "BRIEF") is None
+    assert tools.send_message("T", "be-1", "MSG") is None
+    assert tools.spawn_subagent("task-7", 2, "PROMPT") is None
+
+    rows = _rows(bridge_db)
+    assert [r["kind"] for r in rows] == ["spawn_teammate", "send_message", "spawn_subagent"]
+    # Every fire-and-forget row is DURABLE + still pending (never serviced here).
+    assert all(r["status"] == "pending" for r in rows)
+    assert all(r["team_pk"] == "cycle-1" for r in rows)
+    # args_json round-trips the tool args as DATA.
+    assert json.loads(rows[0]["args_json"]) == {"team_id": "T", "name": "sdet-1", "prompt": "BRIEF"}
+    assert json.loads(rows[2]["args_json"]) == {
+        "task_id": "task-7",
+        "attempt": 2,
+        "prompt": "PROMPT",
+    }
+
+
+def test_create_team_blocks_until_ready_then_returns_team_id(bridge_db):
+    """create_team enqueues, polls its OWN row, and returns the serviced
+    team_id once the row flips to 'ready'. (Servicer flips it after enqueue.)"""
+    ticks = {"n": 0}
+
+    def fake_clock():
+        return float(ticks["n"])
+
+    def fake_sleep(_seconds):
+        # Simulate the orchestrator servicing the row on the 2nd poll.
+        ticks["n"] += 1
+        if ticks["n"] == 2:
+            pending = _rows(bridge_db, kind="create_team", status="pending")
+            _service_row(bridge_db, pending[0]["id"], status="ready", response={"team_id": "T-99"})
+
+    tools = QueueBridgeDispatchTools(
+        "cycle-1", db_path=bridge_db, clock=fake_clock, sleep_fn=fake_sleep
+    )
+    team_id = tools.create_team("cycle-team", ["pm-1", "sdet-1"])
+    assert team_id == "T-99"
+    # The row was enqueued with the right kind + args, then serviced to ready.
+    row = _rows(bridge_db, kind="create_team")[0]
+    assert row["status"] == "ready"
+    assert json.loads(row["args_json"]) == {"name": "cycle-team", "members": ["pm-1", "sdet-1"]}
+
+
+def test_create_team_raises_on_error_status(bridge_db):
+    """A serviced-but-FAILED row (status='error') makes create_team RAISE —
+    the 3-state status is exactly why 'error' exists (no infinite spin)."""
+
+    def fake_sleep(_seconds):
+        pending = _rows(bridge_db, kind="create_team", status="pending")
+        if pending:
+            _service_row(bridge_db, pending[0]["id"], status="error", error="TeamCreate denied")
+
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, sleep_fn=fake_sleep)
+    with pytest.raises(BridgeDispatchError, match="TeamCreate denied"):
+        tools.create_team("cycle-team", ["pm-1"])
+
+
+def test_create_team_times_out_and_raises_never_spins(bridge_db):
+    """If the orchestrator never services the row, create_team RAISES at the
+    bounded PER_CALL_TIMEOUT_S — never an unbounded spin."""
+    ticks = {"n": 0}
+
+    def fake_clock():
+        # Jump straight past the budget on the second reading.
+        ticks["n"] += 1
+        return 0.0 if ticks["n"] == 1 else QueueBridgeDispatchTools.PER_CALL_TIMEOUT_S + 1.0
+
+    tools = QueueBridgeDispatchTools(
+        "cycle-1", db_path=bridge_db, clock=fake_clock, sleep_fn=lambda _s: None
+    )
+    with pytest.raises(BridgeDispatchError, match="timed out"):
+        tools.create_team("cycle-team", ["pm-1"])
+    # The row is still pending (never serviced) — durable, not silently dropped.
+    assert _rows(bridge_db, kind="create_team")[0]["status"] == "pending"
+
+
+def test_create_team_raises_on_ready_without_team_id(bridge_db):
+    """A 'ready' row whose response_json lacks a team_id string is a contract
+    violation → raise (never return a bogus team_id)."""
+
+    def fake_sleep(_seconds):
+        pending = _rows(bridge_db, kind="create_team", status="pending")
+        if pending:
+            _service_row(bridge_db, pending[0]["id"], status="ready", response={"wrong": "key"})
+
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, sleep_fn=fake_sleep)
+    with pytest.raises(BridgeDispatchError, match="team_id"):
+        tools.create_team("cycle-team", ["pm-1"])
+
+
+def test_enqueue_rejects_out_of_enum_kind(bridge_db):
+    """Fail-closed: an out-of-enum kind is rejected at enqueue BEFORE it can
+    reach the SQLite CHECK (clear BridgeDispatchError, not an IntegrityError)."""
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+    with pytest.raises(BridgeDispatchError, match="out-of-enum"):
+        tools._enqueue("team_delete", {"team_id": "T"})  # not a DispatchTools method
+    # Nothing was enqueued.
+    assert _rows(bridge_db) == []
+
+
+def test_sqlite_check_rejects_out_of_enum_kind(bridge_db):
+    """Defense in depth: even a direct INSERT bypassing the wrapper is rejected
+    by the 008 CHECK constraint (the closed enum is enforced at the DB too)."""
+    con = sqlite3.connect(bridge_db)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                "INSERT INTO bridge_requests (team_pk, kind, args_json) VALUES (?, ?, ?)",
+                ("cycle-1", "rm_rf_slash", "{}"),
+            )
+            con.commit()
+    finally:
+        con.close()
+
+
+# ── poll_fn: terminal-reply-envelope read from bridge_messages ──────────────
+
+
+def _seed_team_with_member(db_path, team_id, role_id):
+    """Stand up a team + member + persona snapshot so bridge_read membership
+    passes and a reply row can be seeded."""
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("PRAGMA foreign_keys=ON")
+        con.execute(
+            "INSERT INTO persona_snapshots (persona_version, persona_blob) VALUES ('v1', '{}')"
+        )
+        con.execute(
+            "INSERT INTO teams (team_id, project_id, lead_role, status) VALUES (?, 'P', ?, 'active')",
+            (team_id, role_id),
+        )
+        con.execute(
+            "INSERT INTO team_members (team_id, role_id, member_name, persona_snapshot_id) "
+            "VALUES (?, ?, ?, 1)",
+            (team_id, role_id, role_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _seed_reply(db_path, team_id, recipient, seq, sender, payload):
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("PRAGMA foreign_keys=ON")
+        con.execute(
+            "INSERT INTO bridge_messages (team_id, recipient, seq, sender_id, kind, payload, "
+            "persona_snapshot_id) VALUES (?, ?, ?, ?, 'reply', ?, 1)",
+            (team_id, recipient, seq, sender, payload),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _terminal_envelope(task_id, attempt, status="done"):
+    return json.dumps(
+        {
+            "type": "task_result",
+            "task_id": task_id,
+            "attempt": attempt,
+            "status": status,
+            "artifacts": ["scripts/foo.py"],
+        }
+    )
+
+
+def test_poll_fn_returns_validated_terminal_envelope(bridge_db):
+    """poll_fn reads the worker's terminal reply from bridge_messages, validates
+    it fail-closed, and returns the parsed Mapping."""
+    _seed_team_with_member(bridge_db, "T", "pm-1")
+    # The reply lands in the PM's inbox (recipient='pm-1') from the worker.
+    _seed_reply(bridge_db, "T", "pm-1", 1, "pm-1", _terminal_envelope("task-1", 1, "done"))
+
+    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
+    result = poll({"id": "task-1"}, 1)
+    assert result is not None
+    assert result["status"] == "done"
+    assert result["task_id"] == "task-1"
+
+
+def test_poll_fn_returns_none_when_no_reply(bridge_db):
+    """No reply row yet => None (NOT {}), so the wave barrier HOLDS."""
+    _seed_team_with_member(bridge_db, "T", "pm-1")
+    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
+    assert poll({"id": "task-1"}, 1) is None
+
+
+def test_poll_fn_holds_barrier_on_non_terminal_status(bridge_db):
+    """A VALID but non-terminal (blocked / needs-input) reply => None (the
+    barrier holds; blocked/needs-input also emit replies per 006)."""
+    _seed_team_with_member(bridge_db, "T", "pm-1")
+    blocked = json.dumps(
+        {
+            "type": "task_result",
+            "task_id": "task-1",
+            "attempt": 1,
+            "status": "blocked",
+            "artifacts": [],
+        }
+    )
+    _seed_reply(bridge_db, "T", "pm-1", 1, "pm-1", blocked)
+    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
+    assert poll({"id": "task-1"}, 1) is None
+
+
+def test_poll_fn_fail_closed_on_malformed_envelope(bridge_db):
+    """A malformed / non-JSON reply => None (fail-closed: never a false advance,
+    never a crash)."""
+    _seed_team_with_member(bridge_db, "T", "pm-1")
+    _seed_reply(bridge_db, "T", "pm-1", 1, "pm-1", "this is not a JSON envelope at all")
+    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
+    assert poll({"id": "task-1"}, 1) is None
+
+
+def test_poll_fn_rejects_cross_task_and_attempt_spoof(bridge_db):
+    """A terminal envelope whose task_id/attempt mismatch the dispatch record is
+    rejected by validate_envelope => None (anti cross-task spoof)."""
+    _seed_team_with_member(bridge_db, "T", "pm-1")
+    # Envelope claims task-OTHER / attempt 9, but we dispatched task-1 / attempt 1.
+    _seed_reply(bridge_db, "T", "pm-1", 1, "pm-1", _terminal_envelope("task-OTHER", 9, "done"))
+    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
+    assert poll({"id": "task-1"}, 1) is None
+
+
+def test_poll_fn_returns_none_on_read_error(bridge_db):
+    """If the team does not exist yet (read raises), poll_fn HOLDS the barrier
+    (returns None) rather than crashing or false-advancing."""
+    # No team seeded => bridge_read raises ChannelMissingError internally.
+    poll = build_poll_fn(bridge_db, team_id="GHOST", role_id_for=lambda task: "pm-1")
+    assert poll({"id": "task-1"}, 1) is None
+
+
+# ── fence round-trip: _parse_reply_envelope reverses bridge_read._fence ──────
+
+
+def test_parse_reply_envelope_round_trips_real_fence():
+    """The load-bearing unescape: a payload fenced by the REAL
+    ``bridge_read._fence`` (HTML-escaped element content) must round-trip back
+    to the worker's JSON envelope — including HTML-special chars (< > &), proving
+    the &amp;-last unescape ordering is correct (a wrong order corrupts &amp;lt;)."""
+    from scripts.bridge_read import _fence
+    from scripts.dispatch import _parse_reply_envelope
+
+    env = {
+        "type": "task_result",
+        "task_id": "t1",
+        "attempt": 1,
+        "status": "done",
+        "artifacts": ["a<b>&c", "d&amp;e"],
+    }
+    fenced = _fence(json.dumps(env), "pm-1", 7)
+    assert _parse_reply_envelope(fenced) == env
+    # Defensive: a raw (un-fenced) JSON object also parses.
+    assert _parse_reply_envelope(json.dumps(env)) == env
+
+
+def test_parse_reply_envelope_returns_none_on_non_object():
+    """Non-object / non-JSON / non-str payloads => None (never raise), so the
+    poll keeps scanning rather than crash or false-advance."""
+    from scripts.dispatch import _parse_reply_envelope
+
+    assert _parse_reply_envelope("not json at all") is None
+    assert _parse_reply_envelope("[1, 2, 3]") is None  # JSON array, not an object
+    assert _parse_reply_envelope(None) is None
+    assert _parse_reply_envelope(b"bytes") is None

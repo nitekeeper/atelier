@@ -29,7 +29,9 @@ Memex check into the `prompt-migration` path, which doesn't need it.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 from scripts import mode_detector
 from scripts.migrate_to_memex import row_summary, should_prompt
@@ -92,3 +94,97 @@ def startup_check() -> dict:
 
     bootstrap_state = bootstrap.run_bootstrap()
     return {"action": "proceed-memex", "bootstrap": bootstrap_state}
+
+
+# ── Live WaveDispatcher wiring (atelier#81, AI-4) ───────────────────────────
+#
+# The production construction of `pm_dispatch.WaveDispatcher` — the binding #60
+# deferred ("every instantiation today is in tests"). This is the single
+# orchestrator-entry factory that wires the mode-agnostic wave engine to the
+# REAL queue-bridge transport: it selects the dispatch mode via
+# `resolve_dispatch_mode`, builds a `spawn_fn` over the production
+# `QueueBridgeDispatchTools`, builds the terminal-envelope `poll_fn`, and passes
+# `escalate_fn` straight through. The engine, barrier, budget, and wall-clock
+# are unchanged — this only supplies the three seams (#60/#61 own the rest).
+
+
+def build_wave_dispatcher(
+    db_path: str,
+    *,
+    team_pk: str,
+    team_id: str,
+    briefing_for: Callable[[Mapping[str, Any], int], str],
+    members: list[str] | None = None,
+    team_name: str | None = None,
+    teammate_name_for: Callable[[Mapping[str, Any]], str] | None = None,
+    escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
+    env: Mapping[str, str] | None = None,
+    root: str | Path = ".",
+):
+    """Construct a live, mode-selected ``WaveDispatcher`` bound to the
+    production queue-bridge transport (atelier#81).
+
+    Resolution + wiring:
+
+    1. ``mode = resolve_dispatch_mode(env, root)`` — env override → persisted
+       marker → ``subagent`` default (atelier#62 precedence; unchanged here).
+    2. ``tools = QueueBridgeDispatchTools(team_pk, db_path=db_path)`` — the
+       production :class:`~scripts.dispatch.DispatchTools` binding: enqueues
+       harness calls onto ``bridge_requests`` for the orchestrator turn-loop to
+       service (``internal/bridge-poll/SKILL.md``).
+    3. ``spawn_fn = build_spawn_fn(mode, tools=tools, ...)`` — the #61 factory
+       (TeamCreate-once + first-touch handled inside; mode-branching internal).
+    4. ``poll_fn = build_poll_fn(db_path, team_id=team_id, role_id_for=...)`` —
+       the terminal-reply-envelope read over ``bridge_messages`` (fail-closed
+       validation; ``None`` HOLDS the barrier).
+    5. ``WaveDispatcher(db_path, spawn_fn=, poll_fn=, escalate_fn=)``.
+
+    ``escalate_fn`` is threaded through as the **single unconditional path** —
+    when ``None`` the engine's own guaranteed-emitting default
+    (``pm_dispatch._default_escalate``) is used. No conditional escalation
+    branches are added (consensus item 8: escalation is guaranteed-emitted).
+
+    ``teammate_name_for`` maps a task to the teammate role-id; it is reused as
+    the poll-side ``role_id_for`` so a worker's reply inbox and its spawn
+    identity stay in lock-step. ``team_id`` is the cycle's team identity (the
+    inbox the workers reply into); in agent-team mode it is the id ``create_team``
+    returns — the orchestrator threads the same value here.
+
+    Lazy imports keep ``pm_dispatch`` (which imports ``scripts.tasks`` and a
+    chain of backend modules) out of the bare ``startup_check`` import path.
+    """
+    from scripts.dispatch import (
+        QueueBridgeDispatchTools,
+        build_poll_fn,
+        build_spawn_fn,
+        resolve_dispatch_mode,
+    )
+    from scripts.pm_dispatch import WaveDispatcher
+
+    # Only forward `env` when the caller supplied one; otherwise let
+    # resolve_dispatch_mode use its os.environ default (passing None would be a
+    # non-Mapping and break the lookup).
+    if env is not None:
+        mode = resolve_dispatch_mode(env=env, root=root)
+    else:
+        mode = resolve_dispatch_mode(root=root)
+
+    tools = QueueBridgeDispatchTools(team_pk, db_path=db_path)
+
+    name_for = teammate_name_for or (lambda task: str(task["id"]))
+
+    spawn_fn = build_spawn_fn(
+        mode,
+        tools=tools,
+        briefing_for=briefing_for,
+        members=members,
+        team_name=team_name,
+        teammate_name_for=name_for,
+    )
+    poll_fn = build_poll_fn(db_path, team_id=team_id, role_id_for=name_for)
+
+    # escalate_fn is the single unconditional path: pass it through when given,
+    # else fall back to the engine's guaranteed-emitting default (no branch).
+    if escalate_fn is not None:
+        return WaveDispatcher(db_path, spawn_fn=spawn_fn, poll_fn=poll_fn, escalate_fn=escalate_fn)
+    return WaveDispatcher(db_path, spawn_fn=spawn_fn, poll_fn=poll_fn)

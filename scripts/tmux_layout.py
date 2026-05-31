@@ -98,11 +98,22 @@ def compute_layout(n_workers: int, term_width: int, term_height: int) -> list[Pa
     return rects
 
 
-def apply_layout(n_workers: int, *, mode: str | None = None) -> bool:
+def apply_layout(
+    n_workers: int,
+    *,
+    mode: str | None = None,
+    labels: dict[str, str] | None = None,
+) -> bool:
     """Best-effort: drive tmux to realize the computed layout in the CURRENT window.
 
     GATE (no-op fallback): if ``mode`` is provided and != ``"agent-team"``, OR
     tmux is unavailable, returns ``False`` without touching tmux.
+
+    When ``labels`` (a ``{pane_id: wave/role-label}`` mapping) is given, the
+    labels are applied via :func:`set_pane_titles` right AFTER the geometry is
+    realized — so each pane's wave/role label (atelier#79) is set "at pane
+    creation", composing with the PM-1/3 + workers-2/3 layout. Label writes are
+    best-effort and never change the geometry result.
 
     Thin by design — the testable geometry lives in :func:`compute_layout`. This
     shim NEVER raises on a tmux failure: it logs to stderr and returns ``False``
@@ -121,7 +132,70 @@ def apply_layout(n_workers: int, *, mode: str | None = None) -> bool:
     except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
         sys.stderr.write(f"tmux_layout: apply_layout best-effort no-op ({exc})\n")
         return False
+    if labels:
+        set_pane_titles(labels, mode=mode)
     return True
+
+
+# ── Pane labels — the @desired_title wave/role render source (atelier#79) ─────
+
+
+def _sanitize_title(title: str) -> str:
+    """Make ``title`` safe to store in ``@desired_title`` (rendered in a tmux format).
+
+    * ``#`` → ``##`` so tmux never reads it as a ``#{...}`` format token.
+    * Control characters (newlines, ESC, BEL, DEL) stripped; tab kept.
+    * Capped at 200 chars so a pathological label can't bloat the border.
+    """
+    no_ctrl = "".join(ch for ch in title if ch == "\t" or (ord(ch) >= 32 and ord(ch) != 127))
+    return no_ctrl.replace("#", "##")[:200]
+
+
+def set_pane_title(pane_id: str, title: str, *, mode: str | None = None) -> bool:
+    """Best-effort: persist a pane's wave/role label in its ``@desired_title``.
+
+    The label is routed through the per-pane ``@desired_title`` user-option —
+    which the #63 ``pane-border-format`` renders — and NOT through
+    ``select-pane -T``: Claude Code's OSC-2 pane-title rewrite clobbers the
+    latter on the next turn, but cannot touch a user-option (atelier#79).
+    ``title`` is sanitized via :func:`_sanitize_title`.
+
+    GATE (no-op fallback): if ``mode`` is provided and != ``"agent-team"``, OR
+    tmux is unavailable, returns ``False`` without touching tmux. NEVER raises
+    on a tmux failure — a cosmetic label can't crash a cycle.
+
+    Returns ``True`` iff the ``set-option`` write was issued and succeeded.
+    """
+    if (mode is not None and mode != DISPATCH_MODE_AGENT_TEAM) or not preflight.tmux_available():
+        return False
+    sanitized = _sanitize_title(title)
+    try:
+        subprocess.run(
+            [
+                *preflight.get_tmux_cmd(),
+                "set-option",
+                "-p",
+                "-t",
+                pane_id,
+                "@desired_title",
+                sanitized,
+            ],
+            capture_output=True,
+            check=True,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+        sys.stderr.write(f"tmux_layout: set_pane_title best-effort no-op ({exc})\n")
+        return False
+    return True
+
+
+def set_pane_titles(labels: dict[str, str], *, mode: str | None = None) -> int:
+    """Bulk best-effort form of :func:`set_pane_title` for a ``{pane_id: label}`` map.
+
+    A failure on one pane never aborts the rest. Returns the count of panes whose
+    label write succeeded.
+    """
+    return sum(set_pane_title(pane_id, title, mode=mode) for pane_id, title in labels.items())
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

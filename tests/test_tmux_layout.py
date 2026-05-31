@@ -91,3 +91,97 @@ def test_apply_layout_no_tmux_returns_false(monkeypatch):
     monkeypatch.setattr(preflight, "tmux_available", lambda: False)
     assert tmux_layout.apply_layout(3, mode="agent-team") is False
     assert tmux_layout.apply_layout(3) is False
+
+
+# ── @desired_title pane-label setter (atelier#79) ───────────────────────────
+
+
+class _OkProc:
+    """Minimal stand-in for subprocess.CompletedProcess (returncode 0)."""
+
+    returncode = 0
+
+
+def _fake_tmux(monkeypatch, sink):
+    """tmux available + a fake subprocess.run that records argv and succeeds."""
+    monkeypatch.setattr(preflight, "tmux_available", lambda: True)
+    monkeypatch.setattr(preflight, "get_tmux_cmd", lambda: ["tmux"])
+
+    def fake_run(argv, **kwargs):
+        sink.append(argv)
+        return _OkProc()
+
+    monkeypatch.setattr(tmux_layout.subprocess, "run", fake_run)
+
+
+def test_set_pane_title_writes_desired_title_user_option(monkeypatch):
+    """set_pane_title routes the label via ``set-option -p @desired_title``."""
+    calls: list[list[str]] = []
+    _fake_tmux(monkeypatch, calls)
+    assert tmux_layout.set_pane_title("%3", "[w2] backend-engineer-1", mode="agent-team") is True
+    assert len(calls) == 1
+    argv = calls[0]
+    assert "set-option" in argv and "-p" in argv
+    assert argv[argv.index("-t") + 1] == "%3"
+    assert argv[argv.index("@desired_title") + 1] == "[w2] backend-engineer-1"
+    # Routed via the user-option, NOT select-pane -T (atelier#79 AC fidelity):
+    # OSC-2 would clobber select-pane -T on the next turn.
+    assert "select-pane" not in argv
+    assert "-T" not in argv
+
+
+def test_set_pane_title_sanitizes_hash_and_control_chars(monkeypatch):
+    """``#`` is doubled (never read as a ``#{...}`` token) and ctrl chars stripped."""
+    calls: list[list[str]] = []
+    _fake_tmux(monkeypatch, calls)
+    tmux_layout.set_pane_title("%1", "wave #3\nX", mode="agent-team")
+    argv = calls[0]
+    assert argv[argv.index("@desired_title") + 1] == "wave ##3X"
+
+
+def test_set_pane_title_no_tmux_returns_false(monkeypatch):
+    monkeypatch.setattr(preflight, "tmux_available", lambda: False)
+    called: list[int] = []
+    monkeypatch.setattr(tmux_layout.subprocess, "run", lambda *a, **k: called.append(1))
+    assert tmux_layout.set_pane_title("%1", "x", mode="agent-team") is False
+    assert called == []  # gate short-circuits before any tmux call
+
+
+def test_set_pane_title_wrong_mode_returns_false(monkeypatch):
+    monkeypatch.setattr(preflight, "tmux_available", lambda: True)
+    called: list[int] = []
+    monkeypatch.setattr(tmux_layout.subprocess, "run", lambda *a, **k: called.append(1))
+    assert tmux_layout.set_pane_title("%1", "x", mode="subagent") is False
+    assert called == []
+
+
+def test_set_pane_title_soft_fails_on_subprocess_error(monkeypatch):
+    """A tmux failure is swallowed — the setter never raises (returns False)."""
+    monkeypatch.setattr(preflight, "tmux_available", lambda: True)
+    monkeypatch.setattr(preflight, "get_tmux_cmd", lambda: ["tmux"])
+
+    def boom(*a, **k):
+        raise OSError("no tmux server")
+
+    monkeypatch.setattr(tmux_layout.subprocess, "run", boom)
+    assert tmux_layout.set_pane_title("%1", "x", mode="agent-team") is False
+
+
+def test_set_pane_titles_bulk_best_effort(monkeypatch):
+    calls: list[list[str]] = []
+    _fake_tmux(monkeypatch, calls)
+    n = tmux_layout.set_pane_titles({"%1": "a", "%2": "b"}, mode="agent-team")
+    assert n == 2
+    targeted = {c[c.index("-t") + 1] for c in calls}
+    assert targeted == {"%1", "%2"}
+
+
+def test_apply_layout_composes_labels_after_geometry(monkeypatch):
+    """apply_layout sets @desired_title labels right after realizing the geometry."""
+    calls: list[list[str]] = []
+    _fake_tmux(monkeypatch, calls)
+    ok = tmux_layout.apply_layout(2, mode="agent-team", labels={"%0": "PM", "%1": "[w1] sdet-1"})
+    assert ok is True
+    assert any("select-layout" in c for c in calls)
+    label_writes = [c for c in calls if "@desired_title" in c]
+    assert len(label_writes) == 2

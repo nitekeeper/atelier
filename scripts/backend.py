@@ -639,6 +639,48 @@ def find_or_create_role(*, name: str, description: str) -> dict:
     return _backend().find_or_create_role(name=name, description=description)
 
 
+# ── Team audit log — ALWAYS-LOCAL (atelier#64) ─────────────────────────────
+#
+# The team-mode runtime tables (teams, team_members, bridge_messages,
+# team_audit_log) live on the LOCAL `.ai/atelier.db` regardless of detected
+# mode — the same DB the bridge message wire (bridge_send/bridge_read) and the
+# bridge_requests queue write through. "always Local" is enforced here by
+# binding directly to `backend_local`, NEVER `_backend()`: the Memex backend
+# has no team-mode tables, so a mode-dispatched route would fail. This mirrors
+# scripts/dispatch.py's explicit Local-bridge-DB resolution. Callers still go
+# through this facade (A2) rather than touching backend_local or raw sqlite3
+# (A8 is satisfied one layer down by backend_local._conn()'s WAL + FK bundle).
+
+
+def _local_backend() -> ModuleType:
+    """Return backend_local unconditionally — team-mode runtime state is
+    always-Local (see the section comment above)."""
+    from scripts import backend_local
+
+    return backend_local
+
+
+def write_team_audit(*, team_id: str, event_type: str, payload: dict | None = None) -> dict:
+    """Append a control event to the always-Local `team_audit_log`.
+
+    The canonical operational ledger for team-level control events
+    (dispatch, wave-advance, shutdown, and — atelier#64 — persona-gap
+    escalation, side-query records, propose-role consent decisions).
+    `event_type` is free TEXT (no schema CHECK) so new event types add no
+    migration. Insert-only; exactly-once escalation semantics are enforced by
+    the caller via a `list_team_audit` ledger-row pre-check, not a UNIQUE."""
+    return _local_backend().write_team_audit(
+        team_id=team_id, event_type=event_type, payload=payload
+    )
+
+
+def list_team_audit(*, team_id: str, event_type: str | None = None) -> list[dict]:
+    """Return always-Local `team_audit_log` rows for a team, oldest-first,
+    optionally filtered by `event_type`. Backs the exactly-once escalation
+    guard (count LEDGER rows) and PM context reads (atelier#64)."""
+    return _local_backend().list_team_audit(team_id=team_id, event_type=event_type)
+
+
 def find_or_create_agent(*, agent_id: str, name: str, role_id: int, profile: str) -> dict:
     """Return the agent row with this `agent_id`, creating it if absent.
     Idempotent."""

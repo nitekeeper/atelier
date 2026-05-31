@@ -95,6 +95,39 @@ ULID_LEN = 26
 # SQLite IntegrityError.
 ALLOWED_KINDS = frozenset({"spawn", "reply", "shutdown_req", "shutdown_resp", "heartbeat"})
 
+# ── WIRE-REP message-type discriminator (atelier#64) ───────────────────────
+#
+# The agent-team-mode plan-phase behaviors (meeting thread, persona-gap
+# escalation, propose-role consent) need to distinguish privileged message
+# TYPES on the wire WITHOUT extending the bridge_messages.kind CHECK — that
+# would be a STRICT table-rebuild + user_version bump, breaking resumability
+# of in-flight runs. So every such message rides the existing kind='reply'
+# transport and carries a RESERVED payload discriminator key, `_mtype`.
+#
+# Contract (fail-closed):
+#   * The FRAMEWORK WRITER mints `_mtype` — it is NEVER taken from
+#     caller/teammate-authored payload content (forgery defense). A payload
+#     that itself sets `_mtype` is REJECTED (we do not silently merge or
+#     overwrite from untrusted content — an injected discriminator must not
+#     reach the wire as if the framework wrote it).
+#   * `_mtype` MUST be one of ALLOWED_MTYPES; an out-of-set value is REJECTED.
+#   * A reader that sees a malformed / unknown / absent `_mtype` MUST treat
+#     the message as an ordinary 'reply' (no privileged op) — see
+#     team_meeting.decode_mtype.
+RESERVED_MTYPE_KEY = "_mtype"
+
+ALLOWED_MTYPES = frozenset(
+    {
+        "team_meeting",
+        "persona_gap",
+        "persona_gap_escalation",
+        "propose_role",
+        "propose_role_ack",
+        "meeting_done",
+        "meeting_failure_postmortem",
+    }
+)
+
 
 # ── Exceptions ─────────────────────────────────────────────────────────────
 
@@ -117,6 +150,21 @@ class SenderAuthError(BridgeSendError):
 
 class PayloadTooLargeError(BridgeSendError):
     pass
+
+
+class MtypeForgeryError(BridgeSendError):
+    """Raised when caller/teammate-authored payload content sets the
+    reserved ``_mtype`` discriminator key. The framework writer OWNS that
+    key; untrusted content that tries to mint it is rejected fail-closed so
+    an injected discriminator can never reach the wire as if the framework
+    had written it (AC5 / forgery defense, atelier#64)."""
+
+
+class UnknownMtypeError(BridgeSendError):
+    """Raised when a framework-supplied ``_mtype`` is not in
+    :data:`ALLOWED_MTYPES`. The discriminator is a closed set; an out-of-set
+    value is a programming error in the calling framework module, surfaced
+    fail-closed rather than written to the wire (atelier#64)."""
 
 
 # ── DB connection helper ───────────────────────────────────────────────────
@@ -320,6 +368,50 @@ def _validate_idem(idem: str | None) -> None:
             f"(got {len(idem)} chars). Generate via `ulid-py` or any "
             f"compatible library."
         )
+
+
+# ── WIRE-REP payload encode (atelier#64) ───────────────────────────────────
+
+
+def encode_payload(body: dict[str, Any], *, mtype: str) -> str:
+    """Mint a framework-owned ``_mtype`` discriminator into ``body`` and
+    return the JSON wire payload (a ``kind='reply'`` payload string).
+
+    The framework WRITER owns the reserved ``_mtype`` key. Two fail-closed
+    guards (atelier#64 AI-1):
+
+    * ``mtype`` MUST be in :data:`ALLOWED_MTYPES` — else
+      :class:`UnknownMtypeError`.
+    * ``body`` (the caller/teammate-authored content) MUST NOT itself carry
+      the reserved key — else :class:`MtypeForgeryError`. We reject rather
+      than overwrite: an injected discriminator must not be silently merged
+      away; a forgery attempt is surfaced, never normalized into a valid
+      send.
+
+    The minted dict is ``{**body, _mtype: mtype}`` with the writer-owned key
+    applied last, so even a non-rejecting future caller cannot shadow it.
+    """
+    if mtype not in ALLOWED_MTYPES:
+        raise UnknownMtypeError(
+            f"_mtype must be one of {sorted(ALLOWED_MTYPES)}; got {mtype!r}. "
+            f"The discriminator is a closed set minted by the framework "
+            f"writer (atelier#64)."
+        )
+    if not isinstance(body, dict):
+        raise BridgeSendError(
+            f"encode_payload body must be a dict; got {type(body).__name__}. "
+            f"The framework wraps caller content in a JSON object so the "
+            f"reserved {RESERVED_MTYPE_KEY!r} key can be minted alongside it."
+        )
+    if RESERVED_MTYPE_KEY in body:
+        raise MtypeForgeryError(
+            f"caller-authored payload set the reserved {RESERVED_MTYPE_KEY!r} "
+            f"key — rejected. Only the framework writer mints the message-type "
+            f"discriminator; an injected {RESERVED_MTYPE_KEY!r} is a forgery "
+            f"attempt and is never merged onto the wire (atelier#64 AC5)."
+        )
+    minted = {**body, RESERVED_MTYPE_KEY: mtype}
+    return json.dumps(minted, sort_keys=True)
 
 
 # ── Core writer ────────────────────────────────────────────────────────────

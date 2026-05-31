@@ -1174,6 +1174,65 @@ def lookup_index_id_by_source_ref(*, source_ref: str) -> int | None:
     return None
 
 
+# ── Team audit log (atelier#64; migrations/shared/003_team_mode.sql) ────────
+#
+# team_audit_log is the canonical operational ledger for team-level control
+# events (dispatch, wave-advance, shutdown, AND — per atelier#64 — persona-gap
+# escalation, side-query records, and propose-role consent decisions).
+# `event_type` is free TEXT (no CHECK), so new event types add ZERO migration.
+#
+# These tables are part of the team-mode runtime substrate, which lives on the
+# LOCAL `.ai/atelier.db` regardless of mode (the same DB the bridge message
+# wire and bridge_requests queue write through — see scripts/dispatch.py
+# "always Local" enforcement). They go through backend_local._conn() (A8: WAL
+# + FK, never raw sqlite3.connect); the backend.py facade exposes them as
+# always-Local dispatchers.
+
+
+def write_team_audit(*, team_id: str, event_type: str, payload: dict | None = None) -> dict:
+    """Append a control event to `team_audit_log`. Returns the new row.
+
+    `payload` is JSON-serialized (NULL when omitted). Insert-only, no
+    idempotency at this layer — exactly-once semantics for escalation are the
+    CALLER's concern (atelier#64 routes through a ledger-row pre-check in
+    scripts/roster_extension / team_meeting, NOT a UNIQUE here, because most
+    event types are intentionally repeatable, e.g. side_query).
+    """
+    payload_json = json.dumps(payload, sort_keys=True) if payload is not None else None
+    c = _conn()
+    try:
+        cur = c.execute(
+            "INSERT INTO team_audit_log (team_id, event_type, payload, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (team_id, event_type, payload_json, _now()),
+        )
+        new_id = _checked_lastrowid(cur)
+        c.commit()
+        row = c.execute("SELECT * FROM team_audit_log WHERE id = ?", (new_id,)).fetchone()
+    finally:
+        c.close()
+    return dict(row) if row else {}
+
+
+def list_team_audit(*, team_id: str, event_type: str | None = None) -> list[dict]:
+    """Return `team_audit_log` rows for a team, oldest-first, optionally
+    filtered by `event_type`. Used by the exactly-once escalation guard
+    (count LEDGER rows, not transcript mentions) and PM context reads."""
+    conditions: list[str] = ["team_id = ?"]
+    params: list[Any] = [team_id]
+    if event_type is not None:
+        conditions.append("event_type = ?")
+        params.append(event_type)
+    where = " AND ".join(conditions)
+    sql = f"SELECT * FROM team_audit_log WHERE {where} ORDER BY id ASC"  # nosec B608
+    c = _conn()
+    try:
+        rows = c.execute(sql, params).fetchall()
+    finally:
+        c.close()
+    return [dict(r) for r in rows]
+
+
 def find_or_create_role(*, name: str, description: str) -> dict:
     """Return the local `roles` row for `name`, creating it if absent.
 

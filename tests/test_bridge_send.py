@@ -594,3 +594,59 @@ def test_secret_file_group_readable_rejected(
         )
     msg = str(exc.value)
     assert "permissions" in msg or "0o640" in msg
+
+
+# ── WIRE-REP _mtype discriminator (atelier#64 AI-1) ─────────────────────────
+#
+# The agent-team-mode behaviors ride the existing kind='reply' transport and
+# carry a reserved `_mtype` payload key minted by the framework writer. These
+# tests pin the fail-closed minting contract: each allowed _mtype mints OK; an
+# unknown _mtype is rejected; caller-supplied _mtype is rejected (forgery
+# defense) rather than silently merged.
+
+
+def test_encode_payload_mints_each_allowed_mtype() -> None:
+    """Every member of ALLOWED_MTYPES mints into the payload JSON under the
+    reserved key, alongside the caller's content."""
+    for mt in sorted(bridge_send.ALLOWED_MTYPES):
+        wire = bridge_send.encode_payload({"text": "hello"}, mtype=mt)
+        decoded = json.loads(wire)
+        assert decoded[bridge_send.RESERVED_MTYPE_KEY] == mt
+        assert decoded["text"] == "hello"
+
+
+def test_encode_payload_unknown_mtype_rejected() -> None:
+    """An out-of-set _mtype is rejected fail-closed — the discriminator is a
+    closed set, never written to the wire."""
+    with pytest.raises(bridge_send.UnknownMtypeError) as exc:
+        bridge_send.encode_payload({"text": "x"}, mtype="totally_made_up")
+    assert "totally_made_up" in str(exc.value)
+
+
+def test_encode_payload_rejects_caller_supplied_mtype() -> None:
+    """Caller/teammate-authored content that itself sets the reserved
+    _mtype key is REJECTED (forgery defense) — never merged onto the wire."""
+    with pytest.raises(bridge_send.MtypeForgeryError) as exc:
+        bridge_send.encode_payload(
+            {"text": "x", bridge_send.RESERVED_MTYPE_KEY: "propose_role"},
+            mtype="team_meeting",
+        )
+    assert bridge_send.RESERVED_MTYPE_KEY in str(exc.value)
+
+
+def test_encode_payload_writer_owns_key_even_for_allowed_collision() -> None:
+    """Even when the injected forged value happens to be a *valid* mtype, the
+    forgery guard still fires — the writer owns the key unconditionally; an
+    injected discriminator never reaches the wire as a framework mint."""
+    with pytest.raises(bridge_send.MtypeForgeryError):
+        bridge_send.encode_payload(
+            {bridge_send.RESERVED_MTYPE_KEY: "propose_role_ack"},
+            mtype="propose_role_ack",
+        )
+
+
+def test_encode_payload_rejects_non_dict_body() -> None:
+    """The body must be a JSON object so the reserved key can be minted
+    alongside it — a bare string/list is rejected."""
+    with pytest.raises(bridge_send.BridgeSendError):
+        bridge_send.encode_payload("not a dict", mtype="team_meeting")  # type: ignore[arg-type]

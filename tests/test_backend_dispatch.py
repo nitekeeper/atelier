@@ -545,6 +545,58 @@ def test_facade_write_task_memex_omits_metadata_when_subdomain_none():
     assert captured["metadata"] is None
 
 
+# ── atelier#66 [S3] T2 — write_task team_pk fold into Memex metadata ─────────
+#
+# atelier#90 / migration 010 added `team_pk` (the run/cycle correlation id) to
+# the `write_task` facade. In Local mode it lands in the `tasks.team_pk` column;
+# in Memex mode `tasks` has NO such column, so — exactly like `subdomain` — the
+# facade FOLDS it into the metadata blob (backend.py:256-257) and MUST NOT pass
+# it positionally to `backend_memex.write_task` (which has no `team_pk` param —
+# a positional pass would `TypeError`). The existing
+# `test_facade_folds_wide_kwargs_into_metadata_for_write_task_memex` predates
+# the #90 fold and never threads `team_pk`, so the fold had ZERO coverage (R1).
+# This is the anti-revert pin: dropping the fold makes the assertion RED.
+
+
+def test_write_task_memex_folds_team_pk_into_metadata():
+    """The atelier#90 `team_pk` correlation id is folded into the Memex
+    metadata blob alongside `subdomain` — never passed positionally to
+    `backend_memex.write_task` (no such param). Anti-revert for the #90 fold:
+    dropping `adapted_metadata["team_pk"] = team_pk` makes this RED."""
+    captured = {}
+
+    def fake_write_task(**kwargs):
+        captured.update(kwargs)
+        return {"row_id": 1, "index_id": "i-1"}
+
+    with (
+        patch.object(mode_detector, "detect_mode", return_value="memex"),
+        patch("scripts.backend_memex.write_task", new=fake_write_task),
+    ):
+        backend.write_task(
+            workspace_id=10,
+            project_id=3,
+            title="Wave-0 implement",
+            description="…",
+            subdomain="impl",
+            created_by="atelier-eng-1",
+            parallel_group=1,
+            team_pk="run-A",
+        )
+
+    # team_pk + subdomain BOTH land in the Memex metadata blob (the only
+    # searchable slot the narrow `tasks` table offers in Memex mode).
+    assert captured["metadata"]["team_pk"] == "run-A"
+    assert captured["metadata"]["subdomain"] == "impl"
+    # And neither rides as a raw kwarg the Memex backend can't accept —
+    # `team_pk` / `subdomain` / `workspace_id` have no positional slot there.
+    assert "team_pk" not in captured
+    assert "subdomain" not in captured
+    assert "workspace_id" not in captured
+    # parallel_group DOES have a native Memex slot — it rides through.
+    assert captured["parallel_group"] == 1
+
+
 def test_facade_folds_wide_kwargs_into_metadata_for_write_meeting_memex():
     """`write_meeting` adapter: `workspace_id` is dropped on the memex
     path; `subdomain` is folded into metadata (I4) so it survives into

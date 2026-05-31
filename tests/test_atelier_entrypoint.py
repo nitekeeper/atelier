@@ -76,6 +76,68 @@ def test_startup_in_memex_mode_no_local_db_proceeds(project_root, monkeypatch):
     assert r["action"] == "proceed-memex"
 
 
+# ── Resume detection wiring (atelier#66 [S2], AC3) ──────────────────────────
+
+
+def test_startup_local_adds_resume_offer_when_arc_resumable(project_root, monkeypatch):
+    """On the LOCAL branch, startup_check surfaces a `resume_offer` field
+    ALONGSIDE the existing `proceed-local` action when find_resumable_arc returns
+    an offer. The action contract is unchanged — resume_offer is additive.
+
+    ANTI-REVERT: if the resume wiring is dropped, `resume_offer` is absent and
+    this assertion goes RED. resume.find_resumable_arc is monkeypatched so this
+    pins the WIRING without standing up a full aborted-arc DB fixture (that is
+    exercised end-to-end in test_resume.py)."""
+    from scripts import resume
+
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
+    sentinel = resume.ResumeOffer(
+        team_id="team-x",
+        team_pk="run-x",
+        project_id="proj-x",
+        abort_phase="implement:in-progress",
+        incomplete_count=3,
+    )
+    monkeypatch.setattr("scripts.resume.find_resumable_arc", lambda *a, **k: sentinel)
+    from scripts.atelier_entrypoint import startup_check
+
+    r = startup_check()
+    assert r["action"] == "proceed-local"  # contract intact
+    assert r["resume_offer"] is sentinel
+
+
+def test_startup_local_no_resume_offer_when_none(project_root, monkeypatch):
+    """When find_resumable_arc returns None, startup_check returns the bare
+    proceed-local action with NO resume_offer key — a clean run is offered no
+    resume prompt."""
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
+    monkeypatch.setattr("scripts.resume.find_resumable_arc", lambda *a, **k: None)
+    from scripts.atelier_entrypoint import startup_check
+
+    r = startup_check()
+    assert r["action"] == "proceed-local"
+    assert "resume_offer" not in r
+
+
+def test_startup_memex_branch_does_not_consult_resume(project_root, monkeypatch):
+    """Resume detection is LOCAL-only (§17): the Memex branch must NOT call
+    find_resumable_arc (a Memex-mode run has no Local team dispatch state to
+    resume). We make find_resumable_arc explode to prove it is never reached on
+    the Memex path."""
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "memex")
+    monkeypatch.setattr("scripts.bootstrap.run_bootstrap", lambda: {"version": "1.1.0"})
+
+    def _boom(*a, **k):
+        raise AssertionError("resume.find_resumable_arc must not run on the Memex branch")
+
+    monkeypatch.setattr("scripts.resume.find_resumable_arc", _boom)
+    from scripts.atelier_entrypoint import startup_check
+
+    r = startup_check()
+    assert r["action"] == "proceed-memex"
+    assert "resume_offer" not in r
+
+
 # ── Live WaveDispatcher wiring (atelier#81, AI-4) ───────────────────────────
 
 

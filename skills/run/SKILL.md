@@ -26,6 +26,58 @@ Branch on the returned `action`:
   pre-flight (`startup_check()` will now return `proceed-memex` or
   `proceed-local` depending on the user's choice).
 
+## Resume detection (after pre-flight)
+
+In **Local mode only**, `startup_check()` may return a **`resume_offer`** field
+ALONGSIDE its `action` token (it is additive — the `proceed-*` contract is
+unchanged). The field is a `scripts.resume.ResumeOffer` carrying
+`team_id`, `team_pk`, `project_id`, `abort_phase`, and `incomplete_count`. It
+signals that a PRIOR team-mode arc was **aborted but left incomplete** (its
+latest lifecycle audit event is `aborted`, not `completed`, AND ≥1 task is still
+non-terminal). Resume detection is Local-only by design (§17): a Memex-mode run
+has no Local team-mode dispatch state to resume, so `resume_offer` is never set
+on the Memex branch.
+
+**NEVER SILENT (§3 non-goal / §13).** The detector only OFFERS; it does NOT
+force-phase, re-dispatch, or mutate any row. When `resume_offer` is present, the
+PM MUST ask the human VERBATIM — substituting `abort_phase` and `incomplete_count`
+— and WAIT for an answer:
+
+> An aborted arc was found at phase `<abort_phase>` with `<incomplete_count>`
+> incomplete task(s). New run or continue from where you left off? (new / continue)
+
+- **On `continue`:** reuse the EXISTING project row + the persisted
+  `tasks`/`bridge_messages` envelopes/`team_audit_log` — do **NOT** call the
+  planner / `internal/dev-plan/SKILL.md` (no re-plan).
+  1. **Resolve the integer `projects.id` FIRST.** `resume_offer.project_id` is
+     the TEXTUAL `teams.project_id` correlation string (`TEXT`), NOT the integer
+     `projects.id` PK that `force-phase` requires — these are two distinct values
+     (a single project can host >1 concurrent team/cycle; `teams.project_id` has
+     no UNIQUE constraint). Resolve the live project row via
+     `scope.resolve_scope()` and read its integer id:
+     ```
+     python3 -c "from scripts import scope; print(scope.resolve_scope().project['id'])"
+     ```
+     Call the result `<project_rowid>` (an integer). Do NOT pass
+     `resume_offer.project_id` into `force-phase` — `int('proj-7')` raises
+     `ValueError`.
+  2. **Force-phase to `<abort_phase>`** with the canonical CLI form (db_path is
+     argv[1], the known command `force-phase` is argv[2], then the integer
+     project_id and the phase) — this skips the transition graph:
+     ```
+     python3 scripts/workflow.py <db_path> force-phase <project_rowid> <abort_phase>
+     ```
+  3. **Re-enter `build_wave_dispatcher_for_project`**, whose `partition_waves`
+     re-runs over the SAME `tasks` rows and dispatches ONLY the non-terminal ones
+     (terminal `complete`/`abandoned` rows are dropped — the persisted
+     tasks/envelopes are reused verbatim). The force-phase is the ONLY new write
+     the resume performs.
+- **On `new`:** leave the aborted arc intact (§13.1.3) and proceed as a fresh
+  project — do not delete or rewrite the prior arc's rows.
+
+If no `resume_offer` field is present, there is nothing to resume; continue to
+Dispatch-mode selection.
+
 ## Dispatch-mode selection (after pre-flight, before any work request)
 
 Once `startup_check` returns a `proceed-*` action and BEFORE the Trigger contract's Ask gate fires for any new-work request, establish the session's **dispatch mode**. This gate ALWAYS asks — there is no silent default. Present exactly these two options and wait for the user to pick one:

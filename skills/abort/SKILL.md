@@ -37,7 +37,7 @@ The `--team-pk` is the run/cycle correlation id that scopes the team's bridge qu
 From the target project root:
 
 ```
-PYTHONPATH=. python3 -m scripts.abort --team-pk <pk> [--hard] [--reason "<why>"]
+PYTHONPATH=. python3 -m scripts.abort --team-pk <pk> --project-id <teams.project_id> --phase <projects.phase> [--hard] [--reason "<why>"]
 ```
 
 - **soft (default)** — graceful teardown: `teams.status -> 'shutting_down'`.
@@ -45,6 +45,7 @@ PYTHONPATH=. python3 -m scripts.abort --team-pk <pk> [--hard] [--reason "<why>"]
 - `--reason "<why>"` — recorded in the report + the `aborted` audit event (defaults to `operator-initiated abort`).
 - `--db` / `--bridge-db` both default to `.ai/atelier.db` (atelier's single project-local DB); pass nothing unless overriding.
 - `--clean-worktree` — soft path only; remove the worktree iff it is clean (see step 4).
+- **`--project-id <teams.project_id>`** and **`--phase <projects.phase>`** — the #66 resume hooks. The orchestrator already holds the cycle's textual `teams.project_id` correlation string and the live `projects.phase` (the phase the arc is being aborted AT), so pass them BOTH. They are folded into the `aborted` audit payload (the authoritative resume signal) and the abort-report metadata so the NEXT `/atelier:run` pre-flight (`scripts.resume.find_resumable_arc`) can OFFER to continue FROM this abort point (AC3) and force-phase AT it (AC4). **Omitting them is silently degenerate:** `abort_phase`/`project_id` default to `None`, so the resume prompt renders "aborted arc was found at phase `None`" and there is no phase to continue at — the offer still fires (never-silent holds) but its CONTENT is unusable. Always thread both on a live abort.
 
 The script is mode-aware: in **Local mode** it performs the full teardown; in **non-local** mode the state mutators raise `NotImplementedError`, so it WARNs, skips the DB mutations, still writes the report where possible, and returns 0.
 
@@ -54,7 +55,7 @@ In Local mode `abort.py` performs three durable writes (the shared core, run by 
 
 1. **Abort-report** — `backend.write_document(domain='postmortem', subdomain='abort', ...)`, a durable markdown postmortem. On `--hard` this is written FIRST so the report survives even if a later step fails.
 2. **`teams.status`** — set to `shutting_down` (soft) or `closed` (hard).
-3. **One `team_delete` bridge row** — `kind='team_delete'`, `status='pending'`, scoped to `team_pk`, carrying `args_json={"team_id": ...}`. This both INSTRUCTS the live session to reap the team AND records the teardown — the symmetric subtractor that closes the sweep's orphan-join. A `team_audit_log` `aborted` event is written alongside.
+3. **One `team_delete` bridge row** — `kind='team_delete'`, `status='pending'`, scoped to `team_pk`, carrying `args_json={"team_id": ...}`. This both INSTRUCTS the live session to reap the team AND records the teardown — the symmetric subtractor that closes the sweep's orphan-join. A `team_audit_log` `aborted` event is written alongside, carrying the #66 resume hooks (`project_id`, `abort_phase`, `incomplete_task_ids`) threaded from `--project-id` / `--phase` (step 2) — this payload is the AUTHORITATIVE resume signal `scripts.resume.find_resumable_arc` reads on the next pre-flight.
 
 **What the script CANNOT do:** Python cannot call the session-scoped `TeamDelete` harness tool. The script only ENQUEUES the `team_delete` row. The LIVE orchestrator session must finish the teardown ON ITS NEXT TURN:
 

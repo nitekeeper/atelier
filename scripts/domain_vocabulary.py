@@ -92,7 +92,7 @@ SUBDOMAINS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "research": ("comparison", "evaluation", "reference", "summary"),
         "postmortem": ("incident", "release", "retro"),
         "log": ("daily", "decision", "lesson"),
-        "project_doc": ("plan", "pr-description", "release-notes", "runbook"),
+        "project_doc": ("finish-result", "plan", "pr-description", "release-notes", "runbook"),
         # "project" and "adr" intentionally omitted — atomic domains.
     }
 )

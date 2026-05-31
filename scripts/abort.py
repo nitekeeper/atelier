@@ -148,6 +148,58 @@ def resolve_team_id(db_path: str | Path, team_pk: str) -> str | None:
     return str(row[0])
 
 
+def _known_phases(db_path: str | Path) -> set[str]:
+    """Return the canonical phase vocabulary — every ``phases.name`` (atelier#66 N1).
+
+    This is the SAME catalog ``scripts/workflow.py`` reads (the static,
+    mode-symmetric ``phases`` table seeded by the shared schema migration); we
+    read it directly from the always-Local project DB rather than hardcoding a
+    list that could drift from the migration. A read failure (e.g. a
+    pre-migration DB) returns an EMPTY set — the caller treats "vocabulary
+    unknown" as a no-op (records the phase as supplied) so abort never hard-fails
+    on a transient catalog read. SQL is fully static (bandit B608-safe)."""
+    con = _connect(db_path)
+    try:
+        rows = con.execute("SELECT name FROM phases").fetchall()
+    except sqlite3.Error:
+        return set()
+    finally:
+        con.close()
+    return {str(r[0]) for r in rows}
+
+
+def _validate_phase(db_path: str | Path, abort_phase: str | None) -> str | None:
+    """Validate ``--phase`` against the known phase vocabulary (atelier#66 N1).
+
+    RESILIENCE — abort MUST NOT hard-fail on a bad ``--phase`` (the teardown is
+    the priority). A typo'd phase that round-trips into ``projects.phase`` on a
+    resume-continue would leave a NON-NAVIGABLE phase, so:
+
+      * ``None`` (omitted) → ``None`` (back-compat: a legacy abort carries no
+        phase; resume still detects the arc via the audit join).
+      * a phase IN the vocabulary → returned as-is.
+      * a phase NOT in the vocabulary → a clear WARN to stderr and ``None`` is
+        returned, so the BOGUS phase is NEVER propagated into the audit payload /
+        abort-report metadata (and thus never into ``projects.phase`` on resume).
+
+    When the vocabulary cannot be read (empty set — pre-migration DB), we do NOT
+    second-guess the operator: the phase is recorded as supplied (we cannot prove
+    it invalid)."""
+    if abort_phase is None:
+        return None
+    known = _known_phases(db_path)
+    if known and abort_phase not in known:
+        print(
+            f"abort: WARN --phase {abort_phase!r} is not a known phase "
+            f"(vocabulary: {sorted(known)}); recording abort_phase=None so a "
+            "bogus phase is not propagated into projects.phase on resume. The "
+            "abort itself still proceeds.",
+            file=sys.stderr,
+        )
+        return None
+    return abort_phase
+
+
 def _worktree_is_dirty(cwd: Path) -> bool | None:
     """Return True if the worktree has any uncommitted change, False if clean,
     None if the dirty-state could not be determined (not a git repo, git error).
@@ -257,6 +309,9 @@ def _write_report(
     reason: str,
     torn_down: list[str],
     supersedes: int | None = None,
+    project_id: str | None = None,
+    abort_phase: str | None = None,
+    incomplete_task_ids: list[object] | None = None,
 ) -> dict | None:
     """Write the durable abort-report doc via the mode-dispatched backend.
 
@@ -270,7 +325,16 @@ def _write_report(
     this one replaces — mirroring ``documents.write_spec_amendment``'s
     ``{version, supersedes}`` chaining. The HARD path writes a crash-survival
     report FIRST then a final ACTUAL-outcomes report that ``supersedes`` it, so
-    the two rows are EXPLICITLY linked rather than silent duplicates."""
+    the two rows are EXPLICITLY linked rather than silent duplicates.
+
+    ``project_id`` / ``abort_phase`` / ``incomplete_task_ids`` (atelier#66) are
+    the resume hooks: they are folded into the metadata dict as human-facing
+    OFFER context for the next /atelier:run's resume detection. The AUTHORITATIVE
+    resume signal is the matching 'aborted' audit payload (the workspace-less
+    doc carries project_id=None at the column level — #90 — so resume joins via
+    team_audit_log.team_id->teams.project_id, never via this doc). The keys are
+    ALWAYS written (defaulting to None) so the metadata schema stays stable for
+    resume to read regardless of whether the orchestrator supplied them."""
     body = _render_report(
         team_id=team_id,
         team_pk=team_pk,
@@ -284,6 +348,11 @@ def _write_report(
         "team_pk": team_pk,
         "mode": mode,
         "reason": reason,
+        # #66 resume hooks — always present (None when not supplied) so resume's
+        # metadata read sees a stable schema.
+        "project_id": project_id,
+        "abort_phase": abort_phase,
+        "incomplete_task_ids": list(incomplete_task_ids) if incomplete_task_ids else [],
     }
     if supersedes is not None:
         metadata["supersedes"] = supersedes
@@ -350,6 +419,9 @@ def _do_abort(
     reason: str,
     clean_worktree: bool,
     cwd: Path,
+    project_id: str | None = None,
+    abort_phase: str | None = None,
+    incomplete_task_ids: list[object] | None = None,
 ) -> int:
     """Shared abort core for both paths. Returns a process exit code.
 
@@ -397,7 +469,14 @@ def _do_abort(
         # the (skipped, non-local) teardown completes. The ERROR is observable
         # ONLY via the stderr line below — see the module EXIT CODE note.
         report = _write_report(
-            team_id=team_id, team_pk=team_pk, mode=mode, reason=reason, torn_down=torn_down
+            team_id=team_id,
+            team_pk=team_pk,
+            mode=mode,
+            reason=reason,
+            torn_down=torn_down,
+            project_id=project_id,
+            abort_phase=abort_phase,
+            incomplete_task_ids=incomplete_task_ids,
         )
         if report is None:
             print(
@@ -425,7 +504,14 @@ def _do_abort(
             "team_audit_log: one 'aborted' event written.",
         ]
         first_echo = _write_report(
-            team_id=team_id, team_pk=team_pk, mode=mode, reason=reason, torn_down=planned
+            team_id=team_id,
+            team_pk=team_pk,
+            mode=mode,
+            reason=reason,
+            torn_down=planned,
+            project_id=project_id,
+            abort_phase=abort_phase,
+            incomplete_task_ids=incomplete_task_ids,
         )
         # Capture the crash-survival doc's id so the final ACTUAL-outcomes report
         # can supersede-link it (rather than leave two unlinked duplicate docs).
@@ -466,6 +552,15 @@ def _do_abort(
                     "mode": mode,
                     "reason": reason,
                     "team_delete_request_id": delete_row_id,
+                    # #66 resume hooks — the AUTHORITATIVE resume signal.
+                    # resume.find_resumable_arc joins team_audit_log.team_id ->
+                    # teams.project_id and reads abort_phase + team_pk +
+                    # incomplete_task_ids from THIS payload (the workspace-less
+                    # abort doc carries project_id=None, so it cannot be the join
+                    # key — #90). Always present (None / []) for a stable schema.
+                    "project_id": project_id,
+                    "abort_phase": abort_phase,
+                    "incomplete_task_ids": list(incomplete_task_ids) if incomplete_task_ids else [],
                 },
             )
             torn_down.append("team_audit_log: wrote 'aborted' event.")
@@ -506,6 +601,9 @@ def _do_abort(
         reason=reason,
         torn_down=torn_down,
         supersedes=report_first_id,
+        project_id=project_id,
+        abort_phase=abort_phase,
+        incomplete_task_ids=incomplete_task_ids,
     )
 
     print(
@@ -550,9 +648,31 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="SOFT path only: remove the worktree iff it is clean (never destroys dirty work).",
     )
+    # #66 resume hooks — optional, threaded from the orchestrator that already
+    # holds team_pk. They are folded into the 'aborted' audit payload (the
+    # authoritative resume signal) AND the abort-report metadata so the next
+    # /atelier:run's resume.find_resumable_arc can resume AT the abort phase
+    # without re-planning. Omitted -> the keys default to None, a stable schema.
+    ap.add_argument(
+        "--project-id",
+        default=None,
+        dest="project_id",
+        help="Textual project_id (teams.project_id) folded into the resume hooks.",
+    )
+    ap.add_argument(
+        "--phase",
+        default=None,
+        dest="abort_phase",
+        help="The phase the arc was aborted AT; resume force-phases here on 'continue'.",
+    )
     args = ap.parse_args(argv)
 
     mode = "hard" if args.hard else "soft"
+    # Validate --phase against the canonical phase vocabulary (atelier#66 N1).
+    # An unknown phase → WARN + None (never propagate a bogus, non-navigable
+    # phase into the audit payload / projects.phase). The abort still proceeds —
+    # this is a resilience guard, NOT a hard-fail.
+    abort_phase = _validate_phase(args.db, args.abort_phase)
     return _do_abort(
         db_path=args.db,
         team_pk=args.team_pk,
@@ -561,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
         reason=args.reason,
         clean_worktree=args.clean_worktree,
         cwd=Path.cwd(),
+        project_id=args.project_id,
+        abort_phase=abort_phase,
     )
 
 

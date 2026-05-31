@@ -491,3 +491,188 @@ def test_resolve_team_id_reads_from_create_team_response(workspace):
     assert abort.resolve_team_id(workspace["db"], TEAM_PK) == TEAM_ID
     # An unknown team_pk resolves to None.
     assert abort.resolve_team_id(workspace["db"], "no-such-pk") is None
+
+
+# ── #66 resume hooks: --project-id / --phase fold into payload + metadata ────
+
+
+def _live_task(db_path, project_id_text, team_pk):
+    """Seed ONE non-terminal task scoped to team_pk so resume.find_resumable_arc
+    has a resumable signal after the abort round-trip. tasks.project_id FKs to
+    projects.id (INTEGER), so we stand up a workspace+project row first and
+    return nothing — the resumable signal is the non-terminal task's team_pk,
+    which find_resumable_arc reads from the audit payload, not the project FK."""
+    conn = sqlite3.connect(db_path)
+    now = "2026-05-31T00:00:00Z"
+    ws = conn.execute(
+        "INSERT INTO workspaces (slug, identity, name, created_at, updated_at) "
+        "VALUES ('rt-ws', '/tmp/rt-ws', 'RT WS', ?, ?)",
+        (now, now),
+    )
+    ws_id = ws.lastrowid
+    proj = conn.execute(
+        "INSERT INTO projects (workspace_id, slug, name, phase, created_by, created_at, updated_at) "
+        "VALUES (?, 'rt-proj', 'RT Proj', 'design:open', 'pm', ?, ?)",
+        (ws_id, now, now),
+    )
+    proj_rowid = proj.lastrowid
+    conn.execute(
+        "INSERT INTO tasks (project_id, title, status, created_by, created_at, updated_at, "
+        "parallel_group, team_pk) VALUES (?, 'rt-live', 'pending', 'pm', ?, ?, 1, ?)",
+        (proj_rowid, now, now, team_pk),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_abort_folds_project_id_and_phase_into_audit_payload_and_metadata(workspace):
+    """#66: abort --project-id/--phase folds project_id + abort_phase +
+    incomplete_task_ids into BOTH the 'aborted' audit payload AND the abort-report
+    doc metadata, so resume.find_resumable_arc can detect the arc AND resume AT
+    the abort phase without re-planning. ANTI-REVERT: dropping the fold from
+    either sink leaves the payload/metadata without abort_phase and the
+    assertions below go RED."""
+    project_id = "proj-1"  # matches the workspace fixture's teams.project_id
+    phase = "tdd:red"  # a REAL phase from the vocabulary (#66 N1 validation)
+
+    rc = abort.main(
+        [
+            "--team-pk",
+            TEAM_PK,
+            "--team-id",
+            TEAM_ID,
+            "--project-id",
+            project_id,
+            "--phase",
+            phase,
+            "--clean-worktree",
+        ]
+    )
+    assert rc == 0
+
+    db = workspace["db"]
+
+    # (a) The 'aborted' audit payload carries project_id + abort_phase.
+    audits = backend.list_team_audit(team_id=TEAM_ID, event_type="aborted")
+    assert len(audits) == 1
+    payload = json.loads(audits[0]["payload"])
+    assert payload["project_id"] == project_id
+    assert payload["abort_phase"] == phase
+    assert "incomplete_task_ids" in payload
+
+    # (b) The abort-report doc metadata ALSO carries them (the final report).
+    docs = _abort_report_docs(db)
+    assert len(docs) >= 1
+    meta = json.loads(docs[-1]["metadata"])
+    assert meta["project_id"] == project_id
+    assert meta["abort_phase"] == phase
+
+
+def test_abort_payload_round_trips_to_find_resumable_arc(workspace):
+    """The folded payload round-trips: after a soft abort with --project-id/--phase
+    and a non-terminal task scoped to the team_pk, resume.find_resumable_arc
+    detects the arc and surfaces the abort_phase read from the audit payload."""
+    from scripts import resume
+
+    project_id = "proj-1"
+    phase = "tdd:red"  # a REAL phase from the vocabulary (#66 N1 validation)
+    _live_task(workspace["db"], project_id, TEAM_PK)
+
+    assert (
+        abort.main(
+            [
+                "--team-pk",
+                TEAM_PK,
+                "--team-id",
+                TEAM_ID,
+                "--project-id",
+                project_id,
+                "--phase",
+                phase,
+                "--clean-worktree",
+            ]
+        )
+        == 0
+    )
+
+    offer = resume.find_resumable_arc(workspace["db"])
+    assert offer is not None
+    assert offer.team_id == TEAM_ID
+    assert offer.project_id == project_id
+    assert offer.abort_phase == phase
+    assert offer.incomplete_count == 1
+
+
+def test_abort_without_resume_flags_keeps_payload_keys_none(workspace):
+    """Back-compat: omitting --project-id/--phase folds the keys as None (the
+    payload/metadata schema stays stable) and find_resumable_arc still detects
+    the arc via the audit join — abort_phase is simply None for a legacy abort."""
+    abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID, "--clean-worktree"])
+    audits = backend.list_team_audit(team_id=TEAM_ID, event_type="aborted")
+    payload = json.loads(audits[0]["payload"])
+    # Keys present, defaulted to None — a stable schema for resume to read.
+    assert payload["project_id"] is None
+    assert payload["abort_phase"] is None
+
+
+# ── #66 N1: --phase validation against the canonical phase vocabulary ────────
+
+
+def test_unknown_phase_warns_and_records_none(workspace, monkeypatch, capsys):
+    """#66 N1 ROBUSTNESS: a --phase value NOT in the phase vocabulary is REJECTED
+    — abort logs a clear WARN to stderr and records abort_phase=None so the bogus
+    phase never round-trips into projects.phase on a resume-continue. The abort
+    is RESILIENT (does NOT hard-fail): main() still returns 0 and the rest of the
+    teardown (status / team_delete / audit) runs. ANTI-REVERT: dropping the
+    validation lets 'no-such-phase:typo' land in the payload and this goes RED."""
+    monkeypatch.setattr(abort, "_worktree_is_dirty", lambda cwd: True)
+
+    rc = abort.main(
+        [
+            "--team-pk",
+            TEAM_PK,
+            "--team-id",
+            TEAM_ID,
+            "--phase",
+            "no-such-phase:typo",
+        ]
+    )
+    # Resilience: the abort still completes (exit 0), it does not hard-fail.
+    assert rc == 0
+
+    # A clear WARN names the offending phase.
+    err = capsys.readouterr().err
+    assert "no-such-phase:typo" in err
+    assert "not a known phase" in err
+
+    # The bogus phase is NOT propagated into the audit payload — recorded as None.
+    audits = backend.list_team_audit(team_id=TEAM_ID, event_type="aborted")
+    assert len(audits) == 1
+    payload = json.loads(audits[0]["payload"])
+    assert payload["abort_phase"] is None
+    # And not into the abort-report metadata either.
+    docs = _abort_report_docs(workspace["db"])
+    assert json.loads(docs[-1]["metadata"])["abort_phase"] is None
+
+
+def test_valid_phase_is_recorded_as_is(workspace):
+    """#66 N1: a --phase value that IS in the canonical vocabulary (e.g. the
+    schema-seeded 'review:open') is accepted verbatim and folded into the audit
+    payload + report metadata, unchanged."""
+    rc = abort.main(
+        [
+            "--team-pk",
+            TEAM_PK,
+            "--team-id",
+            TEAM_ID,
+            "--phase",
+            "review:open",
+            "--clean-worktree",
+        ]
+    )
+    assert rc == 0
+
+    audits = backend.list_team_audit(team_id=TEAM_ID, event_type="aborted")
+    assert json.loads(audits[0]["payload"])["abort_phase"] == "review:open"
+    docs = _abort_report_docs(workspace["db"])
+    assert json.loads(docs[-1]["metadata"])["abort_phase"] == "review:open"

@@ -267,3 +267,80 @@ def test_amendment_refuses_missing_prior(workspace):
             body="x",
             created_by="atelier-pm-1",
         )
+
+
+# ── atelier#66 [S3] T5 — spec-versioning metadata round-trip in Memex (#62) ──
+#
+# test_spec_versioning is Local-only (its module docstring even cites a past
+# "Local drops metadata" bug; grep-confirms ZERO 'memex' hits). The Memex path
+# folds `metadata` into the Index blob rather than a wide column — the path most
+# likely to silently drop the versioning fields (R4) — and was untested. This
+# force-Memex round-trip pins that an amendment's `metadata.version` (1->2) and
+# `metadata.supersedes` reach the Memex `write_document` payload. Hermetic via
+# the canonical stub set: `backend_memex.get_document` returns the prior v1 spec
+# (and None for the post-write re-read so `write_spec_amendment` returns its echo
+# with synthesised metadata — no live ~/.memex), and `backend_memex.write_document`
+# is spied for the payload assertion.
+
+
+def test_spec_amendment_round_trips_metadata_memex(monkeypatch):
+    """Force-Memex: amending a v1 spec issues `backend.write_document` whose
+    folded metadata carries version=2 + supersedes=<prior_id>. Asserts at the
+    `backend_memex.write_document` mock boundary (the facade folds the wide
+    metadata into the Memex Index blob)."""
+    from scripts import backend, backend_memex, mode_detector
+    from scripts.documents import write_spec_amendment
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+    monkeypatch.setattr(backend, "_backend", lambda: backend_memex)
+    monkeypatch.setattr(backend, "_backend_is_memex", lambda be: True)
+
+    PRIOR_ID = 7
+    # The prior v1 spec the amendment reads (domain/subdomain must be the §6.4
+    # spec coordinates or write_spec_amendment refuses it). metadata.version=1.
+    prior_row = {
+        "id": PRIOR_ID,
+        "workspace_id": 1,
+        "project_id": 3,
+        "domain": "project",
+        "subdomain": "spec",
+        "title": "Auth Spec",
+        "metadata": {"version": 1},
+    }
+
+    def fake_get_document(*, doc_id):
+        # Prior read returns the v1 spec; the post-write re-read (new id) misses
+        # so write_spec_amendment returns its echo with synthesised metadata.
+        return prior_row if doc_id == PRIOR_ID else None
+
+    monkeypatch.setattr(backend_memex, "get_document", fake_get_document)
+
+    captured: dict = {}
+
+    def fake_write_document(**kwargs):
+        captured.update(kwargs)
+        return {"row_id": 99, "index_id": "i-99"}
+
+    monkeypatch.setattr(backend_memex, "write_document", fake_write_document)
+
+    new_doc = write_spec_amendment(
+        "ignored-db-path",  # Memex path never touches the local sqlite file
+        prior_doc_id=PRIOR_ID,
+        title="Auth Spec (v2)",
+        body="# Goal\n\nv2 body.",
+        created_by="atelier-pm-1",
+    )
+
+    # The Memex write was reached and the versioning metadata survived the fold
+    # into the Index blob (NOT dropped — the R4 regression this pins).
+    assert captured, "write_spec_amendment never reached the Memex backend"
+    assert captured["metadata"]["version"] == 2
+    assert captured["metadata"]["supersedes"] == PRIOR_ID
+    # The spec coordinates ride through unchanged so the new row stays a spec.
+    # domain is a native write_document param; subdomain is folded into the
+    # Memex Index metadata blob (the facade's adapter pattern).
+    assert captured["domain"] == "project"
+    assert captured.get("subdomain") == "spec" or captured["metadata"].get("subdomain") == "spec"
+    # The echoed return carries the bumped version for the caller.
+    assert new_doc["metadata"]["version"] == 2
+    assert new_doc["metadata"]["supersedes"] == PRIOR_ID

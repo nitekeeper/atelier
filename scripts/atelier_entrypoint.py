@@ -77,7 +77,28 @@ def startup_check() -> dict:
     """
     mode = mode_detector.detect_mode()
     if mode == "local":
-        return {"action": "proceed-local"}
+        result: dict = {"action": "proceed-local"}
+        # ── Resume detection (atelier#66 [S2], AC3) — LOCAL branch ONLY ──────
+        #
+        # Detect an aborted-but-incomplete team-mode arc and, when found, attach
+        # a `resume_offer` field ALONGSIDE the action token (additive — the
+        # proceed-local contract is unchanged). This is LOCAL-only by design
+        # (§17): a Memex-mode run has no Local team-mode dispatch state to
+        # resume, so find_resumable_arc is never consulted on the Memex path.
+        # NEVER-SILENT: this only ATTACHES an offer DATA token — the human is
+        # asked new/continue by skills/run/SKILL.md; the detector mutates
+        # nothing. Lazy import keeps `resume` (and its migrate chain) off the
+        # bare `startup_check` import path; `_project_ai_dir()` resolves the
+        # always-Local `.ai/atelier.db`. A None ai dir (no git root) yields no
+        # offer — there is no project DB to inspect.
+        ai = _project_ai_dir()
+        if ai is not None:
+            from scripts import resume
+
+            offer = resume.find_resumable_arc(str(ai / "atelier.db"))
+            if offer is not None:
+                result["resume_offer"] = offer
+        return result
 
     ai = _project_ai_dir()
     if ai is not None and should_prompt(ai):

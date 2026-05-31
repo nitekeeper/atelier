@@ -274,6 +274,62 @@ def test_persist_tasks_is_all_or_nothing(setup, monkeypatch):
     assert tasks_mod.list_tasks(setup["db_path"], project_id=setup["project_id"]) == []
 
 
+# ── atelier#66 [S3] T3 — persist_tasks force-Memex smoke (AC5/#58/#59) ───────
+#
+# The whole test_planner suite forces `detect_mode->'local'`, so `parallel_group`
+# persistence through the MEMEX backend was never exercised (grep-confirmed: ZERO
+# 'memex' hits before #66). The wave/parallel_group logic is mode-agnostic (it
+# operates on the tasks-table shape), so a focused force-Memex smoke — not a full
+# parametrize — suffices to pin that `persist_tasks` reaches `backend.write_task`
+# with `parallel_group` preserved on the Memex routing branch. Uses the canonical
+# hermetic Memex stub set; `backend_memex.get_task` is stubbed to None so
+# `tasks.create_task`'s post-write re-fetch takes its synthesis fallback (no real
+# Memex read), keeping the smoke hermetic without a live ~/.memex registry.
+
+
+def test_persist_tasks_preserves_parallel_group_in_memex_mode(setup, monkeypatch):
+    """Force-Memex smoke: `persist_tasks` issues `backend.write_task` for each
+    task with `parallel_group` preserved through the Memex routing branch.
+    Mirrors the canonical hermetic stub (detect_mode->'memex' +
+    backend._backend/_backend_is_memex + spy the backend_memex leaf)."""
+    from scripts import backend, backend_memex, mode_detector
+
+    # Canonical hermetic Memex stub set — flip the facade router to Memex.
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+    monkeypatch.setattr(backend, "_backend", lambda: backend_memex)
+    monkeypatch.setattr(backend, "_backend_is_memex", lambda be: True)
+
+    seen: list[dict] = []
+
+    def fake_write_task(**kwargs):
+        seen.append(kwargs)
+        # Memex write echo shape: {row_id, index_id}; ids in input order.
+        return {"row_id": len(seen), "index_id": f"i-{len(seen)}"}
+
+    monkeypatch.setattr(backend_memex, "write_task", fake_write_task)
+    # Re-fetch misses on the Memex path → create_task synthesises the row
+    # (hermetic — no real ~/.memex read).
+    monkeypatch.setattr(backend_memex, "get_task", lambda **k: None)
+
+    ids = planner.persist_tasks(
+        _valid_tasks(),
+        db_path=setup["db_path"],
+        project_id=setup["project_id"],
+        created_by=setup["agent_id"],
+        workspace_id=setup["workspace_id"],
+        team_pk="run-A",
+    )
+
+    assert ids == [1, 2, 3]
+    # Every task reached the Memex backend write with its parallel_group intact
+    # (the dispatch primitive, §5.4) — t-1/t-2 in wave 1, t-3 in wave 2.
+    assert [w["parallel_group"] for w in seen] == [1, 1, 2]
+    # parallel_group rides as a native Memex param (not folded into metadata);
+    # team_pk IS folded into the metadata blob (no tasks.team_pk column there).
+    assert all("parallel_group" in w for w in seen)
+    assert all(w["metadata"]["team_pk"] == "run-A" for w in seen)
+
+
 # ── reviewer disjointness (atelier#59) ────────────────────────────────────
 
 

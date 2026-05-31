@@ -48,6 +48,94 @@ Requires `qa:approved`.
 
    Wait for the user's explicit choice before proceeding.
 
+   > **(agent-team mode only) — Per-run branch + single PR + retrospective**
+   >
+   > This sub-procedure applies ONLY when this cycle ran in **agent-team
+   > mode** (a real `team` was created — same fence trigger as step 6). It
+   > REPLACES the single-tree `(a)`/`(b)` options below for team mode (running
+   > both would open TWO PRs). Sub-agent / Memex finishes create no team, so
+   > SKIP this block and use `(a)`/`(b)`/`(c)` as written.
+   >
+   > A team-mode run fans N task worktrees off a single per-run feature branch
+   > `atelier/<slug>`; finish merges them all into that one branch and opens
+   > ONE PR. All steps go through `scripts/finish_pr.py` (thin, tested git/gh
+   > layer — it does NOT call `worktree.merge_back`, which would merge into the
+   > base branch and skip the PR).
+   >
+   > 1. **Resolve the canonical feature branch (never re-derive the slug — F4).**
+   >    ```
+   >    # Run as: python3 -c "<contents below>" (replace <repo_root>, <base>)
+   >    from pathlib import Path
+   >    from scripts import finish_pr
+   >    from scripts.scope import resolve_scope
+   >
+   >    scope = resolve_scope()
+   >    slug = scope.project["slug"]          # canonical per-run slug
+   >    branch = finish_pr.resolve_or_create_feature_branch(
+   >        Path("<repo_root>"), slug, "<base>")
+   >    print(branch)                          # canonical atelier/<slug>, read back
+   >    ```
+   >    `branch` (the string returned / read back) is canonical — pass it
+   >    verbatim into the merge + PR; never retype the slug.
+   >
+   > 2. **Merge the wave worktrees in dependency order.**
+   >    ```
+   >    result = finish_pr.merge_worktrees(
+   >        Path("<repo_root>"), branch, "<base>",
+   >        task_branches_in_dep_order)   # wave/DAG order; sibling-namespace
+   >                                      # branches (NOT nested under atelier/<slug>)
+   >    ```
+   >    Clean worktrees auto-remove; worktrees still carrying uncommitted
+   >    PROJECT changes are PRESERVED and listed in `result.dirty_preserved`
+   >    (`.claude/`-only dirt counts CLEAN). A conflicting task aborts cleanly
+   >    (`git merge --abort`) and lands in `result.conflicts` — surface those
+   >    in the PR body rather than force-merging.
+   >
+   >    **Task-branch naming (sibling, NEVER nested) — use the canonical helper.**
+   >    The FUTURE worktree-creation dispatch layer MUST mint each task branch via
+   >    `finish_pr.task_branch_name(slug, task_id)` →
+   >    `atelier/<slug>-task-<task_id>`, a SIBLING of the feature branch. NEVER
+   >    re-derive the name ad hoc and NEVER nest it under the feature branch
+   >    (`atelier/<slug>/<task_id>`): git's loose-ref storage cannot hold both a
+   >    ref FILE at `refs/heads/atelier/<slug>` and a ref DIRECTORY beneath it, so
+   >    the nested form is a hard D/F conflict. `merge_worktrees` validates every
+   >    branch it is handed against this sibling contract
+   >    (`finish_pr._BRANCH_RE`) and rejects any non-conforming / leading-dash
+   >    name (also a git option-injection guard), so a dispatch layer that skips
+   >    `task_branch_name` will fail loud at the merge boundary.
+   >    ```
+   >    # When creating each task worktree (future dispatch layer):
+   >    branch_for_task = finish_pr.task_branch_name(slug, task_id)
+   >    # git worktree add -b <branch_for_task> <wt_dir> <base>
+   >    ```
+   >
+   > 3. **Open the single PR against the feature branch.**
+   >    ```
+   >    url = finish_pr.open_pr(
+   >        Path("<repo_root>"), branch, "<base>",
+   >        title="<project name>",
+   >        body="<description + per-task summary + output_doc_id links + "
+   >             "result.conflicts + result.dirty_preserved>")
+   >    ```
+   >
+   > 4. **Write the retrospective (BEFORE step 6 teardown).**
+   >    ```
+   >    finish_pr.write_retrospective(
+   >        workspace_id=scope.workspace["id"] if scope.workspace else None,
+   >        project_id=scope.project["id"] if scope.project else None,
+   >        title="Finish: <project name>",
+   >        body="<what integrated; per-task summary>",
+   >        pr_url=url)
+   >    ```
+   >    One `backend.write_document(domain='project_doc',
+   >    subdomain='finish-result', metadata={phase:'finish', pr_url})` via the
+   >    A2 facade — mode-symmetric, NO mode branch. Fire it BEFORE step 6 so the
+   >    durable artifact survives even if teardown slips.
+   >
+   > Then continue to step 5 (session record — `--notes "<PR URL>"`) and fall
+   > through to the EXISTING step 6 (#90 team-teardown record) UNCHANGED. Do
+   > NOT also run `(a)`/`(b)` below.
+
    **Option (a) — Merge to main:**
    Ask: "Confirm merge of `<branch>` into `<base>`? (yes/no)" Wait for yes before running:
    ```

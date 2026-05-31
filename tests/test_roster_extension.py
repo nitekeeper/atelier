@@ -181,3 +181,60 @@ def test_ack_is_role_scoped(team_workspace) -> None:
     roster_extension.record_ack(team_id="T1", role_name="role-A", acked=True, rationale="ok")
     assert roster_extension.has_recorded_ack(team_id="T1", role_name="role-A") is True
     assert roster_extension.has_recorded_ack(team_id="T1", role_name="role-B") is False
+
+
+# ── atelier#66 [S3] T6-roster — proposed-role write via Memex roster (#64) ───
+#
+# The team_workspace fixture forces detect_mode->'local' (so find_or_create_role
+# does not write to the real ~/.memex/agents.db); the lone 'memex' grep hit was a
+# fixture comment, not a test. The find_or_create_role Memex roster path was thus
+# untested. This force-Memex test overrides the mode AFTER the fixture, spies
+# `backend_memex.find_or_create_role`, and proves the consented persona is created
+# via the MEMEX roster while the consent gate (record_proposal / record_ack /
+# has_recorded_ack) stays on the always-Local team_audit_log (§17). The note in
+# the design names the function `accept_proposed_role`; the real surface is
+# `write_proposed_role` (the consent-gated writer) — tested here under its actual
+# name.
+
+
+def test_write_proposed_role_creates_role_in_memex_mode(team_workspace, monkeypatch) -> None:
+    """Force-Memex: an ack'd proposal's persona is created via
+    `backend_memex.find_or_create_role` (the Memex roster), while the consent
+    decision stays an always-Local team_audit_log row. Spies the Memex leaf so
+    the roster routing branch is genuinely exercised."""
+    from scripts import backend, backend_memex, mode_detector
+
+    # Consent rows (always-Local audit) are written under whatever mode is
+    # active; flip to Memex AFTER seeding so the gate + write both see Memex.
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+    monkeypatch.setattr(backend, "_backend", lambda: backend_memex)
+    monkeypatch.setattr(backend, "_backend_is_memex", lambda be: True)
+
+    seen: list[dict] = []
+
+    def fake_find_or_create_role(*, name, description):
+        seen.append({"name": name, "description": description})
+        return {"id": 501, "name": name, "description": description}
+
+    monkeypatch.setattr(backend_memex, "find_or_create_role", fake_find_or_create_role)
+
+    # Consent gate: record the proposal + the human ack (always-Local audit,
+    # unaffected by the durable mode — backend.write_team_audit binds local).
+    roster_extension.record_proposal(
+        team_id="T1", role_name=NAME, role_description=DESC, rationale="auth needs a chain auditor"
+    )
+    roster_extension.record_ack(team_id="T1", role_name=NAME, acked=True, rationale="approved")
+
+    role = roster_extension.write_proposed_role(team_id="T1", role_name=NAME, role_description=DESC)
+
+    # The persona was created via the Memex roster leaf (routing branch hit).
+    assert role is not None
+    assert role["id"] == 501
+    assert len(seen) == 1
+    assert seen[0]["name"] == NAME
+    assert seen[0]["description"] == DESC
+    # The consent decision stays an always-Local team_audit_log row (§17) —
+    # it landed in the local DB even though detect_mode is 'memex'.
+    consent = _audit_rows(team_workspace["db"], roster_extension.CONSENT_EVENT_TYPE)
+    assert len(consent) == 1
+    assert json.loads(consent[0]["payload"])["acked"] is True

@@ -638,3 +638,68 @@ def test_cascade_abandon_survives_cyclic_dep_graph(workspace):
     # Neither was abandoned (no abandoned ancestor in the cycle).
     assert _task_row(workspace, t_a)["status"] != "abandoned"
     assert _task_row(workspace, t_b)["status"] != "abandoned"
+
+
+# ── atelier#66 [S3] T4 — task-status transitions force-Memex smoke (#60) ─────
+#
+# The whole test_pm_dispatch suite forces `detect_mode->'local'` (grep-confirmed
+# ZERO 'memex' hits), so the PM task-status transitions' MEMEX routing branch was
+# never exercised. The wave-scheduler ENGINE is mode-agnostic (atelier#61 owns
+# mode dispatch); the mode routing lives in `scripts/tasks.py`'s status mutators.
+# Of those, ONLY `update_task_status` (and thus `complete_task`, which calls it)
+# routes through the mode facade in BOTH modes. The PM dispatch-state mutators —
+# `set_abandoned` / `increment_attempt` / `stamp_last_attempt` /
+# `set_abandoned_ack` (migration 006 state columns) — are DELIBERATELY Local-only
+# for now: `tasks._dispatch_state_memex_guard` raises a clear NotImplementedError
+# in Memex mode rather than silently writing to the wrong store
+# (`backend_memex.update_task_status` does not yet set the lifecycle stamps —
+# a documented followup). So the both-mode-PARITY transition is
+# `update_task_status`/`complete_task`; `set_abandoned` is correctly NOT a
+# both-mode target yet, and pinning that guard is itself part of the audit
+# deliverable (a future Memex-parity revert would surface here).
+
+
+def test_complete_task_routes_through_memex_backend(workspace, monkeypatch):
+    """`tasks.complete_task` → `tasks.update_task_status` →
+    `backend.update_task_status` reaches the MEMEX backend leaf exactly once in
+    Memex mode (the both-mode status-transition parity path, #60). Hermetic:
+    spy `backend_memex.update_task_status`; the workspace fixture's Local DB is
+    untouched on this branch."""
+    from scripts import backend, backend_memex, mode_detector
+    from scripts import tasks as tasks_mod
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+    monkeypatch.setattr(backend, "_backend", lambda: backend_memex)
+
+    calls: list[dict] = []
+
+    def fake_update(**kwargs):
+        calls.append(kwargs)
+        return {"id": kwargs["task_id"], "status": kwargs["status"]}
+
+    monkeypatch.setattr(backend_memex, "update_task_status", fake_update)
+
+    tasks_mod.complete_task(workspace["db"], 42)
+
+    assert len(calls) == 1, "complete_task must reach the Memex backend exactly once"
+    assert calls[0]["task_id"] == 42
+    assert calls[0]["status"] == "complete"
+
+
+def test_set_abandoned_is_local_only_guarded_in_memex_mode(workspace, monkeypatch):
+    """Audit pin: the migration-006 PM dispatch-state mutators
+    (`set_abandoned` / `increment_attempt`) are DELIBERATELY Local-only — in
+    Memex mode `tasks._dispatch_state_memex_guard` raises NotImplementedError
+    rather than silently writing via backend_local. This documents that they
+    are correctly NOT both-mode-parity targets yet (mirrors the
+    backend_memex.update_task_status lifecycle-stamp gap); a future Memex-parity
+    landing must remove the guard, which flips this RED as the reminder."""
+    from scripts import mode_detector
+    from scripts import tasks as tasks_mod
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+
+    with pytest.raises(NotImplementedError, match="Local-mode only"):
+        tasks_mod.set_abandoned(workspace["db"], 1, category="blocked")
+    with pytest.raises(NotImplementedError, match="Local-mode only"):
+        tasks_mod.increment_attempt(workspace["db"], 1)

@@ -838,3 +838,112 @@ def test_parse_reply_envelope_returns_none_on_non_object():
     assert _parse_reply_envelope("[1, 2, 3]") is None  # JSON array, not an object
     assert _parse_reply_envelope(None) is None
     assert _parse_reply_envelope(b"bytes") is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# atelier#66 [S3] AUDIT-NOTES — both-mode parity coverage map for #57-#65
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# #66 (epic #39 closer, AC5/AC6/AC7) requires every mode-dispatched DURABLE
+# write added by #57-#65 to be exercised in BOTH Local and Memex mode. The audit
+# surfaced COVERAGE gaps (not real bugs — no durable write is hard-wired to the
+# wrong mode), each now closed by ONE focused force-Memex test using the
+# canonical hermetic stub set (detect_mode->'memex' + backend._backend +
+# backend._backend_is_memex, spying the backend_memex LEAF; conftest autouse
+# _clear_mode_cache + _stub_singleton_workspace neutralize the registry):
+#
+#   T1  scripts/dispatch.py::_resolve_local_bridge_db   (this file, below)
+#   T2  scripts/backend.py::write_task team_pk fold      (test_backend_dispatch.py)
+#   T3  scripts/planner.py::persist_tasks parallel_group (test_planner.py)
+#   T4  scripts/tasks.py status transitions (#60)        (test_pm_dispatch.py)
+#   T5  scripts/documents.py::write_spec_amendment (#62) (test_spec_versioning.py)
+#   T6  scripts/side_query.py + scripts/roster_extension (test_side_query.py /
+#                                                          test_roster_extension.py)
+#
+# DELIBERATE EXCLUSIONS — these are CORRECTLY NOT both-mode-parity targets; the
+# audit deliverable is documenting WHY, so a future maintainer does not "fix"
+# them by adding a Memex route (which would itself be the §17 bug):
+#
+#   • scripts/dag.py — PURE (no I/O: no backend/sqlite/file imports). Mode is
+#     irrelevant; it operates on in-memory task-graph dicts. No write to route.
+#
+#   • scripts/team_meeting.py — bridge_send (the always-Local message wire) +
+#     backend.write_team_audit ONLY (team_meeting.py:458/478). team_audit_log is
+#     ALWAYS-LOCAL by §17 (backend.write_team_audit binds backend_local directly,
+#     mode-agnostic — backend.py:669-699), and bridge_send rides the same Local
+#     wire. A Memex route here would FAIL (Memex has no team-mode tables) — so
+#     "always-Local" IS the correct posture; parametrizing it over Memex would
+#     assert the bug, not the contract.
+#
+#   • scripts/status.py — explicitly Local-ONLY by gate (status.py:554:
+#     detect_mode() != "local" -> prints a notice + returns 0; covered by
+#     test_status.py). It renders the migration-006 PM dispatch-state columns,
+#     which are Local-only (the same reason tasks._dispatch_state_memex_guard
+#     raises in Memex mode — see T4 in test_pm_dispatch.py). No Memex analog.
+#
+#   • scripts/tasks.py PM dispatch-state mutators (set_abandoned /
+#     increment_attempt / stamp_last_attempt / set_abandoned_ack) — DELIBERATELY
+#     Local-only for now (NotImplementedError guard in Memex mode); a documented
+#     followup, NOT a #66 parity target. Pinned by T4's guard test so a future
+#     Memex-parity landing surfaces as a RED reminder.
+#
+# bridge_db (T1) and team_audit_log are mode-AGNOSTIC by being HARD-WIRED Local;
+# T1's value is asserting that hard-wiring holds (the anti-revert), NOT
+# parametrizing it over Memex.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── atelier#66 [S3] T1 — §17 bridge_db-is-always-Local pin (AC6) ─────────────
+#
+# `_resolve_local_bridge_db` resolves the request-queue DB to `.ai/atelier.db`
+# under the CWD git root and MUST NEVER consult `mode_detector`: the team-mode
+# bridge queue is Local-only by §17 (the Memex backend has no team-mode tables,
+# so a mode-dispatched route would be the bug). These two tests are the
+# ANTI-REVERT pin for that invariant — (a) proves the resolver ignores Memex
+# mode, (b) proves it fails loud outside a git workspace. Routing the resolver
+# through `detect_mode` (the §17 violation) makes (a) RED; the non-vacuity
+# proof in the review log neuters exactly that path.
+
+
+def test_resolve_local_bridge_db_ignores_mode(tmp_path, monkeypatch):
+    """§17/AC6: `_resolve_local_bridge_db` returns `<git-root>/.ai/atelier.db`
+    even when `detect_mode() == "memex"` — the bridge queue is hard-wired Local
+    and the resolver MUST NOT branch on the durable mode. Anti-revert: a route
+    through `mode_detector` (returning any Memex path in Memex mode) makes this
+    RED."""
+    from scripts import mode_detector
+    from scripts.dispatch import _resolve_local_bridge_db
+
+    # Force the durable mode to Memex — the resolver must ignore it entirely.
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".git").mkdir()
+    monkeypatch.chdir(root)
+
+    resolved = _resolve_local_bridge_db()
+    # Always the Local .ai/atelier.db under the git root — never a Memex path.
+    assert resolved == str(root.resolve() / ".ai" / "atelier.db")
+    # The parent dir is created as a side effect (queue-ready).
+    assert (root / ".ai").is_dir()
+
+
+def test_resolve_local_bridge_db_raises_outside_git(tmp_path, monkeypatch):
+    """Outside any git workspace the resolver fails loud with a
+    `BridgeDispatchError` (operator-facing) rather than silently writing the
+    queue to a stray CWD — the production transport requires CWD under the
+    atelier workspace."""
+    from scripts import mode_detector
+    from scripts.dispatch import _resolve_local_bridge_db
+
+    # Mode is irrelevant to the git-root requirement; pin it Local to show the
+    # raise is about the missing workspace, not the mode.
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
+
+    bare = tmp_path / "not-a-repo"
+    bare.mkdir()  # no .git anywhere up the tree (pytest tmp is outside the repo)
+    monkeypatch.chdir(bare)
+
+    with pytest.raises(BridgeDispatchError, match="not inside a git workspace"):
+        _resolve_local_bridge_db()

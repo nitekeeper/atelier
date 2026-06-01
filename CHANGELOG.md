@@ -1,5 +1,54 @@
 # Changelog
 
+## v1.3.0 — 2026-06-01
+
+**Team-mode: real multi-agent cycle execution.** This release lands the
+team-mode epic (#39) — atelier can now dispatch a wave-orchestrated team of
+role personas over a live tmux workspace, in addition to the existing
+single-sub-agent path — plus workspace-scoping groundwork and the v1.2
+deferred surfaces.
+
+### Added
+- **Team-mode epic (#39).** Mode selection in `/atelier:run`, tmux prereq +
+  config/layout management with pane-state labels, PM wave-dispatch engine
+  (wave barrier + envelope validator + stall/attempt budget), DAG validation
+  gates (`scripts/dag.py`), plan-phase planner (wave-0 specialists + wave-1
+  synthesis) with reviewer-disjointness enforcement, production dispatch
+  binding over a live queue-bridge transport, agent-team behaviors
+  (plan-phase meeting, side-query, runtime roster-extension), lifecycle
+  skills `/atelier:abort` + `/atelier:status`, `sweep_leaked_teams`, and
+  read-first stall detection (GO-OBSERVE before hard-kill / wall-clock
+  abandon). Refs #57–#90, #94.
+- **Workspace scoping.** `scripts/scope.py` (`resolve_scope()` +
+  `~/.atelier/state.json` helpers), workspace/project/document CRUD stubs,
+  workspace-less operations (migration 005), and multi-workspace integration
+  tests. Refs #50–#56.
+- **v1.2 deferred surfaces** (#30, #33, #35) and reintroduced
+  `tasks.parallel_group` column (#34).
+
+### Changed
+- Backend write surface extended: `update_task`, `delete_task`,
+  `assign_task`, `list_tasks` filter; downstream call-site wiring in
+  `projects.py` / `documents.py`; `_WORKSPACE_SLUG` hardcoding removed and
+  the `workspace_id` filter activated. Refs #31, #54, #55.
+
+### Docs / Ops
+- Consolidated operational rules (A1–A8) into `CLAUDE.md` (#41), default +
+  per-skill/role model recommendations (#42), and untracked process
+  artifacts with the Memex/Notion storage policy (#40).
+
+### Internal
+- Migrations 003/005/009, bridge + dispatch foundationals, dev-finish
+  team-mode + resume support, and dependency bumps (jinja2, libtmux, pyyaml,
+  pytest, pytest-mock).
+
+### Migration notes
+- No destructive schema changes. Team-mode requires `tmux` + `libtmux
+  >=0.58.0` only when the team-mode path is selected; the single-sub-agent
+  path is unaffected.
+
+---
+
 ## v1.2.0 — 2026-05-20
 
 **Memex-mode bug fixes + bootstrap wiring.** Resolves a class of

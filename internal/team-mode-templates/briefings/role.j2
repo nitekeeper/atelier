@@ -42,6 +42,39 @@ Use the **idempotency seed** `{{ idempotency_seed }}` to compose unique
 idempotency keys for every send: `key = sha256("{{ idempotency_seed }}:" +
 attempt_index + ":" + recipient)`. A replay with the same key returns the
 prior `seq` and does NOT duplicate the message.
+{% if team_chat.transport == 'loom' %}
+
+## Loom team-chat (PEER chat + meeting — gated, bridge stays the control-plane)
+
+This team also runs an optional **Loom agent-chat** channel for inter-agent
+(PEER) conversation and the plan-phase kickoff meeting. Register yourself on it
+under your **bare role-id** before sending:
+
+| Operation | Command |
+|-----------|---------|
+| Register (as `{{ role_id }}`) | `{{ team_chat.cmds.register }}` |
+| Send to a peer | `{{ team_chat.cmds.send_to_peer }}` |
+| Send to team-lead (chat) | `{{ team_chat.cmds.send_to_lead }}` |
+| Check inbox | `{{ team_chat.cmds.read_inbox }}` |
+| Mark messages read | `{{ team_chat.cmds.mark_read }}` |
+| Deregister (when you stop participating) | `{{ team_chat.cmds.deregister }}` |
+
+PEER chat routes through the **Loom channel `{{ team_chat.channel }}`** — address
+exactly one recipient by name (TM-003 still holds; no broadcast except a
+deliberate `@here` kickoff posted by your team-lead). When you stop
+participating, **deregister** (above) — you are marked gone but your chat
+history is retained.
+
+Loom chat messages are capped at **{{ team_chat.max_body }} chars**.
+{{ team_chat.cmds.doc_spill }}
+
+> **CONTROL-PLANE NOTE — Loom NEVER carries your reply envelope.** Your terminal
+> `task_result` envelope (TM-006) STILL goes to the **bridge** (the `Send to
+> team-lead` / `read_since` / `heartbeat` bridge commands above), NOT to Loom.
+> Loom carries chat + the kickoff meeting only; the bridge is the control-plane
+> your PM's scheduler polls. If Loom is down, you communicate normally via the
+> bridge — nothing about the reply contract changes.
+{% endif %}
 {%- endblock %}
 
 {% block reply_contract -%}

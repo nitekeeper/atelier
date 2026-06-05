@@ -80,6 +80,16 @@ teammate deliberates on the task list before dispatch. This rides
 existing `bridge_messages` transport — distinct from `scripts/meetings.py`
 (human meeting records). In sub-agent / single-agent mode, SKIP this section.
 
+> **Loom chat channel (gated — preferred when available).** When the
+> **loom-agent-chat** plugin is up (`scripts.loom_comms.detect().available`),
+> hold the kickoff meeting in the **Loom channel** instead: post the agenda and
+> conduct the deliberation there (the PM's `kickoff()` opens the channel and
+> posts the team/individual goals — see `internal/dev-dispatch/SKILL.md` "Loom
+> team-chat kickoff"). The bridge `team_meeting.py` path below is the
+> **fallback** when Loom is down — it is NOT removed, and the meeting's
+> consensus/minutes contract is identical on either transport. Loom never
+> carries the terminal reply envelope (TM-006), which always rides the bridge.
+
 1. **Open the meeting.** Fan a `_mtype='team_meeting'` opener out to every
    teammate and accumulate a `MeetingState`:
    ```python

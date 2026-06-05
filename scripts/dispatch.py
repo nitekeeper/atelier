@@ -138,6 +138,13 @@ REQUIRED_VARS: frozenset[str] = frozenset(
         "forbidden_actions",
         "task_brief",
         "acceptance_criteria",
+        # team_chat — the OPTIONAL Loom-vs-bridge chat-transport ctx (atelier
+        # loom-team-comms). ALWAYS a non-None dict: compose_briefing coerces
+        # None → {"transport": "bridge"}, so validate_render_context (None ==
+        # missing) passes on the fallback path and the AST-union test stays
+        # consistent. The bridge reply-envelope wiring (bridge_cmds) is
+        # UNAFFECTED — Loom never carries the control-plane.
+        "team_chat",
     }
 )
 
@@ -301,6 +308,7 @@ def compose_briefing(
     forbidden_actions: list[str] | None = None,
     acceptance_criteria: list[str] | None = None,
     bridge_cmds: Mapping[str, Any] | None = None,
+    team_chat: Mapping[str, Any] | None = None,
     idempotency_seed: str | None = None,
     from_agent_self: str | None = None,
     template_env: Environment | None = None,
@@ -330,6 +338,16 @@ def compose_briefing(
     of length. The only physical limit downstream is the 8 KiB
     per-bridge-message byte cap enforced by ``scripts/bridge_send.py``,
     which is unrelated to inaugural-prompt size.
+
+    ``team_chat`` is the OPTIONAL chat-transport ctx (atelier loom-team-comms):
+    a ``{"transport": "loom"|"bridge", ...}`` mapping built by
+    ``scripts.loom_comms.build_team_chat_context``. ``None`` is coerced to
+    ``{"transport": "bridge"}`` so EXISTING callers are byte-stable — they
+    render the identical bridge CHANNELS block and NO Loom subsection. When a
+    ``loom``-transport dict is passed, the template renders the additional Loom
+    chat protocol; the bridge reply-envelope wiring (``bridge_cmds``) is
+    UNAFFECTED in either case — Loom never carries the control-plane
+    (``task_result`` / TM-006 always rides the bridge).
 
     Returns the fully-rendered briefing string.
     """
@@ -379,6 +397,10 @@ def compose_briefing(
         "forbidden_actions": list(forbidden_actions or []),
         "task_brief": composed_task_brief,
         "acceptance_criteria": list(acceptance_criteria or []),
+        # team_chat is ALWAYS a non-None dict: coerce None → bridge fallback so
+        # the template's {% if team_chat.transport == 'loom' %} branch is
+        # byte-stable for existing callers and validate_render_context passes.
+        "team_chat": dict(team_chat) if team_chat is not None else {"transport": "bridge"},
     }
 
     validate_render_context(ctx)

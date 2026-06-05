@@ -113,6 +113,10 @@ Atelier defines a default dev arc and trigger contract that every session follow
 
 The methodology applies identically in both modes; only the storage backend changes.
 
+### Inter-agent chat (optional — loom-agent-chat)
+
+In **agent-team** mode, Atelier can optionally use the **loom-agent-chat** plugin for inter-agent PEER chat, the plan-phase kickoff meeting, and the PM's team/individual goals. This is **fully gated and bridge-fallback**: if Loom is installed and running, teammates converse over a per-cycle Loom channel; if it is absent or down, behavior is byte-identical to today — all coordination rides the existing bridge (`scripts/bridge_send.py`). Loom never carries control-flow: the terminal `task_result` reply envelope and heartbeats **always** ride the bridge control-plane regardless of Loom. No cycle can fail because Loom is unavailable. See `scripts/loom_comms.py` and `internal/dev-dispatch/SKILL.md`.
+
 ## Skills
 
 | Category | Skills |

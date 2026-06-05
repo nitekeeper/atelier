@@ -111,6 +111,11 @@ def _full_context() -> dict:
             "Inaugural render ≤ 4000 tiktoken cl100k tokens.",
             "untrusted() macro wraps payload + HTML-escapes sender.",
         ],
+        # team_chat — the OPTIONAL Loom-vs-bridge chat-transport ctx. The default
+        # fixture uses the BRIDGE fallback so the existing render assertions stay
+        # byte-stable (transport != 'loom' renders NO Loom subsection). Tests that
+        # exercise the Loom path pass a {"transport": "loom", ...} dict explicitly.
+        "team_chat": {"transport": "bridge"},
     }
 
 

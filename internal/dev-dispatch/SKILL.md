@@ -95,6 +95,7 @@ per-wave summaries → advance phase
        team_name=f"cycle-{<n>}",      # agent-team only — TeamCreate fires once
        teammate_name_for=lambda task: task["assigned_to"],
        escalate_fn=build_persona_gap_escalate_fn(team_id=<team_id>),  # atelier#87
+       phase=<cycle phase>,           # per-task model-tier signal (see below)
        root=<workspace_root>,         # mode marker resolution
    )
    ```
@@ -103,6 +104,24 @@ per-wave summaries → advance phase
      fires the guaranteed base sink AND records a one-shot persona-gap LEDGER
      row you surface to the human (step 6). Omit it only to fall back to the
      engine's plain WARNING-log default.
+   - **Per-task model tier is auto-selected.** The factory builds a default
+     `model_for` seam from `scripts/model_tier.py` (`recommend()`): it picks a
+     model TIER alias (`haiku` | `sonnet` | `opus`) per task by DIFFICULTY from
+     the cycle `phase` + the task's assigned role (`assigned_to`) + an optional
+     per-task `difficulty` field — reserving Opus for reasoning/review/security/
+     architect work, Sonnet as the middle default, Haiku for mechanical phases.
+     The chosen tier flows into the enqueued `spawn_*` `args_json` and the
+     bridge-poll servicer passes it to `Agent(model=...)`. Pass the cycle's
+     current `phase` so the policy has a signal; the operator can pin a global
+     override via the `ATELIER_MODEL_TIER` env var. Inject your own `model_for`
+     (e.g. `lambda task, attempt: None`) only to force session-default spawns.
+     - **`phase` FORMAT.** `phase=<cycle phase>` is the cycle's dev-arc phase id
+       — the `phases` table `<base>:<state>` string returned by `get_phase`
+       (e.g. `review:approved`, `tdd:green`, `plan:approved`), NOT a bare key.
+       `model_tier.normalize_phase` resolves that production form directly AND
+       tolerates a leading `dev:` namespace prefix (the phase-GROUP form
+       `dev:review` / `dev:tdd`), so whichever of the two this orchestrator hands
+       it, the policy reads the same base — the two sides cannot drift.
 
 3b. **Loom team-chat kickoff (gated — optional inter-agent chat).** Before the
    first wave dispatches, probe the **loom-agent-chat** plugin and, if available,

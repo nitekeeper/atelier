@@ -624,10 +624,18 @@ class DispatchTools(Protocol):
         :func:`build_spawn_fn`)."""
         ...
 
-    def spawn_teammate(self, team_id: str, name: str, prompt: str) -> None:
+    def spawn_teammate(
+        self, team_id: str, name: str, prompt: str, model: str | None = None
+    ) -> None:
         """First-touch ``Agent`` spawn of teammate ``name`` INTO ``team_id``,
         run-in-background, fire-and-forget, with ``prompt`` as the full briefing.
-        Required because CC does NOT auto-spawn on ``SendMessage`` (kaizen #59)."""
+        Required because CC does NOT auto-spawn on ``SendMessage`` (kaizen #59).
+
+        ``model`` is the OPTIONAL per-task model-tier alias (``haiku`` |
+        ``sonnet`` | ``opus``) chosen by ``scripts.model_tier`` (atelier
+        model-tier selection). ``None`` (the default) inherits the session
+        default — additive + back-compatible, so existing callers/impls are
+        unbroken."""
         ...
 
     def send_message(self, team_id: str, to: str, message: str) -> None:
@@ -636,10 +644,16 @@ class DispatchTools(Protocol):
         (i.e. a prior :meth:`spawn_teammate` materialised it)."""
         ...
 
-    def spawn_subagent(self, task_id: Any, attempt: int, prompt: str) -> None:
+    def spawn_subagent(
+        self, task_id: Any, attempt: int, prompt: str, model: str | None = None
+    ) -> None:
         """Sub-agent mode: a fire-and-forget ``Agent`` (run-in-background) for
         ONE worker attempt. NOTHING team-related — no team, no membership, no
-        first-touch. ``prompt`` is the full briefing."""
+        first-touch. ``prompt`` is the full briefing.
+
+        ``model`` is the OPTIONAL per-task model-tier alias (``haiku`` |
+        ``sonnet`` | ``opus``); ``None`` (the default) inherits the session
+        default — additive + back-compatible."""
         ...
 
 
@@ -785,6 +799,7 @@ def dispatch_task(
     team_id: str | None = None,
     teammate_name: str | None = None,
     teams_root: Path | str = DEFAULT_TEAMS_ROOT,
+    model: str | None = None,
 ) -> None:
     """Dispatch ONE worker attempt, branching on ``mode`` internally.
 
@@ -811,9 +826,15 @@ def dispatch_task(
     the briefing — the caller (or :func:`build_spawn_fn`) passes it pre-rendered
     so the mode-agnostic composer and the mode-specific dispatcher stay cleanly
     separated.
+
+    ``model`` is the OPTIONAL per-task model-tier alias (``haiku`` | ``sonnet`` |
+    ``opus``) selected by ``scripts.model_tier.recommend``. It is threaded into
+    the spawn calls only; ``send_message`` is unchanged (the teammate's model was
+    fixed at its first-touch spawn). ``None`` (the default) inherits the session
+    default — additive + back-compatible.
     """
     if mode == DISPATCH_MODE_SUBAGENT:
-        tools.spawn_subagent(task[_DISPATCH_TASK_ID_KEY], attempt, briefing)
+        tools.spawn_subagent(task[_DISPATCH_TASK_ID_KEY], attempt, briefing, model=model)
         return
     if mode == DISPATCH_MODE_AGENT_TEAM:
         if team_id is None or teammate_name is None:
@@ -828,7 +849,7 @@ def dispatch_task(
             # First-touch: MUST be an Agent spawn, never a naked SendMessage
             # (CC would drop it into an inbox the un-spawned teammate never
             # reads — kaizen #59).
-            tools.spawn_teammate(team_id, teammate_name, briefing)
+            tools.spawn_teammate(team_id, teammate_name, briefing, model=model)
         return
     raise UnknownDispatchModeError(mode)
 
@@ -842,6 +863,7 @@ def build_spawn_fn(
     team_name: str | None = None,
     teammate_name_for: Callable[[Mapping[str, Any]], str] | None = None,
     teams_root: Path | str = DEFAULT_TEAMS_ROOT,
+    model_for: Callable[[Mapping[str, Any], int], str | None] | None = None,
 ) -> Callable[[Mapping[str, Any], int], None]:
     """Build a WaveDispatcher-compatible ``spawn_fn(task, attempt) -> None``.
 
@@ -854,6 +876,14 @@ def build_spawn_fn(
     passes a ``compose_briefing`` wrapper (keeping the composer mode-agnostic);
     tests pass a trivial stub. Each spawn re-renders via this callable so an
     attempt-specific briefing is possible.
+
+    ``model_for(task, attempt) -> str | None`` is the OPTIONAL per-task
+    model-tier seam (mirrors ``briefing_for``): production wires it to
+    ``scripts.model_tier.recommend`` (phase + role + difficulty → tier alias);
+    tests pass a trivial stub. When ``None`` (the default) NO model is threaded —
+    every spawn inherits the session default, byte-identical to today's behavior.
+    The chosen tier flows into ``dispatch_task(..., model=...)`` and is attached
+    only on the spawn path (``send_message`` is unchanged).
 
     For ``mode == "agent-team"`` the factory enforces **TeamCreate-once**: it
     calls ``tools.create_team(team_name, members)`` LAZILY on the FIRST spawn
@@ -886,6 +916,8 @@ def build_spawn_fn(
     team_id_cell: list[str | None] = [None]
 
     def spawn_fn(task: Mapping[str, Any], attempt: int) -> None:
+        # Per-task model tier (None when no seam → no behavior change vs. today).
+        model = model_for(task, attempt) if model_for else None
         if mode == DISPATCH_MODE_SUBAGENT:
             dispatch_task(
                 DISPATCH_MODE_SUBAGENT,
@@ -893,6 +925,7 @@ def build_spawn_fn(
                 task=task,
                 attempt=attempt,
                 briefing=briefing_for(task, attempt),
+                model=model,
             )
             return
         # agent-team — create the team exactly once, lazily, then reuse the id.
@@ -907,6 +940,7 @@ def build_spawn_fn(
             team_id=team_id_cell[0],
             teammate_name=name_for(task),
             teams_root=teams_root,
+            model=model,
         )
 
     return spawn_fn
@@ -1149,17 +1183,36 @@ class QueueBridgeDispatchTools:
             )
         return team_id
 
-    def spawn_teammate(self, team_id: str, name: str, prompt: str) -> None:
-        """First-touch ``Agent`` spawn — fire-and-forget (enqueue, return None)."""
-        self._enqueue("spawn_teammate", {"team_id": team_id, "name": name, "prompt": prompt})
+    def spawn_teammate(
+        self, team_id: str, name: str, prompt: str, model: str | None = None
+    ) -> None:
+        """First-touch ``Agent`` spawn — fire-and-forget (enqueue, return None).
+
+        ``model`` (a tier alias from ``scripts.model_tier``) is added to the
+        enqueued ``args_json`` ONLY when it is not ``None``, so a model-less
+        dispatch produces a byte-identical row to today (back-compat). The
+        bridge-poll servicer reads it as ``Agent(prompt=..., model=args.get("model"))``.
+        """
+        args: dict[str, Any] = {"team_id": team_id, "name": name, "prompt": prompt}
+        if model is not None:
+            args["model"] = model
+        self._enqueue("spawn_teammate", args)
 
     def send_message(self, team_id: str, to: str, message: str) -> None:
         """``SendMessage`` to an already-spawned teammate — fire-and-forget."""
         self._enqueue("send_message", {"team_id": team_id, "to": to, "message": message})
 
-    def spawn_subagent(self, task_id: Any, attempt: int, prompt: str) -> None:
-        """Sub-agent mode ``Agent`` spawn — fire-and-forget (enqueue, return None)."""
-        self._enqueue("spawn_subagent", {"task_id": task_id, "attempt": attempt, "prompt": prompt})
+    def spawn_subagent(
+        self, task_id: Any, attempt: int, prompt: str, model: str | None = None
+    ) -> None:
+        """Sub-agent mode ``Agent`` spawn — fire-and-forget (enqueue, return None).
+
+        ``model`` (a tier alias) is added to ``args_json`` ONLY when not ``None``
+        — a model-less dispatch is byte-identical to today (back-compat)."""
+        args: dict[str, Any] = {"task_id": task_id, "attempt": attempt, "prompt": prompt}
+        if model is not None:
+            args["model"] = model
+        self._enqueue("spawn_subagent", args)
 
 
 def build_poll_fn(

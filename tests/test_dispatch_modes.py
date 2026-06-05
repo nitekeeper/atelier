@@ -69,14 +69,19 @@ class _FakeTools:
         self.calls.append(("create_team", name, tuple(members)))
         return self._team_id
 
-    def spawn_teammate(self, team_id: str, name: str, prompt: str) -> None:
-        self.calls.append(("spawn_teammate", team_id, name, prompt))
+    def spawn_teammate(self, team_id: str, name: str, prompt: str, model=None) -> None:
+        # model is APPENDED only when set, so a model-less spawn records a tuple
+        # byte-identical to the pre-policy shape (back-compat for existing
+        # assertions); model-aware tests assert the trailing element.
+        call = ("spawn_teammate", team_id, name, prompt)
+        self.calls.append((*call, model) if model is not None else call)
 
     def send_message(self, team_id: str, to: str, message: str) -> None:
         self.calls.append(("send_message", team_id, to, message))
 
-    def spawn_subagent(self, task_id, attempt: int, prompt: str) -> None:
-        self.calls.append(("spawn_subagent", task_id, attempt, prompt))
+    def spawn_subagent(self, task_id, attempt: int, prompt: str, model=None) -> None:
+        call = ("spawn_subagent", task_id, attempt, prompt)
+        self.calls.append((*call, model) if model is not None else call)
 
     # convenience views
     def names(self) -> list[str]:
@@ -947,3 +952,126 @@ def test_resolve_local_bridge_db_raises_outside_git(tmp_path, monkeypatch):
 
     with pytest.raises(BridgeDispatchError, match="not inside a git workspace"):
         _resolve_local_bridge_db()
+
+
+# ── model-tier wiring: build_spawn_fn model_for seam + args_json (atelier) ────
+#
+# These pin the per-task model-tier flow end to end at the dispatch layer:
+#   1. build_spawn_fn's model_for seam threads the chosen tier into the spawn
+#      tool call (subagent AND agent-team first-touch), with EXACT model values;
+#   2. model_for=None (the default) attaches NO model — byte-identical to today;
+#   3. QueueBridgeDispatchTools includes "model" in args_json ONLY when set
+#      (back-compat: model None => NO "model" key, byte-identical rows).
+
+
+def test_build_spawn_fn_subagent_threads_model_into_spawn(tmp_path):
+    """A model_for seam returning a tier => spawn_subagent receives that exact
+    model value (the _FakeTools records it as a trailing tuple element)."""
+    tools = _FakeTools()
+    spawn = build_spawn_fn(
+        DISPATCH_MODE_SUBAGENT,
+        tools=tools,
+        briefing_for=_briefing_for(),
+        model_for=lambda task, attempt: "haiku",
+        teams_root=tmp_path,
+    )
+    spawn({"id": 42}, 1)
+    assert tools.calls == [("spawn_subagent", 42, 1, "BRIEFING:42:1", "haiku")]
+
+
+def test_build_spawn_fn_agent_team_threads_model_into_first_touch(tmp_path):
+    """agent-team first-touch spawn_teammate carries the chosen model verbatim."""
+    tools = _FakeTools()
+    spawn = build_spawn_fn(
+        DISPATCH_MODE_AGENT_TEAM,
+        tools=tools,
+        briefing_for=_briefing_for(),
+        members=["sdet-1"],
+        team_name="cycle-team",
+        teammate_name_for=lambda task: "sdet-1",
+        model_for=lambda task, attempt: "opus",
+        teams_root=tmp_path / "absent",  # force first-touch
+    )
+    spawn({"id": 7}, 1)
+    spawn_calls = [c for c in tools.calls if c[0] == "spawn_teammate"]
+    # team_id is the create_team RESULT ("team-xyz" from _FakeTools), not team_name.
+    assert spawn_calls == [("spawn_teammate", "team-xyz", "sdet-1", "BRIEFING:7:1", "opus")]
+
+
+def test_build_spawn_fn_no_model_for_is_byte_identical(tmp_path):
+    """BACK-COMPAT: with NO model_for seam, the recorded spawn tuple is exactly
+    the pre-policy 4-element shape (no trailing model) — proving model=None
+    changes nothing for existing callers."""
+    tools = _FakeTools()
+    spawn = build_spawn_fn(
+        DISPATCH_MODE_SUBAGENT,
+        tools=tools,
+        briefing_for=_briefing_for(),
+        teams_root=tmp_path,
+    )
+    spawn({"id": 99}, 2)
+    assert tools.calls == [("spawn_subagent", 99, 2, "BRIEFING:99:2")]
+
+
+def test_build_spawn_fn_model_for_returning_none_is_byte_identical(tmp_path):
+    """A model_for seam that returns None per task is also byte-identical — the
+    spawn tuple has no trailing model element (None is dropped at the seam)."""
+    tools = _FakeTools()
+    spawn = build_spawn_fn(
+        DISPATCH_MODE_SUBAGENT,
+        tools=tools,
+        briefing_for=_briefing_for(),
+        model_for=lambda task, attempt: None,
+        teams_root=tmp_path,
+    )
+    spawn({"id": 5}, 1)
+    assert tools.calls == [("spawn_subagent", 5, 1, "BRIEFING:5:1")]
+
+
+def test_queue_bridge_spawn_teammate_includes_model_when_set(bridge_db):
+    """With a model set, spawn_teammate's args_json carries "model": <tier>."""
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+    tools.spawn_teammate("T", "sdet-1", "BRIEF", model="opus")
+    rows = _rows(bridge_db, kind="spawn_teammate")
+    assert len(rows) == 1
+    assert json.loads(rows[0]["args_json"]) == {
+        "team_id": "T",
+        "name": "sdet-1",
+        "prompt": "BRIEF",
+        "model": "opus",
+    }
+
+
+def test_queue_bridge_spawn_subagent_includes_model_when_set(bridge_db):
+    """With a model set, spawn_subagent's args_json carries "model": <tier>."""
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+    tools.spawn_subagent("task-7", 2, "PROMPT", model="haiku")
+    rows = _rows(bridge_db, kind="spawn_subagent")
+    assert len(rows) == 1
+    assert json.loads(rows[0]["args_json"]) == {
+        "task_id": "task-7",
+        "attempt": 2,
+        "prompt": "PROMPT",
+        "model": "haiku",
+    }
+
+
+def test_queue_bridge_spawn_teammate_no_model_key_when_none(bridge_db):
+    """BACK-COMPAT (EXACT): model=None (the default) => args_json has NO "model"
+    key — byte-identical to a pre-policy row."""
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+    tools.spawn_teammate("T", "sdet-1", "BRIEF")  # no model
+    rows = _rows(bridge_db, kind="spawn_teammate")
+    args = json.loads(rows[0]["args_json"])
+    assert "model" not in args
+    assert args == {"team_id": "T", "name": "sdet-1", "prompt": "BRIEF"}
+
+
+def test_queue_bridge_spawn_subagent_no_model_key_when_none(bridge_db):
+    """BACK-COMPAT (EXACT): spawn_subagent without a model => NO "model" key."""
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+    tools.spawn_subagent("task-7", 2, "PROMPT")  # no model
+    rows = _rows(bridge_db, kind="spawn_subagent")
+    args = json.loads(rows[0]["args_json"])
+    assert "model" not in args
+    assert args == {"task_id": "task-7", "attempt": 2, "prompt": "PROMPT"}

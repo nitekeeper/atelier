@@ -213,33 +213,49 @@ Atelier is a multi-agent dev framework. Cycle agents reading target-repo files, 
 
 ## Model recommendations
 
-Atelier recommends a default model + per-skill / per-role overrides so installers (and downstream consumers like kaizen) inherit the maintainer's posture without reverse-engineering it. The recommendation is **advisory** — atelier does not refuse to run on other models.
+Atelier now **AUTO-SELECTS the model tier per task** — it no longer defaults every spawn to the most-expensive Opus. The policy lives in `scripts/model_tier.py` (`recommend()`): per teammate/subagent spawn it picks a model TIER by DIFFICULTY from the dev-arc **phase** + the assigned **role** + an optional per-task **difficulty** signal, emitting one of the version-agnostic tier ALIASES `haiku` | `sonnet` | `opus` (which the Agent tool's `model` param accepts directly). The chosen tier flows through the spawn seams (`scripts/dispatch.py::build_spawn_fn` → `QueueBridgeDispatchTools` `args_json` → the bridge-poll servicer's `Agent(model=...)`). The recommendation is **advisory** — atelier does not refuse to run on other models, and the tables below are TUNABLE in `scripts/model_tier.py`.
 
-### Default
+### Automatic per-task posture (the policy)
 
-- **Model:** `claude-opus-4-7` (Opus 4.7)
-- **Effort:** `effortLevel: high`
-- **Rationale:** atelier's hot paths — the dev-arc phase transitions (design → plan → tdd → review → security → qa → handoff), mode-boundary routing (Local vs Memex), and the 61-role persona dispatch — are judgement-heavy, long-context, and consumed by kaizen as the cycle substrate. Opus 4.7 on high effort is the maintainer's working posture and what every recorded successful atelier-driven cycle ran on.
-- **How to apply:** set `model` + `effortLevel` in `~/.claude/settings.json`, or accept your existing default if you prefer something else. The recommendation supersedes any conflicting personal default *for atelier-on-atelier operations* per the precedence clause above.
+- **Opus** (`claude-opus-4-8`) is reserved for reasoning / judgement / high-stakes work: `design`, `plan`, `security`, `review`, `handoff`, `diagnose`, `tdd:red` (test design), and abandonment / no-consensus decisions. It is ALSO a **role FLOOR** that only ever RAISES the tier: any `review` / `security` / `architect` / `safety` role is never downshifted below Opus, regardless of phase (an independent reviewer / security / architect / safety role must catch what the implementer missed).
+- **Sonnet** (`claude-sonnet-4-6`) is the **default middle** tier and covers medium implementation / verification phases: `tdd`, `tdd:green`, `qa`, `verify`, `receive-review`. Sonnet is also the **safe default when no signal exists** — a plain signal-free task spawns Sonnet, NOT Opus. This is the load-bearing cost guarantee.
+- **Haiku** (`claude-haiku-4-5`) handles mechanical phases: `doc`, `agenda`, `status`, `format`.
 
-### Per-skill / role overrides
+**Tier → model-id mapping** (operators; the Agent tool also accepts the bare aliases, which is exactly what the policy emits):
 
-| Skill / Role | Recommended model | Effort | Why |
+| Tier alias | Model id | Used for |
+|---|---|---|
+| `haiku` | `claude-haiku-4-5` | mechanical phases (doc / agenda / status / format) |
+| `sonnet` | `claude-sonnet-4-6` | medium implementation/verification + the no-signal default |
+| `opus` | `claude-opus-4-8` | reasoning / review / security / architect / safety (floor) |
+
+**Resolution precedence** (see `scripts/model_tier.py::recommend`): explicit per-call `override` → env pin `ATELIER_MODEL_TIER` (a valid tier) → difficulty band → phase default → `sonnet`, then the role FLOOR raises (never lowers). An invalid/blank `override` or env value is ignored (a typo never crashes or wedges a run).
+
+> **`difficulty` is reserved — not yet emitted by the planner.** There is no `difficulty` DB column and no planner code sets it, so the difficulty band is presently DEAD in production (`task.get("difficulty")` is always `None` on a real run). The rung is kept forward-compatible in `recommend()` so a future planner can light it up without a code change, but the **ACTIVE signals today are phase + role-floor** — the base tier comes from the dev-arc phase and the role FLOOR raises it for reviewer/security/architect/safety roles.
+
+- **Global override / escape hatch:** an operator can pin ONE tier for the entire run by setting `ATELIER_MODEL_TIER=haiku|sonnet|opus` in the shell (or `env` in `~/.claude/settings.json`). It wins over phase/difficulty/floor but NOT over an explicit per-call override.
+- **Effort:** `effortLevel: high` remains the maintainer's working posture for the orchestrator session; set `model` + `effortLevel` in `~/.claude/settings.json`, or accept your existing default. The recommendation supersedes any conflicting personal default *for atelier-on-atelier operations* per the precedence clause above.
+
+### Per-skill / role table — the DEFAULT/fallback when the policy has no signal
+
+The table below is the **advisory fallback** consulted when the automatic policy has no phase/difficulty/role signal to act on (e.g. a top-level skill spawn rather than a per-task cycle dispatch). It is **advisory, not enforced** — the per-task policy above is the primary mechanism for cycle teammates.
+
+| Skill / Role | Fallback model | Effort | Why |
 |---|---|---|---|
-| `atelier:run` (public router) | `claude-opus-4-7` | high | Routes dev-arc + CRUD intent across ~27 internal procedures; misrouting derails the cycle. |
-| `atelier:save` / `atelier:load` (session lifecycle) | `claude-opus-4-7` | high | Inherits the orchestrator's reasoning load; session-state continuity depends on faithful capture. |
-| `atelier:ingest` (Memex capture) | `claude-opus-4-7` | high | Classifies novel content for the Memex write path; misclassification corrupts the cross-session knowledge graph. |
-| `atelier:migrate` (Local → Memex) | `claude-opus-4-7` | high | One-shot data migration; correctness depends on understanding both mode contracts and the Iron Law (no destructive ops without explicit confirmation). |
-| Dev-arc skills (`internal/dev-{design,plan,tdd,review,security,qa,handoff}`) | `claude-opus-4-7` | high | Each phase is reasoning-heavy and produces gating artifacts for the next phase via `workflow.py:advance_phase`. |
-| Project DB CRUD (`internal/<role|store|meeting|workflow>-*` insert/update/delete) | `claude-opus-4-7` | high | Mutations to project state; errors corrupt the meeting + role + workflow audit trail. |
-| Bootstrap / migration skills (`bootstrap-memex`, `migrate-local-to-memex`) | `claude-opus-4-7` | high | Side-effect-heavy one-shots; correctness depends on understanding both Local and Memex mode contracts. |
-| 61-role persona roster (cycle teammates spawned via atelier's role registry) | `claude-opus-4-7` | high | Each role is invoked for a domain-specific dev-arc phase (audit, synthesis, implementation, review). Downstream consumers (kaizen, plus any future cycle-driver) inherit this default; per-role downshift to Haiku is NOT atelier's recommendation. |
-| Read-only audit roles (e.g. `software-architect-1`, `code-archeologist-1`, `security-engineer-1` in audit mode) | `claude-opus-4-7` | high | Audit work consistently surfaces cross-cutting concerns Haiku misses; Phase 3/4 deliberation quality depends on it. |
-| Implementer roles (e.g. `backend-engineer-1`, `frontend-engineer-1`, `sdet-1`, `data-engineer-1`) | `claude-opus-4-7` | high | Implementation phases produce code that ships to PR — implementer reasoning quality is load-bearing for the review-fix loop (A4). |
-| Independent reviewers (per A4 review-fix loop) | `claude-opus-4-7` | high | Reviewer must catch what the implementer missed; Haiku is too shallow per the review-fix-loop-must-not-collapse contract. |
+| `atelier:run` (public router) | `claude-opus-4-8` | high | Routes dev-arc + CRUD intent across ~27 internal procedures; misrouting derails the cycle. |
+| `atelier:save` / `atelier:load` (session lifecycle) | `claude-opus-4-8` | high | Inherits the orchestrator's reasoning load; session-state continuity depends on faithful capture. |
+| `atelier:ingest` (Memex capture) | `claude-opus-4-8` | high | Classifies novel content for the Memex write path; misclassification corrupts the cross-session knowledge graph. |
+| `atelier:migrate` (Local → Memex) | `claude-opus-4-8` | high | One-shot data migration; correctness depends on understanding both mode contracts and the Iron Law (no destructive ops without explicit confirmation). |
+| Dev-arc skills (`internal/dev-{design,plan,tdd,review,security,qa,handoff}`) | per-phase (see policy) | high | Each phase's tier is the policy's `PHASE_TIER` mapping (design/plan/review/security → opus; tdd/qa/verify → sonnet; doc → haiku). Internal procedures inherit the orchestrator's model; the per-task policy applies to the cycle SPAWNS they drive. |
+| Project DB CRUD (`internal/<role|store|meeting|workflow>-*` insert/update/delete) | `claude-sonnet-4-6` | high | Mutations to project state; medium-difficulty mechanical writes — the policy's middle default, not Opus. |
+| Bootstrap / migration skills (`bootstrap-memex`, `migrate-local-to-memex`) | `claude-opus-4-8` | high | Side-effect-heavy one-shots; correctness depends on understanding both Local and Memex mode contracts. |
+| 61-role persona roster (cycle teammates spawned via atelier's role registry) | per-task policy | high | The per-task policy (phase + role + difficulty) selects each teammate's tier; this row is a pointer to that mechanism, not a flat Opus default. |
+| Read-only audit roles (e.g. `software-architect-1`, `code-archeologist-1`, `security-engineer-1` in audit mode) | `claude-opus-4-8` (floor) | high | The `architect` / `security` role FLOOR keeps these at Opus regardless of phase — audit work surfaces cross-cutting concerns Haiku misses. |
+| Implementer roles (e.g. `backend-engineer-1`, `frontend-engineer-1`, `sdet-1`, `data-engineer-1`) | per-phase (≈ sonnet) | high | Implementation phases (tdd/qa/verify) resolve to sonnet by default; a `tdd:red` test-design phase or a high `difficulty` raises to opus. No role floor applies. |
+| Independent reviewers (per A4 review-fix loop) | `claude-opus-4-8` (floor) | high | The `review` role FLOOR keeps reviewers at Opus regardless of phase — the reviewer must catch what the implementer missed (review-fix-loop-must-not-collapse). |
 
-Internal procedures (`internal/<name>/SKILL.md`) inherit the orchestrator's model and effort — they are Read-tool-loaded recipes, not separate Agent spawns. Role personas spawned via the registry (61-role roster) ARE separate spawns and the table rows above apply directly.
+Internal procedures (`internal/<name>/SKILL.md`) inherit the orchestrator's model and effort — they are Read-tool-loaded recipes, not separate Agent spawns. Role personas spawned via the registry (61-role roster) ARE separate spawns and the per-task policy applies to them directly.
 
-If you maintain a fork that diverges from this posture, override per-skill via Claude Code's settings (`~/.claude/settings.json` → per-skill `model` field) or by branching this CLAUDE.md section. Recommendations are advisory, not enforced.
+If you maintain a fork that diverges from this posture, tune `scripts/model_tier.py` (the `PHASE_TIER` / `ROLE_FLOOR` / `DIFFICULTY_TIER` tables), pin a global tier via `ATELIER_MODEL_TIER`, or override per-skill via Claude Code's settings (`~/.claude/settings.json` → per-skill `model` field). Recommendations are advisory, not enforced.
 
-See `kaizen/CLAUDE.md` (model recommendations) and `memex/CLAUDE.md` (model recommendations) for plugin-specific equivalents. Kaizen's table defers per-role recommendations to this section; the rows above are the canonical atelier-published version.
+See `kaizen/CLAUDE.md` (model recommendations) and `memex/CLAUDE.md` (model recommendations) for plugin-specific equivalents. Kaizen's table defers per-role recommendations to this section; the policy above is the canonical atelier-published version.

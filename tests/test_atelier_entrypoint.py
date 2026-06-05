@@ -246,3 +246,68 @@ def wired_db_parent(db_path):
     from pathlib import Path
 
     return Path(db_path).parent
+
+
+# ── model-tier seam threading through build_wave_dispatcher (atelier) ────────
+#
+# The lower-level #81 factory leaves model_for UNSET by default (None → no model
+# attached to any spawn — byte-identical to pre-policy). When a model_for is
+# injected it threads straight into build_spawn_fn → the chosen tier lands in the
+# enqueued args_json.
+
+import json as _mt_json  # noqa: E402
+import sqlite3 as _mt_sqlite3  # noqa: E402
+
+
+def _mt_spawn_args(db_path, kind):
+    con = _mt_sqlite3.connect(db_path)
+    con.row_factory = _mt_sqlite3.Row
+    try:
+        rows = con.execute(
+            "SELECT args_json FROM bridge_requests WHERE kind = ? ORDER BY id", (kind,)
+        ).fetchall()
+        return [_mt_json.loads(r["args_json"]) for r in rows]
+    finally:
+        con.close()
+
+
+def test_build_wave_dispatcher_no_model_for_omits_model_key(wired_db, monkeypatch):
+    """BACK-COMPAT: build_wave_dispatcher with NO model_for => spawn args_json has
+    NO "model" key (byte-identical to the pre-policy row shape)."""
+    from scripts import mode_detector
+    from scripts.atelier_entrypoint import build_wave_dispatcher
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
+    wd = build_wave_dispatcher(
+        wired_db,
+        team_pk="cycle-1",
+        team_id="T",
+        briefing_for=lambda task, attempt: "B",
+        env={},  # subagent default
+        root=wired_db_parent(wired_db),
+    )
+    wd._spawn_fn({"id": 1}, 1)
+    args = _mt_spawn_args(wired_db, "spawn_subagent")
+    assert len(args) == 1
+    assert "model" not in args[0]
+
+
+def test_build_wave_dispatcher_threads_injected_model_for(wired_db, monkeypatch):
+    """An injected model_for threads into build_spawn_fn — the chosen tier lands
+    in args_json."""
+    from scripts import mode_detector
+    from scripts.atelier_entrypoint import build_wave_dispatcher
+
+    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
+    wd = build_wave_dispatcher(
+        wired_db,
+        team_pk="cycle-1",
+        team_id="T",
+        briefing_for=lambda task, attempt: "B",
+        model_for=lambda task, attempt: "opus",
+        env={},
+        root=wired_db_parent(wired_db),
+    )
+    wd._spawn_fn({"id": 1}, 1)
+    args = _mt_spawn_args(wired_db, "spawn_subagent")
+    assert args[0]["model"] == "opus"

@@ -141,6 +141,7 @@ def build_wave_dispatcher(
     escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
     env: Mapping[str, str] | None = None,
     root: str | Path = ".",
+    model_for: Callable[[Mapping[str, Any], int], str | None] | None = None,
 ):
     """Construct a live, mode-selected ``WaveDispatcher`` bound to the
     production queue-bridge transport (atelier#81).
@@ -164,6 +165,14 @@ def build_wave_dispatcher(
     when ``None`` the engine's own guaranteed-emitting default
     (``pm_dispatch._default_escalate``) is used. No conditional escalation
     branches are added (consensus item 8: escalation is guaranteed-emitted).
+
+    ``model_for(task, attempt) -> str | None`` is the OPTIONAL per-task
+    model-tier seam (additive, back-compatible). It is threaded straight into
+    :func:`scripts.dispatch.build_spawn_fn`; ``None`` (the default here) means no
+    model is attached to any spawn — byte-identical to the pre-policy behavior.
+    The orchestrator-facing factory :func:`build_wave_dispatcher_for_project`
+    builds a ``scripts.model_tier``-backed default; this lower-level factory
+    leaves it unset unless the caller injects one.
 
     ``teammate_name_for`` maps a task to the teammate role-id; it is reused as
     the poll-side ``role_id_for`` so a worker's reply inbox and its spawn
@@ -201,6 +210,7 @@ def build_wave_dispatcher(
         members=members,
         team_name=team_name,
         teammate_name_for=name_for,
+        model_for=model_for,
     )
     poll_fn = build_poll_fn(db_path, team_id=team_id, role_id_for=name_for)
 
@@ -209,6 +219,51 @@ def build_wave_dispatcher(
     if escalate_fn is not None:
         return WaveDispatcher(db_path, spawn_fn=spawn_fn, poll_fn=poll_fn, escalate_fn=escalate_fn)
     return WaveDispatcher(db_path, spawn_fn=spawn_fn, poll_fn=poll_fn)
+
+
+# ── Default per-task model-tier seam (atelier model-tier selection) ─────────
+#
+# The production `model_for` seam: it binds `scripts.model_tier.recommend` to the
+# orchestrator/task context the wave engine has. Phase is a per-CYCLE value (the
+# tasks table has no `phase` column), so it is closed over from the factory's
+# `phase` arg; role is the task's `assigned_to`; difficulty is read from an
+# OPTIONAL per-task `difficulty` field when the planner sets one. The
+# `ATELIER_MODEL_TIER` env pin is honored via the resolved env mapping.
+
+
+def _default_model_for(
+    phase: str | None,
+    env: Mapping[str, str] | None,
+) -> Callable[[Mapping[str, Any], int], str | None]:
+    """Build the default ``model_for(task, attempt) -> str | None`` seam.
+
+    Sources the per-task tier from ``scripts.model_tier.recommend`` using the
+    cycle ``phase`` (closed over), the task's assigned role (``task["assigned_to"]``,
+    the dispatch role-id), and an OPTIONAL per-task ``difficulty`` field. The
+    operator's ``ATELIER_MODEL_TIER`` env pin is honored: when the factory got an
+    explicit ``env`` mapping we forward it; otherwise we fall back to the live
+    ``os.environ`` so a pin set in the shell still wins.
+
+    Defensive: a task without ``assigned_to`` / ``difficulty`` simply omits that
+    signal; ``recommend`` always returns a valid tier (never raises).
+    """
+    import os
+
+    from scripts.model_tier import recommend
+
+    resolved_env: Mapping[str, str] = env if env is not None else os.environ
+
+    def model_for(task: Mapping[str, Any], attempt: int) -> str | None:
+        role_id = task.get("assigned_to")
+        difficulty = task.get("difficulty")
+        return recommend(
+            phase=phase,
+            role_id=role_id if isinstance(role_id, str) else None,
+            difficulty=difficulty if isinstance(difficulty, str) else None,
+            env=resolved_env,
+        )
+
+    return model_for
 
 
 # ── Live orchestrator-entry call site (atelier#85) ──────────────────────────
@@ -240,6 +295,8 @@ def build_wave_dispatcher_for_project(
     env: Mapping[str, str] | None = None,
     root: str | Path = ".",
     sleep_fn: Callable[[float], None] | None = None,
+    phase: str | None = None,
+    model_for: Callable[[Mapping[str, Any], int], str | None] | None = None,
 ):
     """Build the live, mode-selected ``WaveDispatcher`` for one cycle from an
     orchestrator/project context (atelier#85 — the missing #81 call site).
@@ -265,6 +322,21 @@ def build_wave_dispatcher_for_project(
       via :func:`scripts.team_meeting.build_persona_gap_escalate_fn`).
     * ``teams_root`` / ``sleep_fn`` — first-touch config root + poll cadence
       (both injectable for deterministic tests).
+    * ``phase`` — the cycle's CURRENT dev-arc phase (e.g. ``"review"``,
+      ``"doc"``, ``"tdd:green"``). It is the per-cycle model-tier signal: the
+      orchestrator turn-loop passes the wave's phase here the SAME way it sources
+      the briefing context (the cycle phase is a wave-level value, not a per-task
+      column). Used only by the default ``model_for`` seam.
+    * ``model_for(task, attempt) -> str | None`` — the per-task model-tier seam
+      (atelier model-tier selection). **Defaults** to a
+      :func:`scripts.model_tier.recommend`-backed function that selects a tier
+      alias (``haiku`` | ``sonnet`` | ``opus``) from the cycle ``phase`` + the
+      task's assigned role (``task["assigned_to"]``) + an optional per-task
+      ``difficulty`` field (honoring the ``ATELIER_MODEL_TIER`` env pin). Callers
+      / tests may inject their own; pass an explicit lambda returning ``None`` to
+      force the pre-policy (session-default) behavior. The chosen tier flows into
+      the enqueued ``args_json`` and the bridge-poll servicer passes it to
+      ``Agent(model=...)``.
 
     Lazy imports keep ``scripts.dispatch`` / ``pm_dispatch`` (and their backend
     chains) out of the bare ``startup_check`` import path.
@@ -291,6 +363,13 @@ def build_wave_dispatcher_for_project(
     brief_for = briefing_for or (lambda task, attempt: f"task {task['id']} (attempt {attempt})")
     resolved_teams_root = teams_root if teams_root is not None else DEFAULT_TEAMS_ROOT
 
+    # Per-task model-tier seam (atelier model-tier selection). Default it to a
+    # scripts.model_tier.recommend-backed function; a caller may inject its own
+    # (or a `lambda task, attempt: None` to force session-default spawns). The
+    # default reads the cycle `phase`, the task's assigned role, and an optional
+    # per-task `difficulty` field, honoring the ATELIER_MODEL_TIER env pin.
+    pick_model = model_for if model_for is not None else _default_model_for(phase, env)
+
     tools = QueueBridgeDispatchTools(team_pk, db_path=db_path)
     spawn_fn = build_spawn_fn(
         mode,
@@ -300,6 +379,7 @@ def build_wave_dispatcher_for_project(
         team_name=team_name,
         teammate_name_for=name_for,
         teams_root=resolved_teams_root,
+        model_for=pick_model,
     )
     poll_fn = build_poll_fn(db_path, team_id=team_id, role_id_for=reply_for)
 

@@ -88,13 +88,19 @@ def workspace(tmp_path, monkeypatch):
     return {"root": root, "db": str(db), "project_id": proj_id}
 
 
-def _seed_task(workspace, *, title, parallel_group, created_at="2026-05-31T00:00:00Z"):
+def _seed_task(
+    workspace, *, title, parallel_group, created_at="2026-05-31T00:00:00Z", assigned_to=None
+):
+    """Seed one real `tasks` row. `assigned_to` (the dispatch role-id) defaults to
+    None so existing callers are byte-identical; a caller may set it to prove the
+    column survives the real DB load/projection (the model-tier e2e)."""
     con = sqlite3.connect(workspace["db"])
     con.execute("PRAGMA foreign_keys=ON")
     cur = con.execute(
         "INSERT INTO tasks (project_id, title, description, status, parallel_group, "
-        "created_by, created_at, updated_at) VALUES (?, ?, 'd', 'pending', ?, 'atelier-pm-1', ?, ?)",
-        (workspace["project_id"], title, parallel_group, created_at, created_at),
+        "assigned_to, created_by, created_at, updated_at) "
+        "VALUES (?, ?, 'd', 'pending', ?, ?, 'atelier-pm-1', ?, ?)",
+        (workspace["project_id"], title, parallel_group, assigned_to, created_at, created_at),
     )
     tid = cur.lastrowid
     con.commit()

@@ -1,0 +1,318 @@
+"""Tests for scripts/caveman_codec.py (atelier port).
+
+Coverage:
+  - protected-token byte-fidelity (code / URLs / paths / identifiers /
+    version numbers / error-strings survive verbatim),
+  - each level (off / lite / full),
+  - idempotence (compress(compress(x)) == compress(x)),
+  - auto-clarity carve-outs (security / destructive / multi-step → not
+    compressed),
+  - M5 sentinel-collision safety + M7 head-case handling.
+
+The atelier wiring of the codec (B1 terse-rule lever in scripts/dispatch.py,
+B2 env-gated digest sink in scripts/pm_dispatch.py) is exercised in
+tests/test_dispatch_templates.py and tests/test_wave_compression.py.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from scripts.caveman_codec import (
+    DEFAULT_LEVEL,
+    LEVELS,
+    compress,
+    should_compress,
+)
+
+# ── levels ────────────────────────────────────────────────────────────────
+
+
+def test_levels_constant_shape():
+    assert LEVELS == ("off", "lite", "full")
+    assert DEFAULT_LEVEL == "full"
+
+
+def test_off_level_is_identity():
+    text = "I will just basically fix the the bug, please."
+    assert compress(text, "off") == text
+
+
+def test_unknown_level_raises():
+    with pytest.raises(ValueError):
+        compress("hello", "ultra")
+
+
+def test_lite_keeps_articles_and_sentences():
+    text = "I will just fix the bug, perhaps, in the module."
+    out = compress(text, "lite")
+    # filler ("just") + hedging ("perhaps") dropped...
+    assert "just" not in out
+    assert "perhaps" not in out
+    # ...but articles + leader survive (lite keeps full sentences).
+    assert "the bug" in out
+    assert "the module" in out
+    assert out.startswith("I will")
+
+
+def test_full_drops_articles_filler_pleasantries_leaders():
+    # Leader ("I will") is stripped only when it leads the line, so place it
+    # first; pleasantry / filler / articles drop regardless of position.
+    text = "I will please just basically restart the service now."
+    out = compress(text, "full")
+    for dropped in ("Please", "I will", "just", "basically", "the "):
+        assert dropped.lower() not in out.lower(), dropped
+    assert "restart" in out.lower()
+    assert "service" in out
+
+
+def test_default_level_is_full():
+    text = "I will just restart the service."
+    assert compress(text) == compress(text, "full")
+
+
+# ── protected-token byte-fidelity ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        "`<=`",  # inline code with operators
+        "`auth.py`",  # inline code path
+        "MAX_RETRIES",  # CONST_CASE
+        "DB_CONN_TIMEOUT_S",  # CONST_CASE
+        "foo.bar()",  # dotted call
+        "scripts.pm_dispatch",  # dotted identifier
+        "v2.10.1",  # version-like
+        "1.2.3",  # semver
+        "/etc/app/config.yaml",  # absolute path
+        "scripts/caveman_codec.py",  # relative path
+        "https://example.com/a?b=c",  # URL
+        "http://x.io",  # URL
+        "git@github.com:owner/repo.git",  # git SCP URL
+        "'connection refused'",  # quoted error string
+        '"NoneType has no attribute"',  # quoted error string
+    ],
+)
+def test_protected_segment_survives_byte_identical(segment):
+    text = f"The really just simple thing is {segment} and please verify it."
+    out = compress(text, "full")
+    assert segment in out, f"{segment!r} not preserved in {out!r}"
+
+
+def test_fenced_code_block_survives_byte_identical():
+    code = "```python\nthe a an just really\nx = the_value\n```"
+    text = f"Please look at this just code block:\n{code}\nand really fix it."
+    out = compress(text, "full")
+    assert code in out
+
+
+def test_filler_inside_quoted_error_string_is_preserved():
+    # 'just' inside a quoted error string must NOT be stripped.
+    text = "We hit the error 'just kidding the value is null' really."
+    out = compress(text, "full")
+    assert "'just kidding the value is null'" in out
+
+
+def test_path_with_article_prefix_not_fused():
+    text = "Open the /etc/hosts file now."
+    out = compress(text, "full")
+    assert "/etc/hosts" in out
+    # the path token is not glued to a neighboring word
+    assert "the/etc/hosts" not in out
+
+
+# ── idempotence ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("level", ["lite", "full"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I will just basically fix the `auth.py` bug in the middleware.",
+        "Please update the function foo.bar() and the version 1.2.3 string.",
+        "Maybe we could potentially restart the the service.",
+        "The CONST_VALUE and MY_FLAG identifiers must not change, really.",
+        "Bullet review:\n- the first item is just fine\n- really the second is `code` here",
+        "We need to call git@github.com:owner/repo.git and check 'connection refused'.",
+    ],
+)
+def test_idempotent(level, text):
+    once = compress(text, level)
+    twice = compress(once, level)
+    assert once == twice
+
+
+def test_off_idempotent():
+    text = "The a an just really thing."
+    assert compress(compress(text, "off"), "off") == compress(text, "off")
+
+
+# ── empty / non-string input ──────────────────────────────────────────────
+
+
+def test_empty_string_identity():
+    assert compress("", "full") == ""
+
+
+def test_non_string_identity():
+    assert compress(None, "full") is None  # type: ignore[arg-type]
+    assert compress(123, "full") == 123  # type: ignore[arg-type]
+
+
+# ── auto-clarity gate (should_compress) ───────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Security warning: this exposes a credential.",
+        "This is a known CVE-2021-1234 vulnerability.",
+        "Caution: irreversible operation ahead.",
+        "This change is destructive and cannot be undone.",
+        "Run rm -rf /tmp/build to clean up.",
+        "Please confirm: approve? before continuing.",
+        "Reply confirm? to proceed.",
+        "We must DROP TABLE users now.",
+        "Then git push --force origin main.",
+        "Just git push -f and move on.",
+        "Recovery: git reset --hard HEAD~1.",
+        "1. clone repo\n2. run setup\n3. open PR",
+        "Steps:\n1) first\n2) second\n3) third\n4) fourth",
+    ],
+)
+def test_should_compress_false_on_tripwires(text):
+    assert should_compress(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Refactored the auth middleware to reuse the pool.",
+        "Found a minor naming inconsistency in the parser.",
+        # M4 — bare destructive VERBS in ordinary prose stay compressible.
+        "delete the unused import",
+        "force-push protection looks fine",
+        "We should delete the dead code path here.",
+        "The truncate helper handles the edge case.",
+        "Drop the redundant index on the join column.",
+        "1. only one numbered line here is fine to compress",
+        "Two steps:\n1. first\n2. second",  # only 2 steps → still compressible
+    ],
+)
+def test_should_compress_true_on_safe_prose(text):
+    assert should_compress(text) is True
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # M4 explicit cases from the review.
+        ("delete the unused import", True),
+        ("run rm -rf /tmp/x", False),
+        ("DROP TABLE users", False),
+    ],
+)
+def test_should_compress_m4_imperative_vs_bare_verb(text, expected):
+    assert should_compress(text) is expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # N2 — destructive SQL/git IMPERATIVES now tripwire to False.
+        "DELETE FROM users WHERE id = 1",
+        "TRUNCATE TABLE sessions",
+        "git clean -fd to wipe untracked files",
+    ],
+)
+def test_should_compress_false_on_n2_imperatives(text):
+    assert should_compress(text) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # N2 — the BARE verbs in ordinary prose still compress (no regression).
+        "delete the stale rows from the cache map",
+        "truncate the overly long log line for display",
+        "git clean handling looks fine in the helper",
+    ],
+)
+def test_should_compress_true_on_n2_bare_verb_prose(text):
+    assert should_compress(text) is True
+
+
+def test_should_compress_false_on_empty_and_non_string():
+    assert should_compress("") is False
+    assert should_compress("   ") is False
+    assert should_compress(None) is False  # type: ignore[arg-type]
+
+
+# ── M5 — sentinel collision must not crash ────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "before \x005\x00 after the just bug",  # literal sentinel-looking span
+        "hexdump \x000\x00\x001\x00 just here",  # multiple
+        "\x00999\x00 leading just sentinel",  # out-of-range index
+        "trailing just sentinel \x0042\x00",
+    ],
+)
+def test_sentinel_collision_does_not_crash(text):
+    # Must not raise IndexError; output is well-defined.
+    out = compress(text, "full")
+    assert isinstance(out, str)
+    # NUL never survives into the output (stripped before masking).
+    assert "\x00" not in out
+
+
+def test_sentinel_collision_preserves_protected_after_strip():
+    # A real protected token alongside a sentinel-looking literal: the real
+    # token survives, the literal NUL is stripped, no crash.
+    text = "see `code` and \x007\x00 just now"
+    out = compress(text, "full")
+    assert "`code`" in out
+    assert "\x00" not in out
+
+
+# ── M7 — source case preserved when nothing stripped at the head ──────────
+
+
+def test_m7_no_head_strip_preserves_leading_case():
+    # "really" is mid-sentence filler; the head token "git" is NOT a stopword,
+    # so it must stay lowercase (no spurious capitalization).
+    out = compress("git commit really now", "full")
+    assert out == "git commit now"
+
+
+def test_m7_head_strip_recapitalizes():
+    # Leading article dropped → new first word gets sentence-cased.
+    assert compress("the table is just big", "full") == "Table is big"
+
+
+def test_m7_lite_no_head_strip_preserves_case():
+    out = compress("git status really matters", "lite")
+    assert out.startswith("git ")
+    assert "really" not in out
+
+
+# ── char-delta sanity (protected-only input is a no-op) ───────────────────
+
+
+def test_filler_heavy_input_comes_out_strictly_shorter():
+    text = (
+        "I will just basically restart the service, and really the cache "
+        "should perhaps be cleared too, please."
+    )
+    out = compress(text, "full")
+    assert len(out) < len(text), (len(text), len(out), out)
+
+
+def test_protected_only_input_is_byte_identical():
+    # A reply made entirely of protected tokens (no strippable prose) must
+    # come out byte-identical — compression saves nothing but loses nothing.
+    text = "`code` MAX_RETRIES foo.bar() v1.2.3 /etc/app.conf https://x.io/a"
+    assert compress(text, "full") == text

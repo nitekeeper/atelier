@@ -108,6 +108,43 @@ TEMPLATE_DIR = REPO_ROOT / "internal" / "team-mode-templates"
 RULES_SKILL = REPO_ROOT / "internal" / "team-mode-rules" / "SKILL.md"
 ROLE_TEMPLATE = "briefings/role.j2"
 
+# ── B1 — always-on terse-output rule (caveman token-compression) ──────────
+#
+# Additive prompt guidance appended to every COMPOSED worker briefing (see
+# :func:`compose_briefing`). It asks the spawned worker to keep its free-text
+# ``notes_md`` prose COMPACT (caveman style — fragments, one line per finding,
+# drop articles/filler/hedging/pleasantries) so the orchestrator's context
+# stays lean when the worker's reply is read back off the bridge.
+#
+# This is pure GUIDANCE to the agent — NOT a parser change, NOT a wire-protocol
+# change. It is appended to the RENDERED briefing (after Jinja2 has run), so it
+# sits OUTSIDE the template's ``untrusted(...)`` TASK fence as the briefing's
+# final guidance section. It does NOT touch role.j2 / _base.j2 (their byte-
+# parity tests stay green) and it does NOT touch the TM-006 reply contract.
+#
+# HARD CARVE-OUT (mirrors caveman_codec's protected segments): the directive
+# explicitly EXCLUDES the TM-006 JSON reply envelope (``task_result`` /
+# ``shutdown_response`` and ALL its keys/values), code (fenced or inline), file
+# paths, identifiers (CONST_CASE / dotted.names / fn() calls), version numbers,
+# quoted error strings, and the ``ABANDON:`` grammar line — those stay
+# byte-exact. A literal-minded LLM must never "compress" a path, an error
+# string, the reply envelope JSON, or the ABANDON line.
+_TERSE_OUTPUT_RULE = (
+    "\n\n# OUTPUT SHAPE (terse — read last)\n\n"
+    "Keep your free-text `notes_md` prose COMPACT to save the orchestrator's "
+    "context. Talk like a smart caveman — brain stays big, only fluff dies. Use "
+    "fragments, one line per finding/decision, no pleasantries, no hedging, no "
+    "restating this briefing. Drop articles and filler where meaning survives. "
+    "This applies ONLY to your free-text prose. Do NOT compress or alter, and "
+    "reproduce VERBATIM: the TM-006 reply envelope (the `task_result` / "
+    "`shutdown_response` JSON and ALL its keys/values), code (fenced or inline), "
+    "file paths, identifiers (CONST_CASE, dotted.names, fn() calls), version "
+    "numbers, quoted error strings, and the `ABANDON: <category>:<reason>` "
+    "grammar line. Those stay byte-exact. If terseness would create technical "
+    "ambiguity (security, destructive/irreversible actions, ordered multi-step "
+    "sequences), write that part in full."
+)
+
 # Control-char sweep — C0 minus TAB (\x09), LF (\x0a), CR (\x0d). Bridge
 # payloads MUST be stripped of these before they reach the template per the
 # comment block at the top of internal/team-mode-templates/_base.j2.
@@ -416,7 +453,13 @@ def compose_briefing(
 
     tmpl = template_env.get_template(ROLE_TEMPLATE)
     rendered = tmpl.render(**ctx)
-    return rendered
+    # B1 — always-on terse-output guidance. Appended to the RENDERED briefing
+    # (outside the template's untrusted TASK fence) as the briefing's final
+    # guidance section. `_TERSE_OUTPUT_RULE` opens with "\n\n" so it reads as
+    # its own paragraph; we rstrip the rendered body first so the separator is
+    # exactly one clean paragraph break regardless of the template's trailing
+    # whitespace. Does NOT modify role.j2 / _base.j2 or the TM-006 contract.
+    return rendered.rstrip() + _TERSE_OUTPUT_RULE
 
 
 # ── Wave tracking + heartbeat monitoring ──────────────────────────────────

@@ -425,3 +425,162 @@ def test_summarize_fn_none_falls_back_to_default(workspace):
     # It is the deterministic default's output, not a stub string.
     assert "task_id=" in digest and "status='done'" in digest
     assert "notes:" in digest
+
+
+# ── B2 — env-gated caveman codec at the wave-summary digest sink ──────────────
+#
+# The codec runs ONLY on the model-bound `digest` string, never on the
+# stored/validated envelopes. DEFAULT OFF (#1 invariant: OFF is byte-identical
+# to the pre-codec default_wave_digest output). Each test below has a neuter
+# tell so a silent revert of the codec call / gate turns the suite RED.
+
+from scripts.caveman_codec import compress as _caveman_compress  # noqa: E402
+from scripts.pm_dispatch import (  # noqa: E402
+    CAVEMAN_COMPRESS_ENV,
+    compress_reply_for_context,
+)
+
+# Compressible filler-heavy prose for a `done` envelope head (the first ~200
+# chars survive into the default digest's `notes:` field, where caveman strips
+# articles/filler). NO security / destructive / multi-step tripwords, so
+# should_compress() returns True. Padded past the threshold so the wave
+# compresses.
+_CAVEMAN_HEAD = (
+    "I will just basically refactor the auth layer and really tidy the imports, "
+    "and the cache should perhaps be cleared too, please. "
+)
+_CAVEMAN_NOTES = _CAVEMAN_HEAD + ("filler prose " * 1500)
+
+# Sentinel meaning "do not inject the env var at all" (env=None path).
+_UNSET = object()
+
+
+def _run_wave_capturing_digest(workspace, *, env, notes_md):
+    """Run a single big wave and return its summary dict (compressed)."""
+    tid = _seed_task(workspace, title="caveman", parallel_group=0)
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: None,
+        poll_fn=lambda task, attempt: _done_envelope(task["id"], attempt, notes_md=notes_md),
+        clock=FakeClock(),
+        env=env,
+        # summarize_fn=None → pure deterministic default_wave_digest
+    )
+    summaries = d.run([_task_row(workspace, tid)])
+    assert summaries[0]["compressed"] is True
+    return d, summaries[0]
+
+
+def test_b2_gate_parses_truthy_and_default_off():
+    """The gate is parsed defensively from the INJECTED env (A8 — never
+    os.environ). DEFAULT OFF; only explicit truthy markers enable."""
+
+    def enabled(val):
+        return WaveDispatcher(
+            "x.db",
+            spawn_fn=lambda t, a: None,
+            poll_fn=lambda t, a: None,
+            env=None if val is _UNSET else {CAVEMAN_COMPRESS_ENV: val},
+        )._caveman_enabled
+
+    for off in (_UNSET, "", "0", "false", "FALSE", "no", "off", " Off ", "maybe", "2"):
+        assert enabled(off) is False, off
+    for on in ("1", "true", "TRUE", "yes", "on", " On ", "Yes"):
+        assert enabled(on) is True, on
+
+
+def test_b2_off_digest_is_byte_identical_to_default(workspace):
+    """#1 INVARIANT: with the gate unset (OFF, default), the digest is
+    BYTE-IDENTICAL to the pure default_wave_digest output — no caveman mutation."""
+    _d, summary = _run_wave_capturing_digest(workspace, env=None, notes_md=_CAVEMAN_NOTES)
+    expected = default_wave_digest(_d._wave_envelopes)
+    assert summary["digest"] == expected
+    # Sanity: the codec WOULD have changed it if it had run (the neuter tell).
+    assert _caveman_compress(expected, "full") != expected
+
+
+def test_b2_on_digest_is_shorter_and_differs(workspace):
+    """LIVE (ON): a large compressible wave produces a digest that DIFFERS from
+    and is SHORTER than the pure (OFF-equivalent) digest. NEUTER: removing the
+    codec call makes the ON digest equal the pure digest → this test goes RED.
+
+    The pure OFF-equivalent baseline is recomputed from THIS run's own retained
+    envelopes (`default_wave_digest`), so the task_id embedded in the digest
+    matches — the only variable is whether the codec ran."""
+    on_d, on_summary = _run_wave_capturing_digest(
+        workspace, env={CAVEMAN_COMPRESS_ENV: "1"}, notes_md=_CAVEMAN_NOTES
+    )
+    pure = default_wave_digest(on_d._wave_envelopes)  # what OFF would have produced
+    assert on_summary["digest"] != pure
+    assert len(on_summary["digest"]) < len(pure)
+    # The ON digest is EXACTLY the codec applied to the pure digest — proving the
+    # codec (and the env flag) is the SOLE cause of the difference.
+    assert on_summary["digest"] == _caveman_compress(pure, "full")
+
+
+def test_b2_on_envelopes_stay_byte_exact(workspace):
+    """ON must leave the RETAINED/validated envelopes byte-exact — the codec
+    only ever touches the SEPARATE digest string, never the stored envelopes."""
+    on_d, _summary = _run_wave_capturing_digest(
+        workspace, env={CAVEMAN_COMPRESS_ENV: "1"}, notes_md=_CAVEMAN_NOTES
+    )
+    # The retained envelope's notes_md is the raw, uncompressed body.
+    assert len(on_d._wave_envelopes) == 1
+    assert on_d._wave_envelopes[0]["notes_md"] == _CAVEMAN_NOTES
+
+
+def test_b2_neuter_flag_is_sole_cause_of_change(workspace):
+    """NEUTER proof: flipping the env flag is the SOLE cause of the digest
+    change. Each run's digest is compared against THAT run's own pure baseline
+    (recomputed from its retained envelopes, so the embedded task_id matches):
+    with the flag OFF the digest equals the pure default; with it ON the digest
+    equals codec(pure). Only the flag differs."""
+    off_d, off_summary = _run_wave_capturing_digest(
+        workspace, env={CAVEMAN_COMPRESS_ENV: "0"}, notes_md=_CAVEMAN_NOTES
+    )
+    on_d, on_summary = _run_wave_capturing_digest(
+        workspace, env={CAVEMAN_COMPRESS_ENV: "1"}, notes_md=_CAVEMAN_NOTES
+    )
+    off_base = default_wave_digest(off_d._wave_envelopes)
+    on_base = default_wave_digest(on_d._wave_envelopes)
+    assert off_summary["digest"] == off_base  # OFF = pure default (codec did NOT run)
+    assert on_summary["digest"] == _caveman_compress(on_base, "full")  # ON = codec(default)
+    assert on_summary["digest"] != on_base  # ON genuinely changed it
+
+
+def test_b2_auto_clarity_passthrough_when_on(workspace):
+    """Auto-clarity: with caveman ON, a wave whose digest carries a
+    security/destructive marker yields a digest BYTE-IDENTICAL to OFF, because
+    should_compress() refuses (verbatim pass-through)."""
+    # A security tripword in the notes head propagates into the digest's
+    # `notes:` field, so should_compress() trips → no compression even when ON.
+    tripword_notes = ("Security warning: this exposes a credential and is irreversible. ") + (
+        "filler prose " * 1500
+    )
+    on_d, on_summary = _run_wave_capturing_digest(
+        workspace, env={CAVEMAN_COMPRESS_ENV: "1"}, notes_md=tripword_notes
+    )
+    # should_compress() trips on the security marker → digest is BYTE-IDENTICAL
+    # to the pure default (codec refused), even though the gate is ON.
+    pure = default_wave_digest(on_d._wave_envelopes)
+    assert on_summary["digest"] == pure
+    assert "Security warning" in on_summary["digest"]
+
+
+def test_b2_helper_contract():
+    """compress_reply_for_context: OFF / non-str / empty / tripwire → unchanged;
+    otherwise codec(text)."""
+    filler = "I will just basically restart the service and really tidy imports."
+    # OFF.
+    assert compress_reply_for_context(filler, enabled=False) == filler
+    # non-str / empty.
+    assert compress_reply_for_context("", enabled=True) == ""
+    assert compress_reply_for_context(None, enabled=True) is None  # type: ignore[arg-type]
+    # tripwire → verbatim.
+    trip = "Security warning: rm -rf the directory is irreversible."
+    assert compress_reply_for_context(trip, enabled=True) == trip
+    # safe filler-heavy prose → compressed.
+    out = compress_reply_for_context(filler, enabled=True)
+    assert out != filler
+    assert len(out) < len(filler)
+    assert "just" not in out and "basically" not in out

@@ -86,6 +86,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from scripts import tasks as tasks_mod
+from scripts.caveman_codec import compress as _caveman_compress
+from scripts.caveman_codec import should_compress as _caveman_should_compress
 from scripts.dispatch import (
     TERMINAL_ONLY_STATUSES,
     DispatchError,
@@ -145,6 +147,19 @@ COMPRESSION_THRESHOLD_BYTES = 16384
 #: Env override for :data:`COMPRESSION_THRESHOLD_BYTES`. A valid non-negative
 #: int wins; blank/garbage/negative is ignored (valid-or-ignore).
 COMPRESS_THRESHOLD_ENV = "ATELIER_COMPRESS_THRESHOLD"
+
+#: B2 — env gate for the caveman prose codec at the wave-summary digest sink
+#: (the genuine model-bound prose path returned to the orchestrator session).
+#: DEFAULT OFF: unset/empty/"0"/"false"/"no"/"off" (case-insensitive, trimmed)
+#: → disabled; only "1"/"true"/"yes"/"on" enable it. Parsed defensively from
+#: the injected ``resolved_env`` (house style A8 — never read ``os.environ``
+#: directly), so a typo never flips behavior. When OFF the digest is
+#: byte-identical to :func:`default_wave_digest`'s output (the #1 invariant).
+CAVEMAN_COMPRESS_ENV = "ATELIER_CAVEMAN_COMPRESS"
+
+#: Truthy markers that enable :data:`CAVEMAN_COMPRESS_ENV` (case-insensitive,
+#: trimmed). Anything else — including unset/empty/garbage — is OFF.
+_CAVEMAN_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 #: Head/tail slice cap (chars) applied to each retained ``notes_md`` in the
 #: deterministic digest. Mirrors :data:`scripts.status._ARTIFACT_PREVIEW_CAP`'s
@@ -376,6 +391,32 @@ def default_wave_digest(envelopes: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(blocks)
 
 
+def compress_reply_for_context(text: str, *, enabled: bool, level: str = "full") -> str:
+    """B2 sink — caveman-compress a model-bound prose ``text`` IFF ``enabled``.
+
+    This is the env-gated codec wrapper applied to the wave-summary ``digest``
+    string (the genuine model-bound prose returned to the orchestrator session).
+    It is NEVER applied to a stored/parsed envelope — only to the SEPARATE digest
+    string — so byte-sensitive parsers (``validate_envelope`` /
+    ``_parse_abandon_category`` / ``ABANDON_RE``) never see codec-mutated bytes.
+
+    Contract (returns ``text`` UNCHANGED — the #1 OFF byte-identity invariant —
+    in any of these cases):
+      - ``enabled`` is False (default; gate OFF),
+      - ``text`` is not a ``str`` or is empty,
+      - :func:`caveman_codec.should_compress` is False (auto-clarity gate:
+        security / destructive / multi-step content passes through verbatim).
+    Otherwise returns :func:`caveman_codec.compress(text, level)`.
+    """
+    if not enabled:
+        return text
+    if not isinstance(text, str) or text == "":
+        return text
+    if not _caveman_should_compress(text):
+        return text
+    return _caveman_compress(text, level)
+
+
 # ── In-flight bookkeeping ────────────────────────────────────────────────────
 
 
@@ -468,6 +509,16 @@ class WaveDispatcher:
             )
             if resolved_env is not None
             else COMPRESSION_THRESHOLD_BYTES
+        )
+        #: B2 — caveman prose codec gate at the wave-summary digest sink. Parsed
+        #: from the injected env (NEVER os.environ; house style A8). DEFAULT OFF:
+        #: only an explicit truthy marker ("1"/"true"/"yes"/"on", case-insensitive,
+        #: trimmed) enables it; unset/empty/"0"/"false"/"no"/"off"/garbage → OFF,
+        #: so the digest is byte-identical to default_wave_digest's output.
+        self._caveman_enabled: bool = (
+            (resolved_env.get(CAVEMAN_COMPRESS_ENV) or "").strip().lower() in _CAVEMAN_TRUTHY
+            if resolved_env is not None
+            else False
         )
         #: Every escalation emitted this run, in order (audit; item 8).
         self.escalations: list[dict[str, Any]] = []
@@ -819,6 +870,13 @@ class WaveDispatcher:
         if self._wave_reply_bytes <= self._compress_threshold:
             return
         digest = self._summarize_fn(list(self._wave_envelopes))
+        # B2 — env-gated caveman codec on the model-bound digest string ONLY.
+        # `default_wave_digest` (the injected `summarize_fn`) stays PURE — the
+        # codec runs HERE, never inside it. When the gate is OFF (the default)
+        # this is a no-op and the digest is byte-identical to `summarize_fn`'s
+        # output. The codec only ever touches THIS digest string, never the
+        # retained/validated envelopes in `self._wave_envelopes`.
+        digest = compress_reply_for_context(digest, enabled=self._caveman_enabled)
         summary["compressed"] = True
         summary["reply_bytes"] = self._wave_reply_bytes
         summary["digest"] = digest

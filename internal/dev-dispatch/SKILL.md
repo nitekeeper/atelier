@@ -132,7 +132,7 @@ per-wave summaries → advance phase
    bridge path is unchanged and byte-identical.
    ```python
    from scripts.loom_comms import (
-       detect, build_team_chat_context, kickoff, invite, deregister,
+       detect, build_team_chat_context, kickoff, invite, deregister, teardown,
    )
 
    status = detect()                         # the availability gate (never raises)
@@ -159,9 +159,14 @@ per-wave summaries → advance phase
    - **Invite (req 8).** To pull an additional agent into the channel mid-cycle
      (e.g. a roster-extension persona), `invite(status=status, channel=channel,
      role_id=<new role-id>)` — registers + joins it. Fail-soft.
-   - **Deregister non-participants (req 7).** When an agent stops participating,
-     `deregister(status=status, name=<role-id>)` marks it gone; the channel chat
-     HISTORY is retained. Fail-soft.
+   - **Deregister on completion (req 7).** A worker that has fulfilled its
+     purpose MUST NOT linger in the channel. As soon as a worker's task reaches
+     terminal closure (`done`/`abandoned`) — or it otherwise stops participating
+     (e.g. a roster-extension persona that finished) — deregister it:
+     `deregister(status=status, name=<role-id>)` marks it gone while the channel
+     chat HISTORY is retained. Fail-soft. Belt-and-suspenders with the worker's
+     own self-deregister (its briefing makes deregister the final wind-down) and
+     the end-of-cycle `teardown` sweep (step 8).
    - **Invariant.** Loom carries ONLY chat + the kickoff meeting + goals. The
      worker's terminal `task_result` reply envelope (TM-006), heartbeats, and
      every control signal STILL ride the **bridge** (`bridge_messages`) — the
@@ -218,6 +223,18 @@ per-wave summaries → advance phase
    (the engine guarantees this — its post-wave assertion refuses to advance
    otherwise). Per `internal/dev-subagent/SKILL.md`, do NOT auto-advance to
    `review:open`; leave that for the human / the review skill.
+
+8. **Loom teardown — guaranteed deregister sweep.** Once the cycle's final wave
+   has reached terminal closure, deregister EVERY remaining Loom participant so
+   no agent/subagent stays registered in the channel indefinitely:
+   ```python
+   teardown(status=status, members=members)  # pass pm_name if non-default
+   ```
+   `teardown` sweeps the PM plus every member via `deregister` — fail-soft,
+   idempotent, order-independent, and a no-op when Loom is unavailable. The
+   channel chat HISTORY is RETAINED server-side; only live presence is cleared.
+   This is the backstop guarantee behind each worker's own self-deregister and
+   the per-worker terminal deregister (req 7).
 
 ## Heartbeat-stall = READ-FIRST go-observe (never auto-kill)
 

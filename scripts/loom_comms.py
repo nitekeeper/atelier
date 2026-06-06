@@ -571,3 +571,41 @@ def deregister(
         return {"transport": "bridge", "deregistered": False, "name": name}
     proc = _run_loom(status, ["deregister", "--as", name], runner=runner)
     return {"transport": "loom", "deregistered": proc is not None, "name": name}
+
+
+def teardown(
+    *,
+    status: LoomStatus,
+    members: list[str],
+    pm_name: str = "team-lead",
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> dict:
+    """Cycle-teardown sweep — deregister EVERY Loom participant so no agent or
+    subagent lingers in the channel after the cycle ends (chat HISTORY is
+    retained server-side). The guaranteed backstop behind each worker's own
+    self-deregister: even if a worker forgets, this sweep marks it gone.
+
+    Gated + fail-soft. Deregisters ``pm_name`` plus each role-id in ``members``
+    via :func:`deregister` (the server marks each gone but keeps its transcript).
+    Names are de-duplicated (a ``pm_name`` that also appears in ``members`` is
+    swept once) while preserving order. Idempotent + order-independent: sweeping
+    an already-gone or never-registered name is a fail-soft no-op, and one
+    member's failed deregister never aborts the rest.
+
+    Returns ``{"transport": "loom", "deregistered": [<names confirmed gone>],
+    "attempted": [<every name swept>]}``. On an unavailable Loom returns
+    ``{"transport": "bridge", "deregistered": [], "attempted": []}`` — nothing
+    registered, nothing to sweep.
+    """
+    if not status.available:
+        return {"transport": "bridge", "deregistered": [], "attempted": []}
+    names: list[str] = []
+    for name in [pm_name, *members]:
+        if name not in names:
+            names.append(name)
+    gone = [
+        name
+        for name in names
+        if deregister(status=status, name=name, runner=runner)["deregistered"]
+    ]
+    return {"transport": "loom", "deregistered": gone, "attempted": names}

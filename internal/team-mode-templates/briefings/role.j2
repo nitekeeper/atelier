@@ -58,13 +58,15 @@ under your **bare role-id** before sending:
 | Send to team-lead (chat) | `{{ team_chat.cmds.send_to_lead }}` |
 | Check inbox | `{{ team_chat.cmds.read_inbox }}` |
 | Mark messages read | `{{ team_chat.cmds.mark_read }}` |
-| Deregister (when you stop participating) | `{{ team_chat.cmds.deregister }}` |
+| Deregister (REQUIRED once your task is done) | `{{ team_chat.cmds.deregister }}` |
 
 PEER chat routes through the **Loom channel `{{ team_chat.channel }}`** — address
 exactly one recipient by name (TM-003 still holds; no broadcast except a
-deliberate `@here` kickoff posted by your team-lead). When you stop
-participating, **deregister** (above) — you are marked gone but your chat
-history is retained.
+deliberate `@here` kickoff posted by your team-lead). **Once you have fulfilled
+your purpose** — your task reaches terminal closure (you emit your final
+`task_result`) or you are told to stand down — **deregister** (above) as your
+final Loom action: do not linger in the channel. You are marked gone but your
+chat history is retained.
 
 Loom chat messages are capped at **{{ team_chat.max_body }} chars**.
 {{ team_chat.cmds.doc_spill }}

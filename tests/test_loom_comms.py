@@ -36,6 +36,7 @@ from scripts.loom_comms import (
     kickoff,
     loom_cmds,
     resolve_loom_client,
+    teardown,
 )
 
 # ---------------------------------------------------------------------------
@@ -738,6 +739,53 @@ def test_deregister_fallback_when_unavailable() -> None:
     result = deregister(status=LoomStatus(available=False), name="be-1", runner=runner)
     assert result == {"transport": "bridge", "deregistered": False, "name": "be-1"}
     assert runner.calls == []
+
+
+def test_teardown_deregisters_all_participants(tmp_path: Path) -> None:
+    """teardown sweeps pm + every member, marking each gone (history retained)."""
+    runner = FakeRunner(available=True)
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = teardown(status=status, members=["be-1", "fe-1", "qa-1"], runner=runner)
+    assert result["transport"] == "loom"
+    assert result["attempted"] == ["team-lead", "be-1", "fe-1", "qa-1"]
+    assert result["deregistered"] == ["team-lead", "be-1", "fe-1", "qa-1"]
+    dereg = [c[3:] for c in runner.calls if c[2] == "deregister"]
+    assert dereg == [
+        ["--as", "team-lead"],
+        ["--as", "be-1"],
+        ["--as", "fe-1"],
+        ["--as", "qa-1"],
+    ]
+
+
+def test_teardown_dedups_pm_in_members(tmp_path: Path) -> None:
+    """A pm_name that also appears in members is swept exactly once."""
+    runner = FakeRunner(available=True)
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = teardown(status=status, members=["lead", "be-1"], pm_name="lead", runner=runner)
+    assert result["attempted"] == ["lead", "be-1"]
+    dereg = [c for c in runner.calls if c[2] == "deregister"]
+    assert len(dereg) == 2
+
+
+def test_teardown_fallback_when_unavailable() -> None:
+    """teardown on an unavailable Loom is fail-soft: no subprocess, nothing swept."""
+    runner = FakeRunner(available=False)
+    result = teardown(status=LoomStatus(available=False), members=["be-1"], runner=runner)
+    assert result == {"transport": "bridge", "deregistered": [], "attempted": []}
+    assert runner.calls == []
+
+
+def test_teardown_failures_are_soft_and_never_abort(tmp_path: Path) -> None:
+    """A failed deregister never aborts the sweep — every name is still attempted,
+    and a name that did not confirm gone is simply absent from `deregistered`."""
+    runner = FakeRunner(available=True, fail_cmds={"deregister"})
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = teardown(status=status, members=["be-1", "fe-1"], runner=runner)
+    assert result["attempted"] == ["team-lead", "be-1", "fe-1"]
+    assert result["deregistered"] == []
+    dereg = [c for c in runner.calls if c[2] == "deregister"]
+    assert len(dereg) == 3
 
 
 # ---------------------------------------------------------------------------

@@ -123,11 +123,13 @@ per-wave summaries → advance phase
        `dev:review` / `dev:tdd`), so whichever of the two this orchestrator hands
        it, the policy reads the same base — the two sides cannot drift.
 
-3b. **Loom team-chat kickoff (gated — optional inter-agent chat).** Before the
+3b. **Loom team-chat kickoff (gated — the DEFAULT inter-agent chat when available).** Before the
    first wave dispatches, probe the **loom-agent-chat** plugin and, if available,
    open the team's Loom chat channel for PEER conversation + the kickoff meeting.
-   This is **gated + bridge-fallback**: if Loom is unavailable, SKIP this entire
-   step — the existing bridge path is unchanged and byte-identical.
+   When Loom is available it is the **default** transport agents use for that
+   conversational chat — not an opt-in to skip. This is **availability-gated +
+   bridge-fallback**: if Loom is unavailable, SKIP this entire step — the existing
+   bridge path is unchanged and byte-identical.
    ```python
    from scripts.loom_comms import (
        detect, build_team_chat_context, kickoff, invite, deregister,

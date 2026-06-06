@@ -44,10 +44,11 @@ attempt_index + ":" + recipient)`. A replay with the same key returns the
 prior `seq` and does NOT duplicate the message.
 {% if team_chat.transport == 'loom' %}
 
-## Loom team-chat (PEER chat + meeting — gated, bridge stays the control-plane)
+## Loom team-chat (PEER chat + meeting — the DEFAULT chat transport, bridge stays the control-plane)
 
-This team also runs an optional **Loom agent-chat** channel for inter-agent
-(PEER) conversation and the plan-phase kickoff meeting. Register yourself on it
+This team's **default** transport for inter-agent (PEER) conversation and the
+plan-phase kickoff meeting is **Loom agent-chat** — use it for all such chat (the
+bridge is the fallback only when Loom is unavailable). Register yourself on it
 under your **bare role-id** before sending:
 
 | Operation | Command |

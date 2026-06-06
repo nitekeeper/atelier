@@ -80,21 +80,21 @@ Dispatch-mode selection.
 
 ## Dispatch-mode selection (after pre-flight, before any work request)
 
-Once `startup_check` returns a `proceed-*` action and BEFORE the Trigger contract's Ask gate fires for any new-work request, establish the session's **dispatch mode**. This gate ALWAYS asks — there is no silent default. Present exactly these two options and wait for the user to pick one:
+Once `startup_check` returns a `proceed-*` action and BEFORE the Trigger contract's Ask gate fires for any new-work request, establish the session's **dispatch mode**. **The default is sub-agent mode** — adopt it silently, with no live pick, unless the user explicitly chooses agent-team for this session or has pre-authorized agent-team in CLAUDE.md / saved preferences. This mirrors the read-side default in `scripts/dispatch.py::resolve_dispatch_mode` (env override → marker → `subagent` default).
 
-- **(1) sub-agent** — lightweight. Each worker is a fire-and-forget background `Agent`; no persistent team is created. **tmux is NOT required.** Best for a single implementer / reviewer pass.
-- **(2) agent-team** — a persistent team (`TeamCreate` once per cycle, then per-task spawn / `SendMessage`). **tmux is REQUIRED** for the team panes.
+- **sub-agent (default)** — lightweight. Each worker is a fire-and-forget background `Agent`; no persistent team is created. **tmux is NOT required.** Best for a single implementer / reviewer pass.
+- **agent-team** — a persistent team (`TeamCreate` once per cycle, then per-task spawn / `SendMessage`). **tmux is REQUIRED** for the team panes. Selected only on explicit user request or pre-authorization.
 
-After the user picks:
+Resolution:
 
-1. **agent-team → tmux gate (hard-fail when unavailable).** Before proceeding, check tmux availability:
+1. **No explicit choice → sub-agent (default).** Proceed directly to step 3 with `subagent`; never run the tmux gate for sub-agent mode. (If the user has pre-authorized a mode in CLAUDE.md / saved preferences, treat that as the resolved choice with no live ask — skip to step 2 if it is agent-team, else to step 3.)
+2. **agent-team (explicit) → tmux gate (hard-fail when unavailable).** When the user has chosen agent-team, check tmux availability first:
    ```
    python3 -c "from scripts.preflight import tmux_available; print(tmux_available())"
    ```
-   - If it prints `False`: **STOP.** Do not proceed and do not silently fall back. Tell the user verbatim: *"tmux is required for agent-team mode; install it and re-run, or choose sub-agent mode."* Re-offer the two options.
+   - If it prints `False`: **STOP.** Do not silently proceed into agent-team. Tell the user verbatim: *"tmux is required for agent-team mode; install it and re-run, or choose sub-agent mode."* Then wait for the user to decide: install tmux and re-confirm agent-team, or proceed with the sub-agent default.
    - If it prints `True`: continue to step 3 with `agent-team`.
-2. **sub-agent → no tmux requirement.** Proceed directly to step 3 with `subagent`; never run the tmux gate for sub-agent mode.
-3. **Persist the chosen mode** so the later Python dispatch reads it back (env override → marker → default; see `scripts/dispatch.py::resolve_dispatch_mode`):
+3. **Persist the resolved mode** so the later Python dispatch reads it back (env override → marker → default; see `scripts/dispatch.py::resolve_dispatch_mode`):
    ```
    python3 scripts/dispatch.py persist-mode <mode>
    ```

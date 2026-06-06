@@ -35,9 +35,16 @@ Mesh-close contract (see docs/specs/2026-05-25-atelier-team-mode-design.md):
   mirroring ``scripts/migrate.py:get_connection`` and
   ``scripts/backend_local._conn``.
 
-* Payload ceiling: 8 KiB hard cap (matches the CHECK on
-  ``bridge_messages.payload``). Rejected at the writer before the
-  ``BEGIN IMMEDIATE`` opens so we never hold the write lock to fail.
+* Payload ceiling: 8 KiB hard cap on the IN-BAND payload (matches the
+  CHECK on ``bridge_messages.payload``). An inline payload over the cap is
+  rejected before ``BEGIN IMMEDIATE`` opens so we never hold the write lock
+  to fail. A payload over ``PAYLOAD_REF_THRESHOLD_BYTES`` (strictly below the
+  cap) is instead persisted out-of-band to the content-addressed
+  ``bridge_payloads`` store and a short reference stub is substituted into
+  ``payload`` (with the sha256 recorded in ``payload_ref``) — see migration
+  011. The body store happens in autocommit BEFORE ``BEGIN IMMEDIATE``
+  (body-before-message ordering: the only crash artifact is a harmless orphan
+  body, never a dangling ref).
 
 CLI surface (stable):
 
@@ -69,6 +76,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from scripts import bridge_payloads
+
 # Triple-pinned against:
 #   * migrations/shared/003_team_mode.sql tail (PRAGMA user_version = 1)
 #   * scripts/bridge_read.py  (TODO: same constant once implemented)
@@ -83,6 +92,25 @@ SCHEMA_VERSION = 1
 # etc.), so the rendered fence can exceed PAYLOAD_MAX_BYTES; that rendered
 # string is never stored. Do NOT "fix" this by measuring the escaped form.
 PAYLOAD_MAX_BYTES = 8192
+
+# Out-of-band referencing threshold (cycle 1 — payload referencing, atelier
+# #migration-011). When an outbound payload's UTF-8 byte length EXCEEDS this,
+# bridge_send writes the body to the content-addressed bridge_payloads store
+# and substitutes a short reference stub into bridge_messages.payload (setting
+# bridge_messages.payload_ref to the sha256). This keeps the 8 KiB wire CHECK
+# satisfied while letting the actual body exceed it, and keeps orchestrator /
+# teammate context carrying TAGS not bodies (targets the F15 read-first
+# context-bloat aborts).
+#
+# It is STRICTLY BELOW PAYLOAD_MAX_BYTES so a payload that fits inline but is
+# still large is referenced rather than shipped inline — the context-savings
+# is the whole point, not just escaping the hard cap. The env override
+# ATELIER_BRIDGE_REF_THRESHOLD is read at call time (so tests/operators can
+# tune it without re-import); a missing / non-integer / out-of-range value
+# (<= 0 or >= PAYLOAD_MAX_BYTES) falls back to this default so a misconfig can
+# never DISABLE referencing or push it at/above the hard cap.
+PAYLOAD_REF_THRESHOLD_BYTES = 4096
+_REF_THRESHOLD_ENV = "ATELIER_BRIDGE_REF_THRESHOLD"
 
 # 26-char Crockford-base32 ULID. The schema does not CHECK the length
 # (per Phase-3 mesh-close we kept the CHECK off the column to keep the
@@ -337,24 +365,62 @@ def _resolve_sender(
 # ── Payload handling ───────────────────────────────────────────────────────
 
 
+def _ref_threshold() -> int:
+    """Resolve the out-of-band referencing threshold (bytes).
+
+    Reads :data:`_REF_THRESHOLD_ENV` at call time so tests/operators can tune
+    it without re-importing the module. A missing, non-integer, or out-of-range
+    value (``<= 0`` or ``>= PAYLOAD_MAX_BYTES``) falls back to
+    :data:`PAYLOAD_REF_THRESHOLD_BYTES` — a misconfig can never DISABLE
+    referencing or push the threshold at/above the 8 KiB hard cap (which would
+    let an oversize inline payload reach the schema CHECK).
+    """
+    raw = os.environ.get(_REF_THRESHOLD_ENV)
+    if raw is None:
+        return PAYLOAD_REF_THRESHOLD_BYTES
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return PAYLOAD_REF_THRESHOLD_BYTES
+    if val <= 0 or val >= PAYLOAD_MAX_BYTES:
+        return PAYLOAD_REF_THRESHOLD_BYTES
+    return val
+
+
+def _ref_stub(sha256_hex: str, byte_len: int) -> str:
+    """Render the short, human-readable in-band stub for a referenced body.
+
+    Tiny by construction (a hex digest + a small integer), so it trivially
+    satisfies the 8 KiB wire CHECK. This text is informational only —
+    bridge_read keys off the first-class ``bridge_messages.payload_ref``
+    column (D3 unforgeability), NEVER off parsing this stub.
+    """
+    return f"[bridge-ref sha256:{sha256_hex} {byte_len} bytes — body stored out-of-band]"
+
+
 def _load_payload(spec: str) -> str:
     """Resolve ``--payload`` argument. ``@<path>`` reads a file, else
     treats the value as a literal string.
 
-    Length is checked before any DB lock acquisition so an oversize
-    payload never blocks other writers.
+    Referencing branch (cycle 1): a payload that EXCEEDS the 8 KiB wire cap is
+    NO LONGER rejected here — :func:`send` persists it to the content-addressed
+    store and substitutes a short reference stub. We only fast-fail (before any
+    DB work) on a body that exceeds the store's own 1 MiB outer ceiling
+    (:data:`bridge_payloads.MAX_BODY_BYTES`), so a pathological blob never even
+    opens the DB. The 8 KiB wire CHECK is still enforced — but on the
+    SUBSTITUTED stub, inside :func:`send`, not on the raw body here.
     """
     if spec.startswith("@"):
         path = Path(spec[1:])
         data = path.read_text()
     else:
         data = spec
-    if len(data.encode("utf-8")) > PAYLOAD_MAX_BYTES:
+    if len(data.encode("utf-8")) > bridge_payloads.MAX_BODY_BYTES:
         raise PayloadTooLargeError(
-            f"payload is {len(data.encode('utf-8'))} bytes; the bridge log "
-            f"caps individual messages at {PAYLOAD_MAX_BYTES} bytes "
-            f"(prompt-engineer-1's writer ceiling, enforced by CHECK on "
-            f"bridge_messages.payload)."
+            f"payload is {len(data.encode('utf-8'))} bytes; the out-of-band "
+            f"payload store caps a single body at "
+            f"{bridge_payloads.MAX_BODY_BYTES} bytes "
+            f"(bridge_payloads.MAX_BODY_BYTES)."
         )
     return data
 
@@ -462,15 +528,24 @@ def send(
         raise BridgeSendError(f"--kind must be one of {sorted(ALLOWED_KINDS)}; got {kind!r}.")
     _validate_idem(idempotency_key)
 
-    # H5: enforce the byte cap on every code path that reaches send(),
-    # not just the CLI's _load_payload(). dispatch.py (and any other
-    # importer) passes a pre-loaded payload directly to send() and must
-    # see the same PayloadTooLargeError the CLI surfaces — otherwise an
-    # oversize payload would only fail at the schema CHECK, after we've
-    # already paid the cost of opening the DB and (worse) taken the
-    # BEGIN IMMEDIATE lock.
+    # H5 + cycle-1 referencing: enforce limits on EVERY path that reaches
+    # send(), not just the CLI's _load_payload(). dispatch.py (and any other
+    # importer) passes a pre-loaded payload directly to send().
+    #
+    # Two regimes, decided BEFORE the cap check (which is why the referencing
+    # branch lives here, ahead of any DB lock):
+    #   * payload <= threshold  -> shipped INLINE; it must satisfy the 8 KiB
+    #     wire CHECK up front, before we open the DB or take a lock.
+    #   * payload >  threshold  -> REFERENCED out-of-band below (after the DB
+    #     opens, so store() has a conn); it escapes the 8 KiB cap by design.
+    #     Its 1 MiB outer ceiling is enforced by bridge_payloads.store().
+    # The threshold is strictly below PAYLOAD_MAX_BYTES (_ref_threshold()
+    # guarantees this), so the inline regime can never exceed the wire cap
+    # except via a deliberately broken threshold — which the inline check
+    # below still catches.
     payload_bytes = len(payload.encode("utf-8"))
-    if payload_bytes > PAYLOAD_MAX_BYTES:
+    needs_ref = payload_bytes > _ref_threshold()
+    if not needs_ref and payload_bytes > PAYLOAD_MAX_BYTES:
         raise PayloadTooLargeError(
             f"payload is {payload_bytes} bytes; the bridge log caps "
             f"individual messages at {PAYLOAD_MAX_BYTES} bytes (mirrors "
@@ -499,11 +574,52 @@ def send(
                 (team_id, idempotency_key),
             ).fetchone()
             if prior is not None:
+                # Replay short-circuit: the prior row already carries its stub
+                # + payload_ref. We return WITHOUT storing anything — a replay
+                # never re-stores a body nor mints a new ref. (INSERT OR IGNORE
+                # would make a re-store a harmless no-op anyway, but skipping it
+                # entirely is the cheaper, contract-true path.)
                 return {
                     "seq": int(prior["seq"]),
                     "deduped": True,
                     "persona_snapshot_id": int(prior["persona_snapshot_id"]),
                 }
+
+        # Out-of-band referencing — BODY-BEFORE-MESSAGE ordering (Phase-3
+        # mesh-close, backend-engineer-1). store() runs in AUTOCOMMIT here,
+        # BEFORE the BEGIN IMMEDIATE seq lock below. The ordering is
+        # load-bearing: if we crash between the body store and the message
+        # INSERT, the only artifact is a HARMLESS orphan body (content-
+        # addressed, immutable, reclaimable by the deferred sweep) — NEVER a
+        # dangling ref (a committed message pointing at a body that was never
+        # written, which would be fatal). It also keeps the IMMEDIATE lock
+        # window unchanged: the (potentially large) body write happens outside
+        # the lock; only the tiny stub-bearing message INSERT is inside it.
+        # store() is INSERT OR IGNORE on the (team_id, sha256) PK, so an
+        # idempotency race / replay that reaches here re-stores nothing and
+        # yields the same ref.
+        wire_payload = payload
+        payload_ref: str | None = None
+        if needs_ref:
+            try:
+                ref = bridge_payloads.store(conn, team_id, payload)
+            except bridge_payloads.PayloadTooLarge as e:
+                # Translate the store's ValueError into the bridge_send error
+                # hierarchy so the CLI (main) and importers see the uniform
+                # PayloadTooLargeError contract.
+                raise PayloadTooLargeError(str(e)) from e
+            payload_ref = str(ref["sha256"])
+            wire_payload = _ref_stub(payload_ref, int(ref["byte_len"]))
+            # Defensive belt-and-suspenders: the substituted stub MUST satisfy
+            # the 8 KiB wire CHECK. It is tiny by construction, so this never
+            # fires — but if a future stub format grew unbounded we fail loud
+            # here (no held lock) rather than at the schema CHECK under the lock.
+            if len(wire_payload.encode("utf-8")) > PAYLOAD_MAX_BYTES:
+                raise PayloadTooLargeError(
+                    f"reference stub is {len(wire_payload.encode('utf-8'))} "
+                    f"bytes, exceeding the {PAYLOAD_MAX_BYTES}-byte wire cap "
+                    f"(stub format regression — should never happen)."
+                )
 
         # Allocator. BEGIN IMMEDIATE acquires the RESERVED lock up front
         # so the MAX(seq)+1 read and the INSERT cannot interleave with
@@ -522,8 +638,8 @@ def send(
                     "INSERT INTO bridge_messages ("
                     "    team_id, recipient, seq, sender_id, "
                     "    idempotency_key, causal_ref, kind, wave, "
-                    "    payload, persona_snapshot_id"
-                    ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "    payload, payload_ref, persona_snapshot_id"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         team_id,
                         recipient,
@@ -533,7 +649,8 @@ def send(
                         causal_ref,
                         kind,
                         wave,
-                        payload,
+                        wire_payload,
+                        payload_ref,
                         persona_snapshot_id,
                     ),
                 )

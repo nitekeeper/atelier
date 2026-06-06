@@ -40,8 +40,19 @@ CLI surface (stable):
     bridge_read --team <team_id> --as <self_role_id>
                 [--since-seq N] [--limit N=500]
                 [--follow] [--timeout-ms M]
-                [--include-heartbeats]
+                [--include-heartbeats] [--resolve]
                 [--db <path>]
+
+* ``--resolve``: dereference out-of-band referenced payloads (rows whose
+  first-class ``payload_ref`` column IS NOT NULL — the decision is keyed off
+  the column, NEVER a regex over the fenced stub text, so a literal
+  ``[bridge-ref ...]`` inside an inline untrusted body stays inert). The stored
+  body is sha256-verified against ``payload_ref`` BEFORE emit and re-wrapped in
+  the SAME ``<untrusted>`` fence — resolve preserves the trust boundary, it is
+  not a laundering path. Fail-closed: a sha mismatch (tamper) or a missing row
+  (dangling/GC'd ref) yields a FENCED error sentinel, never the raw body, plus
+  a nonzero exit (9 / 8). Default OFF: the orchestrator carries reference
+  stubs, not bodies (the F15 / 600 s context-budget win).
 
 Stdout: JSON Lines, one object per message:
 
@@ -59,6 +70,8 @@ Exit codes (callers can branch on these without parsing stderr):
     4  lock-timeout (SQLite busy_timeout exceeded under follow)
     5  auth-mismatch (--as is not a member of --team)
     7  schema-version-mismatch
+    8  ref-not-found   (--resolve: a referenced body is missing / GC'd)
+    9  ref-sha-mismatch (--resolve: a referenced body failed sha256 verify)
 """
 
 from __future__ import annotations
@@ -70,6 +83,8 @@ import sqlite3
 import sys
 import time
 from typing import Any
+
+from scripts import bridge_payloads
 
 # Triple-pinned: see scripts/bridge_send.py SCHEMA_VERSION docstring.
 SCHEMA_VERSION = 1
@@ -91,6 +106,12 @@ EXIT_CHANNEL_MISSING = 3
 EXIT_LOCK_TIMEOUT = 4
 EXIT_AUTH_MISMATCH = 5
 EXIT_SCHEMA_VERSION = 7
+# Resolve fail-closed codes (only reachable under --resolve). Distinct so a
+# caller can tell a dangling/GC'd ref (8) from a tamper-detected sha mismatch
+# (9). sha-mismatch outranks not-found when a batch hits both: tamper is the
+# higher-severity signal.
+EXIT_REF_NOT_FOUND = 8
+EXIT_REF_SHA_MISMATCH = 9
 
 
 # ── Exceptions ─────────────────────────────────────────────────────────────
@@ -209,6 +230,46 @@ def _fence(payload: str, sender_id: str, seq: int) -> str:
     )
 
 
+# ── Resolve (dereference out-of-band referenced bodies) ────────────────────
+
+
+def _resolve_field(
+    conn: sqlite3.Connection,
+    *,
+    team_id: str,
+    payload_ref: str,
+    sender_id: str,
+    seq: int,
+) -> tuple[str, str | None]:
+    """Dereference a referenced payload, sha-verify, then re-fence — fail-closed.
+
+    This is the locked Phase-3 invariant (ai-safety-researcher-1's owned seam):
+    a resolved body is STILL untrusted content, so resolve is a
+    trust-boundary-PRESERVING op, never a laundering path.
+
+    Order is mandatory: ``get`` the body → recompute ``sha256`` over its verbatim
+    UTF-8 bytes → compare to ``payload_ref`` → ONLY THEN ``_fence`` + emit.
+
+    Fail-closed: on a missing row (dangling / GC'd ref) or a sha mismatch
+    (tamper), return a FENCED error SENTINEL — NEVER the raw body — plus a
+    distinct error tag (``"not-found"`` / ``"sha-mismatch"``). The sentinel
+    stays inside the SAME ``<untrusted>`` fence so a failed resolve can never
+    become an unfenced injection surface. Source/seq attribution is preserved
+    on both the resolved body and the sentinel.
+
+    Returns ``(fenced_payload, error_tag_or_None)``.
+    """
+    body = bridge_payloads.get(conn, team_id, payload_ref)
+    if body is None:
+        sentinel = f"[unresolved-ref: not-found sha256:{payload_ref}]"
+        return _fence(sentinel, sender_id, seq), "not-found"
+    actual = bridge_payloads.compute_sha256(body)
+    if actual != payload_ref:
+        sentinel = f"[unresolved-ref: sha-mismatch sha256:{payload_ref}]"
+        return _fence(sentinel, sender_id, seq), "sha-mismatch"
+    return _fence(body, sender_id, seq), None
+
+
 # ── Pull / cursor update ───────────────────────────────────────────────────
 
 
@@ -231,7 +292,7 @@ def _pull(
     """
     if include_heartbeats:
         sql = (
-            "SELECT seq, sender_id, kind, payload, causal_ref, "
+            "SELECT seq, sender_id, kind, payload, payload_ref, causal_ref, "
             "       persona_snapshot_id, created_at "
             "FROM bridge_messages "
             "WHERE team_id=? AND recipient=? AND seq > ? "
@@ -240,7 +301,7 @@ def _pull(
         params: tuple[Any, ...] = (team_id, recipient, since_seq, limit)
     else:
         sql = (
-            "SELECT seq, sender_id, kind, payload, causal_ref, "
+            "SELECT seq, sender_id, kind, payload, payload_ref, causal_ref, "
             "       persona_snapshot_id, created_at "
             "FROM bridge_messages "
             "WHERE team_id=? AND recipient=? AND seq > ? "
@@ -277,16 +338,54 @@ def _advance_cursor(
     )
 
 
-def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "seq": int(row["seq"]),
-        "sender_id": row["sender_id"],
+def _row_to_dict(
+    row: sqlite3.Row,
+    *,
+    conn: sqlite3.Connection | None = None,
+    team_id: str | None = None,
+    resolve: bool = False,
+) -> dict[str, Any]:
+    """Render a bridge row as an emittable dict.
+
+    A message is "referenced" iff ``payload_ref IS NOT NULL`` — the decision is
+    keyed off the first-class COLUMN, never by regex-scanning the fenced payload
+    text (D3 unforgeability: a literal ``[bridge-ref ...]`` stub sitting in an
+    inline untrusted body has ``payload_ref = NULL`` and is therefore INERT).
+
+    Default (``resolve=False``): the in-band stub already stored in ``payload``
+    is fenced and emitted — the orchestrator carries the STUB, not the body
+    (the F15 / 600 s context-savings win).
+
+    ``resolve=True``: a referenced row is dereferenced + sha-verified + re-fenced
+    via :func:`_resolve_field` (fail-closed). Inline rows are unaffected.
+    """
+    seq = int(row["seq"])
+    sender_id = row["sender_id"]
+    payload_ref = row["payload_ref"]
+    out: dict[str, Any] = {
+        "seq": seq,
+        "sender_id": sender_id,
         "kind": row["kind"],
-        "payload": _fence(row["payload"], row["sender_id"], int(row["seq"])),
+        "payload_ref": payload_ref,
         "causal_ref": int(row["causal_ref"]) if row["causal_ref"] is not None else None,
         "persona_snapshot_id": int(row["persona_snapshot_id"]),
         "created_at": row["created_at"],
     }
+    if resolve and payload_ref is not None:
+        assert conn is not None and team_id is not None, "resolve requires an open conn + team_id"
+        fenced, err = _resolve_field(
+            conn,
+            team_id=team_id,
+            payload_ref=str(payload_ref),
+            sender_id=sender_id,
+            seq=seq,
+        )
+        out["payload"] = fenced
+        if err is not None:
+            out["resolve_error"] = err
+    else:
+        out["payload"] = _fence(row["payload"], sender_id, seq)
+    return out
 
 
 # ── Public read entrypoint ─────────────────────────────────────────────────
@@ -301,11 +400,18 @@ def read_once(
     limit: int = DEFAULT_LIMIT,
     include_heartbeats: bool = False,
     update_cursor: bool = True,
+    resolve: bool = False,
 ) -> list[dict[str, Any]]:
     """One-shot read. Returns fenced dicts; updates bridge_delivery.
 
     Importable surface used by tests + downstream tooling. The CLI
     shim emits these as JSONL.
+
+    ``resolve``: when True, referenced rows (``payload_ref IS NOT NULL``) are
+    dereferenced + sha-verified + re-fenced (fail-closed; see
+    :func:`_resolve_field`). Default False keeps the F15 context-savings win —
+    the orchestrator carries reference stubs, not bodies. Resolution reuses this
+    one-shot's open connection and is a pure read: it never mutates the cursor.
     """
     conn = _open_db(db_path)
     try:
@@ -327,7 +433,9 @@ def read_once(
                 recipient=role_id,
                 last_seq=int(rows[-1]["seq"]),
             )
-        return [_row_to_dict(r) for r in rows]
+        # Eager list comp: any resolve dereference runs here, while `conn` is
+        # still open (closed in the finally below).
+        return [_row_to_dict(r, conn=conn, team_id=team_id, resolve=resolve) for r in rows]
     finally:
         conn.close()
 
@@ -360,6 +468,7 @@ def _follow(
     include_heartbeats: bool,
     timeout_ms: int | None,
     out,
+    resolve: bool = False,
     sleep=time.sleep,
     now=time.monotonic,
 ) -> int:
@@ -371,6 +480,12 @@ def _follow(
     cursor = since_seq
     empty_polls = 0
     start = now()
+    # Track the worst fail-closed resolve_error across ALL polls so a bounded
+    # --follow --resolve surfaces tamper/dangling signals at timeout, mirroring
+    # the one-shot precedence (sha-mismatch outranks not-found). The fenced
+    # sentinel already suppresses the body on each row; this only fixes the EXIT
+    # CODE a caller branches on.
+    worst_resolve_exit = EXIT_OK
     while True:
         # Open a fresh transaction per poll so WAL snapshot isolation lets us see
         # new committed writes; SQLite WAL snapshot is per-transaction, not per-connection.
@@ -382,10 +497,16 @@ def _follow(
             limit=limit,
             include_heartbeats=include_heartbeats,
             update_cursor=True,
+            resolve=resolve,
         )
         if rows:
             for r in rows:
                 out.write(json.dumps(r) + "\n")
+                err = r.get("resolve_error")
+                if err == "sha-mismatch":
+                    worst_resolve_exit = EXIT_REF_SHA_MISMATCH
+                elif err == "not-found" and worst_resolve_exit == EXIT_OK:
+                    worst_resolve_exit = EXIT_REF_NOT_FOUND
             out.flush()
             cursor = max(r["seq"] for r in rows)
             empty_polls = 0
@@ -395,7 +516,7 @@ def _follow(
         if timeout_ms is not None:
             elapsed_ms = (now() - start) * 1000
             if elapsed_ms >= timeout_ms:
-                return EXIT_OK
+                return worst_resolve_exit
 
         sleep(_next_delay_ms(empty_polls) / 1000.0)
 
@@ -447,6 +568,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="opt in to kind='heartbeat' rows (default: filtered out)",
     )
     p.add_argument(
+        "--resolve",
+        action="store_true",
+        help=(
+            "dereference out-of-band referenced payloads (payload_ref set): "
+            "sha-verify + re-fence the body; fail-closed on tamper/dangling "
+            "(exit 9 / 8). Default OFF — the orchestrator carries reference "
+            "stubs, not bodies (F15 context budget)."
+        ),
+    )
+    p.add_argument(
         "--db",
         default=".ai/atelier.db",
         help="SQLite DB path (default: .ai/atelier.db)",
@@ -467,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
                 include_heartbeats=args.include_heartbeats,
                 timeout_ms=args.timeout_ms,
                 out=sys.stdout,
+                resolve=args.resolve,
             )
         rows = read_once(
             args.db,
@@ -475,10 +607,19 @@ def main(argv: list[str] | None = None) -> int:
             since_seq=args.since_seq,
             limit=args.limit,
             include_heartbeats=args.include_heartbeats,
+            resolve=args.resolve,
         )
+        # Emit every row (including any fail-closed sentinel), THEN surface the
+        # fail-closed exit code. sha-mismatch (tamper) outranks not-found.
+        exit_code = EXIT_OK
         for r in rows:
             sys.stdout.write(json.dumps(r) + "\n")
-        return EXIT_OK
+            err = r.get("resolve_error")
+            if err == "sha-mismatch":
+                exit_code = EXIT_REF_SHA_MISMATCH
+            elif err == "not-found" and exit_code == EXIT_OK:
+                exit_code = EXIT_REF_NOT_FOUND
+        return exit_code
     except BridgeReadError as e:
         print(f"bridge_read: {e}", file=sys.stderr)
         return e.exit_code

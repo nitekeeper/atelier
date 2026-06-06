@@ -28,9 +28,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts import bridge_send
+from scripts import bridge_payloads, bridge_send
 from scripts.bridge_send import (
     PAYLOAD_MAX_BYTES,
+    PAYLOAD_REF_THRESHOLD_BYTES,
     SCHEMA_VERSION,
     PayloadTooLargeError,
     SchemaVersionMismatch,
@@ -205,21 +206,25 @@ def test_idempotency_replay_returns_original_seq(team_db: str) -> None:
 # ── Tests: payload ceiling ─────────────────────────────────────────────────
 
 
-def test_oversize_payload_rejected_at_load(team_db: str) -> None:
-    """Payload > 8 KiB raises PayloadTooLargeError at the writer layer.
-
-    Routed through ``_load_payload`` so the CLI's @file path shares the
-    same enforcement. (L16: renamed from the old ``_rejected_before_lock``
-    name — this test exercises ``_load_payload`` only and proves nothing
-    about the DB lock; the at-load name is what's actually verified.)
+def test_oversize_payload_not_rejected_at_load(team_db: str) -> None:
+    """Cycle-1 referencing: a payload over the 8 KiB WIRE cap is NO LONGER
+    rejected at ``_load_payload`` — it is returned verbatim so :func:`send`
+    can persist it out-of-band and substitute a reference stub. ``_load_payload``
+    only fast-fails on a body over the store's 1 MiB outer ceiling
+    (``bridge_payloads.MAX_BODY_BYTES``).
     """
     big = "x" * (PAYLOAD_MAX_BYTES + 1)
+    # Over the wire cap but under the store ceiling → returned, not rejected.
+    assert bridge_send._load_payload(big) == big
+
+    # Over the store's 1 MiB outer ceiling → still fast-fails before any DB work.
+    too_big = "x" * (bridge_payloads.MAX_BODY_BYTES + 1)
     with pytest.raises(PayloadTooLargeError):
-        bridge_send._load_payload(big)
+        bridge_send._load_payload(too_big)
 
 
 def test_payload_exactly_at_limit_accepted(team_db: str) -> None:
-    """Boundary check: 8192 bytes exactly is fine."""
+    """Boundary check: 8192 bytes exactly passes ``_load_payload`` unchanged."""
     edge = "y" * PAYLOAD_MAX_BYTES
     assert bridge_send._load_payload(edge) == edge
 
@@ -423,35 +428,50 @@ def test_cli_bad_kind_rejected(team_db: str) -> None:
 # ── Tests: H5 multi-byte + at-cap payload byte-counting ────────────────────
 
 
-def test_multibyte_payload_byte_cap(team_db: str) -> None:
-    """CJK chars count as 3 UTF-8 bytes — writer + schema must agree.
+def test_multibyte_payload_referenced_byte_exact(team_db: str) -> None:
+    """CJK chars count as 3 UTF-8 bytes — referencing + store must agree.
 
-    4097 copies of '界' is 12291 bytes (4097 * 3) — well over the 8192
-    byte cap. The writer-side gate (PayloadTooLargeError) and the
-    schema-side CHECK constraint must BOTH reject the same input, so a
-    bypass of one is still caught by the other.
+    4097 copies of '界' is 12291 bytes (4097 * 3) — well over the 8192 wire
+    cap. Cycle-1 contract: the writer NO LONGER rejects it; it stores the body
+    out-of-band (byte-exact, multi-byte safe) and substitutes a tiny stub. The
+    on-disk in-band payload is the stub (<= cap) and ``payload_ref`` carries the
+    sha256; the stored body round-trips byte-for-byte. The schema-side CHECK
+    still rejects a RAW oversize inline INSERT, so the wire cap can't drift.
     """
     payload = "界" * 4097
     assert len(payload.encode("utf-8")) == 4097 * 3  # 12291 bytes
 
-    # Writer-side gate.
-    with pytest.raises(PayloadTooLargeError):
-        send(
-            team_db,
-            team_id="T1",
-            recipient="team-lead",
-            sender_id="backend-engineer-1",
-            kind="reply",
-            payload=payload,
-        )
+    # Writer no longer raises — it references out-of-band.
+    r = send(
+        team_db,
+        team_id="T1",
+        recipient="team-lead",
+        sender_id="backend-engineer-1",
+        kind="reply",
+        payload=payload,
+    )
+    assert r["deduped"] is False
 
-    # Schema-side CHECK constraint — bypass the writer and INSERT raw.
-    # The CHECK on bridge_messages.payload (length(CAST(payload AS BLOB))
-    # <= 8192) must reject the same input the writer did, so the two
-    # gates can't drift.
+    expected_sha = bridge_payloads.compute_sha256(payload)
     conn = sqlite3.connect(team_db)
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.row_factory = sqlite3.Row
     try:
+        row = conn.execute(
+            "SELECT payload, payload_ref FROM bridge_messages WHERE team_id=? AND seq=?",
+            ("T1", r["seq"]),
+        ).fetchone()
+        # In-band payload is the stub, well within the wire cap; payload_ref
+        # carries the content address (D3: the ref is a first-class column).
+        assert len(row["payload"].encode("utf-8")) <= PAYLOAD_MAX_BYTES
+        assert row["payload_ref"] == expected_sha
+        # The out-of-band body round-trips byte-for-byte (multi-byte safe).
+        assert bridge_payloads.get(conn, "T1", expected_sha) == payload
+
+        # Schema-side CHECK constraint — bypass the writer and INSERT a RAW
+        # oversize inline payload. The CHECK on bridge_messages.payload
+        # (length(CAST(payload AS BLOB)) <= 8192) must still reject it, so the
+        # wire cap stays load-bearing even though the writer now references.
         with pytest.raises(sqlite3.IntegrityError) as exc:
             conn.execute(
                 "INSERT INTO bridge_messages ("
@@ -462,7 +482,7 @@ def test_multibyte_payload_byte_cap(team_db: str) -> None:
                 (
                     "T1",
                     "team-lead",
-                    1,
+                    2,
                     "backend-engineer-1",
                     None,
                     None,
@@ -473,37 +493,140 @@ def test_multibyte_payload_byte_cap(team_db: str) -> None:
                 ),
             )
         msg = str(exc.value)
-        # Either the CHECK clause name or the column name should appear.
         assert "CHECK" in msg or "payload" in msg, f"unexpected error: {msg!r}"
     finally:
         conn.close()
 
 
-def test_ascii_payload_at_byte_cap(team_db: str) -> None:
-    """Boundary: exactly 8192 ASCII bytes lands; 8193 raises."""
-    at_cap = "a" * PAYLOAD_MAX_BYTES
-    assert len(at_cap.encode("utf-8")) == PAYLOAD_MAX_BYTES
-    r = send(
+def test_referencing_threshold_boundary(team_db: str) -> None:
+    """Referencing boundary is the REF THRESHOLD, not the 8 KiB wire cap.
+
+    * A payload AT the threshold is still shipped INLINE (payload_ref NULL).
+    * A payload OVER the threshold (incl. one over the old 8 KiB cap, and one
+      strictly between threshold and cap) is REFERENCED out-of-band
+      (payload_ref set, in-band payload is the stub) and is NO LONGER rejected.
+    """
+
+    def _row(seq: int) -> sqlite3.Row:
+        conn = sqlite3.connect(team_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            return conn.execute(
+                "SELECT payload, payload_ref FROM bridge_messages WHERE team_id=? AND seq=?",
+                ("T1", seq),
+            ).fetchone()
+        finally:
+            conn.close()
+
+    # AT threshold → inline, no ref.
+    inline = "a" * PAYLOAD_REF_THRESHOLD_BYTES
+    r1 = send(
         team_db,
         team_id="T1",
         recipient="team-lead",
         sender_id="backend-engineer-1",
         kind="reply",
-        payload=at_cap,
+        payload=inline,
     )
-    assert r["seq"] == 1
-    assert r["deduped"] is False
+    assert r1["deduped"] is False
+    row1 = _row(r1["seq"])
+    assert row1["payload"] == inline
+    assert row1["payload_ref"] is None
 
-    over_cap = "b" * (PAYLOAD_MAX_BYTES + 1)
-    with pytest.raises(PayloadTooLargeError):
-        send(
-            team_db,
-            team_id="T1",
-            recipient="team-lead",
-            sender_id="backend-engineer-1",
-            kind="reply",
-            payload=over_cap,
-        )
+    # Between threshold and wire cap → referenced (context-savings, not just
+    # cap-escape: this payload would fit inline but we still externalize it).
+    mid = "b" * (PAYLOAD_MAX_BYTES - 1)
+    r2 = send(
+        team_db,
+        team_id="T1",
+        recipient="team-lead",
+        sender_id="backend-engineer-1",
+        kind="reply",
+        payload=mid,
+    )
+    row2 = _row(r2["seq"])
+    assert row2["payload_ref"] == bridge_payloads.compute_sha256(mid)
+    assert len(row2["payload"].encode("utf-8")) <= PAYLOAD_MAX_BYTES
+
+    # Over the old 8 KiB wire cap → no longer raises; referenced.
+    over_cap = "c" * (PAYLOAD_MAX_BYTES + 1)
+    r3 = send(
+        team_db,
+        team_id="T1",
+        recipient="team-lead",
+        sender_id="backend-engineer-1",
+        kind="reply",
+        payload=over_cap,
+    )
+    row3 = _row(r3["seq"])
+    assert row3["payload_ref"] == bridge_payloads.compute_sha256(over_cap)
+    conn = sqlite3.connect(team_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        assert bridge_payloads.get(conn, "T1", row3["payload_ref"]) == over_cap
+    finally:
+        conn.close()
+
+
+def test_referenced_payload_idempotent_replay_same_ref_no_restore(team_db: str) -> None:
+    """A referenced send replayed under the same idempotency_key returns the
+    SAME seq + the SAME payload_ref, and does NOT re-store the body.
+
+    This is the load-bearing replay invariant for out-of-band referencing:
+    the fast-path short-circuit returns the prior row before any store-write,
+    and even the content-addressed INSERT OR IGNORE would be a no-op, so the
+    bridge_payloads row count must not increment on replay.
+    """
+    ulid = "01H8XGJWBWBAJ1MNOPQRSTUVWX"  # 26 chars
+    body = "z" * (PAYLOAD_MAX_BYTES + 100)  # over the wire cap → referenced
+
+    first = send(
+        team_db,
+        team_id="T1",
+        recipient="team-lead",
+        sender_id="backend-engineer-1",
+        kind="reply",
+        payload=body,
+        idempotency_key=ulid,
+    )
+    assert first["deduped"] is False
+
+    def _store_count() -> int:
+        conn = sqlite3.connect(team_db)
+        try:
+            return conn.execute(
+                "SELECT COUNT(*) FROM bridge_payloads WHERE team_id=?", ("T1",)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    assert _store_count() == 1
+
+    replay = send(
+        team_db,
+        team_id="T1",
+        recipient="team-lead",
+        sender_id="backend-engineer-1",
+        kind="reply",
+        payload=body,
+        idempotency_key=ulid,
+    )
+    assert replay["deduped"] is True
+    assert replay["seq"] == first["seq"]
+    # Replay re-stored nothing — content-address dedup + fast-path short-circuit.
+    assert _store_count() == 1
+
+    # Both the original and the replay resolve to the same content address.
+    conn = sqlite3.connect(team_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT payload_ref FROM bridge_messages WHERE team_id=? AND seq=?",
+            ("T1", first["seq"]),
+        ).fetchone()
+        assert row["payload_ref"] == bridge_payloads.compute_sha256(body)
+    finally:
+        conn.close()
 
 
 # ── Tests: H7 secret roundtrip with trailing newline ──────────────────────

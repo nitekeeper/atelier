@@ -54,6 +54,56 @@ from scripts.dispatch import RULES_SKILL, TERMINAL_STATUSES
 # ("Empty array allowed only for `blocked`/`needs-input`.").
 _ARTIFACTS_OPTIONAL_STATUSES: frozenset[str] = frozenset({"blocked", "needs-input"})
 
+# ── Reference-stub artifact (cycle-1 payload referencing) ──────────────────
+#
+# An artifact entry may be EITHER the legacy file shape
+# (``{"path": ..., "sha": ...}``) OR a first-class *reference-stub* shape that
+# points at an out-of-band body persisted in the content-addressed
+# ``bridge_payloads`` store (``scripts/bridge_payloads.py``) — the same sha256
+# bridge_send records in ``bridge_messages.payload_ref``. The ref shape lets a
+# worker close a task whose deliverable is a large referenced body WITHOUT
+# inlining that body into the envelope.
+#
+# Recognition is PURELY STRUCTURAL — :func:`is_reference_artifact` checks shape
+# only and NEVER dereferences the store (validate_envelope stays a pure,
+# offline ``dict -> dict``). A declared-but-malformed ref (``kind == "ref"`` yet
+# no content address) is rejected so a dangling/hollow ref cannot satisfy the
+# artifacts-non-empty contract and hide hollow work; the *liveness* of the ref
+# (is the sha actually present in the store?) is verified later, at resolve
+# time, by bridge_read — never here.
+_REF_ARTIFACT_KIND = "ref"
+
+
+def _declares_ref_kind(artifact: Any) -> bool:
+    """True iff ``artifact`` is a mapping that DECLARES itself a ref stub.
+
+    Declaration is the ``kind == "ref"`` discriminator alone — it says nothing
+    about whether the ref is well-formed (see :func:`is_reference_artifact`).
+    """
+    return isinstance(artifact, Mapping) and artifact.get("kind") == _REF_ARTIFACT_KIND
+
+
+def is_reference_artifact(artifact: Any) -> bool:
+    """Return whether ``artifact`` is a WELL-FORMED first-class ref-stub artifact.
+
+    A well-formed ref artifact is a mapping with ``kind == "ref"`` AND a present,
+    non-empty string ``sha256`` content address (the coordinate
+    ``scripts.bridge_payloads`` keys a body by, mirrored in
+    ``bridge_messages.payload_ref``). Optional companion fields (``tag``,
+    ``bytes``/``byte_len``, ``team_id``) are accepted permissively and not
+    required.
+
+    STRUCTURAL ONLY: this never opens the store / dereferences the sha — a ref
+    can be well-formed here yet dangling in the store, which resolve-time
+    (bridge_read) catches fail-closed. Keeping it pure preserves the
+    offline-``dict -> dict`` contract of :func:`validate_envelope`.
+    """
+    if not _declares_ref_kind(artifact):
+        return False
+    sha256 = artifact.get("sha256")
+    return isinstance(sha256, str) and bool(sha256.strip())
+
+
 # Anchor for the abandon-grammar regex line inside the rules SKILL fenced block.
 # The line IS the regex (see SKILL "Abandon grammar (regex)").
 _ABANDON_ANCHOR = "^ABANDON: (?P<category>"
@@ -154,7 +204,13 @@ def validate_envelope(
     3. ``attempt`` present AND equals ``dispatched_attempt`` (string-normalized)
     4. ``status`` in :data:`TERMINAL_STATUSES` (rejects unknown/extra tokens)
     5. ``artifacts`` is a list; non-empty UNLESS ``status`` is ``blocked`` or
-       ``needs-input``
+       ``needs-input``. Each entry may be a legacy file artifact
+       (``{"path", "sha"}``) OR a first-class reference-stub artifact
+       (``{"kind": "ref", "sha256": ...}`` — see :func:`is_reference_artifact`),
+       which counts toward non-empty WITHOUT inlining the referenced body. An
+       entry that DECLARES ``kind == "ref"`` but lacks a ``sha256`` content
+       address is rejected (a dangling/hollow ref must not mask hollow work);
+       the ref is NEVER dereferenced here (resolve-time verifies liveness).
     6. when ``status == "abandoned"``: line 1 of ``notes_md`` matches
        :data:`ABANDON_RE` (the offending line is echoed in the diagnostic)
 
@@ -216,6 +272,26 @@ def validate_envelope(
             expected=f"non-empty list (empty allowed only for {sorted(_ARTIFACTS_OPTIONAL_STATUSES)})",
             got=artifacts,
         )
+    # First-class ref-stub artifacts (cycle-1 payload referencing): a ref
+    # artifact is permissively accepted and COUNTS toward artifacts-non-empty
+    # WITHOUT carrying inline content. The only added teeth are structural —
+    # an entry that DECLARES itself a ref (``kind == "ref"``) MUST be
+    # well-formed (a present sha256 content address); a dangling/hollow ref is
+    # rejected so it cannot silently satisfy the non-empty contract and mask
+    # hollow work. Non-ref shapes (legacy ``{path, sha}``, etc.) are untouched —
+    # the acceptor branches on shape and adds NO new rejection for them. The
+    # check is structural only; the store is NEVER dereferenced here (resolve
+    # time / bridge_read verifies liveness fail-closed).
+    for index, artifact in enumerate(artifacts):
+        if _declares_ref_kind(artifact) and not is_reference_artifact(artifact):
+            raise EnvelopeValidationError(
+                field="artifacts",
+                expected=(
+                    f"artifacts[{index}] declares kind=='{_REF_ARTIFACT_KIND}' so it MUST carry a "
+                    "non-empty 'sha256' content address (structural; not dereferenced here)"
+                ),
+                got=artifact,
+            )
 
     # 6. abandoned → notes_md line 1 must match the single-sourced grammar.
     if status == "abandoned":

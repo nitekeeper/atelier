@@ -25,10 +25,13 @@ from __future__ import annotations
 
 import pytest
 
+from scripts import dispatch as _dispatch
+from scripts import pm_dispatch_envelope as _pde
 from scripts.dispatch import TERMINAL_STATUSES
 from scripts.pm_dispatch_envelope import (
     ABANDON_RE,
     EnvelopeValidationError,
+    is_reference_artifact,
     validate_envelope,
 )
 
@@ -292,3 +295,180 @@ def test_fail_closed_invalid_envelope_never_returns_done(env):
     with pytest.raises(EnvelopeValidationError):
         result = validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
     assert result is None
+
+
+# ── AI-2C — reference-stub artifact is a first-class envelope shape ─────────
+#
+# Cycle-1 payload referencing: a worker may close a task whose deliverable is a
+# large out-of-band body by emitting a REF-stub artifact
+# (`{"kind": "ref", "sha256": ...}`) instead of inlining the body. These tests
+# bind: (1) a ref artifact validates as first-class WITHOUT inline content;
+# (2) it counts toward artifacts-non-empty; (3) the terminal-status + non-empty
+# contract is preserved; (4) the single-sourced grammars (ABANDON_RE /
+# TERMINAL_STATUSES) are NOT re-typed; (5) validation stays PURE — a ref is
+# never dereferenced (no DB), so an unresolvable sha still validates.
+
+
+def _ref_artifact(**overrides) -> dict:
+    """A well-formed reference-stub artifact (kind=='ref' + sha256 address)."""
+    art = {
+        "kind": "ref",
+        "sha256": "a" * 64,
+        "bytes": 16384,
+        "tag": "@ref:team-x/12/result",
+    }
+    art.update(overrides)
+    return art
+
+
+def test_ref_stub_artifact_validates_as_first_class():
+    """A `done` envelope whose artifact is a ref stub (no `path`, no inline
+    body) validates — the ref shape is first-class, not coerced to a file
+    artifact."""
+    env = _good_envelope(status="done", artifacts=[_ref_artifact()])
+    result = validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
+    assert result["status"] == "done"
+    assert result["artifacts"][0]["kind"] == "ref"
+    # No inline content was forced onto the ref artifact.
+    assert "path" not in result["artifacts"][0]
+
+
+def test_ref_artifact_counts_as_non_empty_artifact():
+    """A ref stub as the SOLE artifact satisfies the artifacts-non-empty rule
+    for a terminal `done` status (it counts, without inlining a body)."""
+    env = _good_envelope(status="done", artifacts=[_ref_artifact()])
+    result = validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
+    assert len(result["artifacts"]) == 1
+
+
+def test_mixed_file_and_ref_artifacts_validate():
+    """Legacy file artifacts and ref artifacts coexist in one list (the
+    acceptor branches on shape — neither shape is rejected)."""
+    env = _good_envelope(
+        status="done",
+        artifacts=[{"path": "scripts/foo.py", "sha": "abc123"}, _ref_artifact()],
+    )
+    result = validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
+    assert len(result["artifacts"]) == 2
+
+
+def test_is_reference_artifact_recognizer():
+    """The public recognizer accepts a well-formed ref and rejects everything
+    that is not a well-formed ref — purely structurally."""
+    assert is_reference_artifact(_ref_artifact()) is True
+    # Legacy file artifact is NOT a ref.
+    assert is_reference_artifact({"path": "a", "sha": "b"}) is False
+    # Declares ref kind but missing the sha256 content address → not well-formed.
+    assert is_reference_artifact({"kind": "ref"}) is False
+    assert is_reference_artifact({"kind": "ref", "sha256": ""}) is False
+    assert is_reference_artifact({"kind": "ref", "sha256": "   "}) is False
+    assert is_reference_artifact({"kind": "ref", "sha256": 123}) is False
+    # Non-mappings are never refs.
+    assert is_reference_artifact("not-a-mapping") is False
+    assert is_reference_artifact(None) is False
+
+
+def test_rejects_declared_ref_without_sha256():
+    """An entry that DECLARES kind=='ref' but carries no sha256 content address
+    is a dangling/hollow ref — rejected so it cannot satisfy artifacts-non-empty
+    and mask hollow work. The diagnostic is artifacts-named."""
+    env = _good_envelope(status="done", artifacts=[{"kind": "ref"}])
+    with pytest.raises(EnvelopeValidationError) as exc:
+        validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
+    assert exc.value.field == "artifacts"
+
+
+def test_rejects_declared_ref_with_empty_sha256():
+    """An empty/blank sha256 on a declared ref is structurally hollow → reject."""
+    env = _good_envelope(status="done", artifacts=[_ref_artifact(sha256="")])
+    with pytest.raises(EnvelopeValidationError) as exc:
+        validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
+    assert exc.value.field == "artifacts"
+
+
+def test_dangling_ref_still_rejected_when_sole_artifact_on_done():
+    """The hollow-work guard holds even when the malformed ref is the ONLY
+    artifact: a `done` envelope is NOT closed on a hollow ref."""
+    result = None
+    env = _good_envelope(status="done", artifacts=[{"kind": "ref", "sha256": ""}])
+    with pytest.raises(EnvelopeValidationError):
+        result = validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
+    assert result is None
+
+
+def test_terminal_status_contract_preserved_with_ref_artifacts():
+    """Ref artifacts do not relax the status contract: empty artifacts still
+    rejected on `done`; still allowed on blocked/needs-input."""
+    # Empty still rejected on done even though ref shape now exists.
+    with pytest.raises(EnvelopeValidationError):
+        validate_envelope(
+            _good_envelope(status="done", artifacts=[]),
+            dispatched_task_id=7,
+            dispatched_attempt=1,
+        )
+    # blocked with empty artifacts still OK.
+    result = validate_envelope(
+        _good_envelope(status="blocked", artifacts=[]),
+        dispatched_task_id=7,
+        dispatched_attempt=1,
+    )
+    assert result["status"] == "blocked"
+
+
+def test_abandoned_with_ref_artifact_still_binds_abandon_grammar():
+    """A ref artifact does not bypass the abandon-grammar gate on `abandoned`."""
+    good = _good_envelope(
+        status="abandoned",
+        artifacts=[_ref_artifact()],
+        notes_md="ABANDON: scope:out of cycle-1 scope",
+    )
+    assert (
+        validate_envelope(good, dispatched_task_id=7, dispatched_attempt=1)["status"] == "abandoned"
+    )
+    bad = _good_envelope(status="abandoned", artifacts=[_ref_artifact()], notes_md="gave up")
+    with pytest.raises(EnvelopeValidationError) as exc:
+        validate_envelope(bad, dispatched_task_id=7, dispatched_attempt=1)
+    assert exc.value.field == "notes_md"
+
+
+# ── AI-2C — single-sourced grammars are imported, NOT re-typed ──────────────
+
+
+def test_terminal_statuses_is_imported_not_retyped():
+    """`pm_dispatch_envelope.TERMINAL_STATUSES` is the SAME object imported from
+    `scripts.dispatch` — not a re-typed Python literal (single-source contract).
+    """
+    assert _pde.TERMINAL_STATUSES is _dispatch.TERMINAL_STATUSES
+
+
+def test_abandon_re_remains_single_sourced_from_skill():
+    """`ABANDON_RE` is derived from the rules SKILL fence at import (not a
+    re-typed literal): its pattern is anchored on the SKILL anchor string."""
+    assert _pde.ABANDON_RE.pattern.startswith("^ABANDON: (?P<category>")
+    # The module derives it via the SKILL-reading loader, not a module-level literal.
+    assert _pde._extract_abandon_regex.__module__ == "scripts.pm_dispatch_envelope"
+
+
+# ── AI-2C — validation stays PURE: a ref is never dereferenced (no DB) ──────
+
+
+def test_validation_never_dereferences_ref_no_db():
+    """A ref whose sha256 resolves to NOTHING (there is no store/DB in this
+    pure layer at all) STILL validates — proving validate_envelope performs no
+    dereference / DB access. Liveness is a resolve-time (bridge_read) concern."""
+    env = _good_envelope(
+        status="done",
+        artifacts=[_ref_artifact(sha256="f" * 64, tag="@ref:nonexistent/0/missing")],
+    )
+    result = validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
+    assert result["status"] == "done"
+
+
+def test_pm_dispatch_envelope_imports_no_db_layer():
+    """The pure layer binds NO persistence/store/DB symbol — there is no code
+    path that could dereference a ref during validation. We inspect the module's
+    actual bound names, NOT source substrings (the store is named in prose
+    comments, which is fine and expected)."""
+    assert not hasattr(_pde, "sqlite3")
+    assert not hasattr(_pde, "bridge_payloads")
+    assert not hasattr(_pde, "connect")

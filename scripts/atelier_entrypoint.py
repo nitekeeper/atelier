@@ -29,6 +29,7 @@ Memex check into the `prompt-migration` path, which doesn't need it.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -142,6 +143,7 @@ def build_wave_dispatcher(
     env: Mapping[str, str] | None = None,
     root: str | Path = ".",
     model_for: Callable[[Mapping[str, Any], int], str | None] | None = None,
+    summarize_fn: Callable[[list[Mapping[str, Any]]], str] | None = None,
 ):
     """Construct a live, mode-selected ``WaveDispatcher`` bound to the
     production queue-bridge transport (atelier#81).
@@ -216,9 +218,22 @@ def build_wave_dispatcher(
 
     # escalate_fn is the single unconditional path: pass it through when given,
     # else fall back to the engine's guaranteed-emitting default (no branch).
+    # summarize_fn (wave-summary context compression) + env are threaded as
+    # additive, back-compatible kwargs: `None` summarize_fn → the engine's
+    # deterministic `default_wave_digest`; env carries ATELIER_COMPRESS_THRESHOLD.
+    wd_kwargs: dict[str, Any] = {
+        "spawn_fn": spawn_fn,
+        "poll_fn": poll_fn,
+        "summarize_fn": summarize_fn,
+    }
     if escalate_fn is not None:
-        return WaveDispatcher(db_path, spawn_fn=spawn_fn, poll_fn=poll_fn, escalate_fn=escalate_fn)
-    return WaveDispatcher(db_path, spawn_fn=spawn_fn, poll_fn=poll_fn)
+        wd_kwargs["escalate_fn"] = escalate_fn
+    # Fall back to os.environ (mirrors build_spawn_fn_for_project) so a shell-set
+    # ATELIER_COMPRESS_THRESHOLD still wins in the production caller, which passes
+    # env=None. WaveDispatcher's own env=None default stays default-only, so
+    # direct-construction unit tests remain isolated from the ambient shell.
+    wd_kwargs["env"] = env if env is not None else os.environ
+    return WaveDispatcher(db_path, **wd_kwargs)
 
 
 # ── Default per-task model-tier seam (atelier model-tier selection) ─────────
@@ -247,8 +262,6 @@ def _default_model_for(
     Defensive: a task without ``assigned_to`` / ``difficulty`` simply omits that
     signal; ``recommend`` always returns a valid tier (never raises).
     """
-    import os
-
     from scripts.model_tier import recommend
 
     resolved_env: Mapping[str, str] = env if env is not None else os.environ
@@ -297,6 +310,7 @@ def build_wave_dispatcher_for_project(
     sleep_fn: Callable[[float], None] | None = None,
     phase: str | None = None,
     model_for: Callable[[Mapping[str, Any], int], str | None] | None = None,
+    summarize_fn: Callable[[list[Mapping[str, Any]]], str] | None = None,
 ):
     """Build the live, mode-selected ``WaveDispatcher`` for one cycle from an
     orchestrator/project context (atelier#85 — the missing #81 call site).
@@ -388,4 +402,12 @@ def build_wave_dispatcher_for_project(
         kwargs["escalate_fn"] = escalate_fn
     if sleep_fn is not None:
         kwargs["sleep_fn"] = sleep_fn
+    # Wave-summary context compression seam (additive, back-compatible). `None`
+    # → the engine's deterministic `default_wave_digest` (no LLM dependency); a
+    # caller may inject a real summarizer later through this same seam. `env` is
+    # threaded so the ATELIER_COMPRESS_THRESHOLD override is honored.
+    kwargs["summarize_fn"] = summarize_fn
+    # Fall back to os.environ so a shell-set ATELIER_COMPRESS_THRESHOLD wins in the
+    # production caller (which passes env=None) — mirrors build_spawn_fn_for_project.
+    kwargs["env"] = env if env is not None else os.environ
     return WaveDispatcher(db_path, **kwargs)

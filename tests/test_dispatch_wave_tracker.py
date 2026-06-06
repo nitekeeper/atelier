@@ -2,7 +2,7 @@
 
 WaveTracker is the in-process bookkeeper for which expected
 participants of a wave have reported a terminal envelope status
-(``done|blocked|abandoned|needs-input``, per TM-006). Foundational
+(``done|blocked|abandoned|needs-input|failed``, per TM-006). Foundational
 scaffolding — the wave-5 scheduler will replace it with a DB-backed
 read of the durable task_results table, but the public surface tested
 here MUST remain stable so call sites do not have to change.
@@ -12,7 +12,21 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.dispatch import TERMINAL_STATUSES, WaveTracker
+from scripts.dispatch import TERMINAL_ONLY_STATUSES, TERMINAL_STATUSES, WaveTracker
+
+
+def test_terminal_status_token_set_is_exact() -> None:
+    """EXACT token-set pin (single-source guard). TM-006's closure tokens are the
+    five values below; `failed` is the terminal-ONLY hard-failure addition (the
+    bounded + hardened path). If anyone re-types or drops a token this assertion
+    fails loudly rather than letting the set silently drift."""
+    assert frozenset({"done", "blocked", "abandoned", "needs-input", "failed"}) == TERMINAL_STATUSES
+    # The terminal-ONLY closure set: done | abandoned | failed (all CLOSE a wave).
+    assert frozenset({"done", "abandoned", "failed"}) == TERMINAL_ONLY_STATUSES
+    # failed is terminal-only; blocked/needs-input are NOT (they HOLD the barrier).
+    assert "failed" in TERMINAL_ONLY_STATUSES
+    assert "blocked" not in TERMINAL_ONLY_STATUSES
+    assert "needs-input" not in TERMINAL_ONLY_STATUSES
 
 
 def _new_tracker() -> WaveTracker:
@@ -22,7 +36,8 @@ def _new_tracker() -> WaveTracker:
 
 
 def test_record_accepts_terminal_status() -> None:
-    """The four TM-006 closure tokens must all be acceptable inputs."""
+    """Every TM-006 closure token must be an acceptable input (iterates the
+    single-sourced TERMINAL_STATUSES, so the new `failed` token is covered)."""
     tracker = _new_tracker()
     for status in sorted(TERMINAL_STATUSES):
         # Reuse the same role_id; we are exercising the status validator,
@@ -81,6 +96,12 @@ def test_terminal_only_requires_done_or_abandoned() -> None:
 
     # Move sdet-1 to abandoned — now terminal_only flips True.
     tracker.record("sdet-1", "abandoned")
+    assert tracker.terminal_only() is True
+
+    # `failed` is also terminal-only: a wave where every member is done/failed
+    # closes (record accepts it, terminal_only stays True).
+    tracker.record("backend-engineer-1", "failed")
+    tracker.record("sdet-1", "failed")
     assert tracker.terminal_only() is True
 
 

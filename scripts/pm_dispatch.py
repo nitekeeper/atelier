@@ -90,6 +90,7 @@ from scripts.dispatch import (
     TERMINAL_ONLY_STATUSES,
     DispatchError,
     WaveTracker,
+    _valid_positive_int_env,
 )
 from scripts.pm_dispatch_envelope import (
     ABANDON_RE,
@@ -127,6 +128,34 @@ POLL_INTERVAL_S = 0.2
 #: ``abandoned`` (see migration 006 wave-ordering predicate). Mirrors that
 #: predicate so pre-flight and partitioning agree with the durable backend.
 _DB_TERMINAL_STATUSES: frozenset[str] = frozenset({"complete", "abandoned"})
+
+#: Wave-summary context-compression threshold, BYTES. When the accumulated
+#: verbatim reply bytes for a just-finished wave exceed this, the verbatim
+#: bodies are replaced by a deterministic digest in that wave's summary (the
+#: PROACTIVE trigger). 16 KiB is a generous default — small waves never cross
+#: it, so default behavior is byte-identical to pre-feature. Tunable per run via
+#: ``ATELIER_COMPRESS_THRESHOLD`` (a valid non-negative int, else ignored —
+#: reuses :func:`scripts.dispatch._valid_positive_int_env`'s valid-or-ignore
+#: posture, so a typo never changes behavior). The accumulator measures only
+#: ``notes_md`` + ``repr(artifacts)`` bytes — the verbatim bulk this feature
+#: compresses — NOT the small constant-size metadata (type/task_id/attempt/
+#: status) the digest always preserves.
+COMPRESSION_THRESHOLD_BYTES = 16384
+
+#: Env override for :data:`COMPRESSION_THRESHOLD_BYTES`. A valid non-negative
+#: int wins; blank/garbage/negative is ignored (valid-or-ignore).
+COMPRESS_THRESHOLD_ENV = "ATELIER_COMPRESS_THRESHOLD"
+
+#: Head/tail slice cap (chars) applied to each retained ``notes_md`` in the
+#: deterministic digest. Mirrors :data:`scripts.status._ARTIFACT_PREVIEW_CAP`'s
+#: 200-char truncation idiom — a generous-but-bounded preview that makes the
+#: verbatim bulk materially smaller without dropping the human-readable lede.
+#: NOTE: this caps by CHARACTER count, whereas the proactive TRIGGER accumulates
+#: by UTF-8 BYTES (``_wave_reply_bytes``). The two units differ for multibyte
+#: content, which is fine: the trigger is a conservative byte-budget gate and the
+#: cap is a per-notes preview bound — the digest stays materially smaller either
+#: way (asserted by ``test_default_wave_digest_materially_smaller``).
+_DIGEST_NOTES_CAP = 200
 
 
 # ── Exceptions ──────────────────────────────────────────────────────────────
@@ -266,6 +295,87 @@ def _parse_abandon_category(notes_md: str) -> str:
     return match.group("category") if match else "capacity"
 
 
+# ── Wave-summary context compression (deterministic, no-LLM default) ─────────
+
+
+def _digest_notes(notes_md: str, status: str) -> str:
+    """Compress ``notes_md`` to a bounded head+tail preview with a truncation
+    marker (mirrors :func:`scripts.status._truncate`'s ``…(+N more)`` idiom).
+
+    INVARIANT for ``status == "abandoned"``: line 1 is preserved VERBATIM and
+    is NEVER cut, because :func:`_parse_abandon_category` re-parses it against
+    the single-sourced :data:`~scripts.pm_dispatch_envelope.ABANDON_RE` grammar
+    downstream. The head/tail compression applies only to the bulk BELOW line 1
+    on an abandoned envelope; on any other status the whole body is compressed.
+
+    Pure + deterministic: same input → same output, no clock, no IO.
+    """
+    if status == "abandoned":
+        lines = notes_md.splitlines()
+        first_line = lines[0] if lines else ""
+        rest = "\n".join(lines[1:])
+        if not rest:
+            return first_line
+        return f"{first_line}\n{_head_tail(rest, _DIGEST_NOTES_CAP)}"
+    return _head_tail(notes_md, _DIGEST_NOTES_CAP)
+
+
+def _head_tail(text: str, cap: int) -> str:
+    """Keep the first ``cap`` chars + the last ``cap`` chars of ``text`` with an
+    explicit ``…(+N more)…`` marker naming the elided byte-count. When the text
+    already fits in ``2 * cap`` it is returned unchanged (no marker — nothing was
+    cut). Pure; mirrors status.py's truncation-is-explicit posture."""
+    if len(text) <= cap * 2:
+        return text
+    elided = len(text) - cap * 2
+    return f"{text[:cap]}…(+{elided} more)…{text[-cap:]}"
+
+
+def _digest_artifacts(artifacts: Any) -> str:
+    """Summarize an envelope's ``artifacts`` as ``count + paths`` rather than the
+    verbatim entries. Untrusted DATA — entries are only stringified, never
+    executed (mirrors :func:`scripts.status._render_artifact`). Pure."""
+    if not isinstance(artifacts, list):
+        return "artifacts=0"
+    paths: list[str] = []
+    for entry in artifacts:
+        if isinstance(entry, Mapping) and entry.get("path") is not None:
+            paths.append(str(entry.get("path")))
+        else:
+            paths.append(repr(entry))
+    return f"artifacts={len(artifacts)} [{', '.join(paths)}]"
+
+
+def default_wave_digest(envelopes: Sequence[Mapping[str, Any]]) -> str:
+    """Deterministic, pure, NO-LLM digest of a wave's retained reply envelopes.
+
+    This is the production fallback for the injected ``summarize_fn`` seam: it
+    replaces the verbatim bulk bodies that piled up across a wave with a
+    byte-budgeted summary, while PRESERVING every field the downstream judge /
+    abandonment path needs — ``task_id``, ``attempt``, ``status`` are kept
+    verbatim, and for an ``abandoned`` envelope line 1 of ``notes_md`` is kept
+    verbatim (it must still match :data:`~scripts.pm_dispatch_envelope.ABANDON_RE`
+    when re-parsed). ``notes_md`` bulk is head/tail-sliced and ``artifacts`` are
+    collapsed to count + paths.
+
+    Deterministic + pure: same envelope list → byte-identical digest string, no
+    clock, no IO, no tokenizer dependency. Materially smaller than the verbatim
+    input on any wave large enough to cross the byte threshold.
+    """
+    blocks: list[str] = []
+    for env in envelopes:
+        task_id = env.get("task_id")
+        attempt = env.get("attempt")
+        status = env.get("status")
+        notes_md = env.get("notes_md")
+        notes = _digest_notes(notes_md if isinstance(notes_md, str) else "", str(status))
+        arts = _digest_artifacts(env.get("artifacts"))
+        blocks.append(
+            f"task_id={task_id!r} attempt={attempt!r} status={status!r}\n  {arts}\n  notes: {notes}"
+        )
+    return "\n".join(blocks)
+
+
 # ── In-flight bookkeeping ────────────────────────────────────────────────────
 
 
@@ -330,6 +440,8 @@ class WaveDispatcher:
         escalate_fn: Callable[[Mapping[str, Any]], None] = _default_escalate,
         clock: Callable[[], float] = time.monotonic,
         sleep_fn: Callable[[float], None] = time.sleep,
+        summarize_fn: Callable[[list[Mapping[str, Any]]], str] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self.db_path = db_path
         self._spawn_fn = spawn_fn if spawn_fn is not None else self._unset_spawn
@@ -337,12 +449,42 @@ class WaveDispatcher:
         self._escalate_fn = escalate_fn
         self.clock = clock
         self.sleep_fn = sleep_fn
+        #: Wave-summary compression seam (atelier wave-summary context
+        #: compression). ``summarize_fn(retained_envelopes) -> str`` produces the
+        #: digest emitted into a wave summary when the per-wave verbatim reply
+        #: bytes cross the threshold. ``None`` → the deterministic, no-LLM
+        #: :func:`default_wave_digest` (the feature is FUNCTIONAL in production
+        #: with no LLM dependency; a real Haiku summarizer can be injected later
+        #: through this SAME seam). The engine never spawns synchronously — this
+        #: seam is the only LLM door and it is opt-in.
+        self._summarize_fn = summarize_fn if summarize_fn is not None else default_wave_digest
+        #: Proactive compression threshold (bytes). Env ``ATELIER_COMPRESS_THRESHOLD``
+        #: (valid non-negative int) overrides the module default; garbage/blank/
+        #: negative is ignored (valid-or-ignore, reusing dispatch's helper).
+        resolved_env = env if env is not None else None
+        self._compress_threshold = (
+            _valid_positive_int_env(
+                resolved_env.get(COMPRESS_THRESHOLD_ENV), COMPRESSION_THRESHOLD_BYTES
+            )
+            if resolved_env is not None
+            else COMPRESSION_THRESHOLD_BYTES
+        )
         #: Every escalation emitted this run, in order (audit; item 8).
         self.escalations: list[dict[str, Any]] = []
         #: Task ids that ended ``abandoned`` (worker / budget / cascade) — the
         #: cascade-abandon source set, accumulated across waves.
         self.abandoned_ids: set[Any] = set()
         self._task_index: dict[Any, Mapping[str, Any]] = {}
+        #: Per-wave RETAINED validated envelope bodies (reset at each wave
+        #: boundary). ``_handle_envelope`` appends each validated envelope here as
+        #: it passes; the wave boundary digests them if the byte budget is
+        #: crossed. Today the engine DROPPED these (WaveTracker.reports keeps only
+        #: the status string), so replies accumulated only in the orchestrator's
+        #: CC context — this retains them in Python for the digest.
+        self._wave_envelopes: list[Mapping[str, Any]] = []
+        #: Accumulated verbatim reply bytes for the current wave
+        #: (``len(notes_md utf-8) + len(repr(artifacts))``), reset per wave.
+        self._wave_reply_bytes = 0
 
     # ── seam defaults (mode-agnostic engine has no spawner of its own) ──
 
@@ -375,6 +517,11 @@ class WaveDispatcher:
 
         summaries: list[dict[str, Any]] = []
         for index, wave in enumerate(waves):
+            # Reset the per-wave reply accumulators BEFORE dispatching this wave
+            # (the digest is per-wave; bytes/bodies never leak across the
+            # boundary).
+            self._wave_envelopes = []
+            self._wave_reply_bytes = 0
             tracker = WaveTracker(
                 wave_id=f"wave-{index}",
                 expected={str(_task_id(t)) for t in wave},
@@ -392,7 +539,14 @@ class WaveDispatcher:
                     f"(outstanding={sorted(tracker.outstanding())}); refusing to "
                     "advance — this is a scheduler bug, not a worker outcome."
                 )
-            summaries.append(tracker.summary())
+            summary = tracker.summary()
+            # Wave-summary context compression (PROACTIVE trigger): if this
+            # just-finished wave's accumulated verbatim reply bytes crossed the
+            # threshold, replace the verbatim bulk with a digest in the wave
+            # summary. Byte-IDENTICAL to pre-feature when the threshold is not
+            # crossed — no `compressed` key, no digest, summary untouched.
+            self._maybe_compress_wave(summary)
+            summaries.append(summary)
         return summaries
 
     # ── wave-level steps ────────────────────────────────────────────────
@@ -571,6 +725,14 @@ class WaveDispatcher:
             self._handle_failed_attempt(infl, f"invalid envelope: {exc}", tracker, pending)
             return
 
+        # Wave-summary context compression — RETAIN the validated envelope body
+        # for this wave + accumulate its verbatim reply bytes. (Today the engine
+        # drops the body; only the status string survives in WaveTracker.reports.
+        # Retaining here lets the wave boundary digest the bulk instead of letting
+        # it pile up unboundedly in the orchestrator's CC context.) Capture is
+        # pure bookkeeping — it routes NOTHING and changes NO status decision.
+        self._retain_envelope(validated)
+
         status = validated["status"]
         if status in TERMINAL_ONLY_STATUSES:
             if status == "abandoned":
@@ -583,6 +745,26 @@ class WaveDispatcher:
                     category=category,
                     attempt=infl.attempt,
                     last_status="abandoned",
+                    charge_attempt=False,
+                )
+                self.abandoned_ids.add(_task_id(infl.task))
+            elif status == "failed":
+                # Hard run-and-failed signal (bounded + hardened path): the worker
+                # RAN and hit a deterministic hard failure — distinct from the
+                # RETRYABLE blocked/needs-input. It is TERMINAL: record + escalate
+                # but DO NOT re-dispatch (a hard failure is not worth burning the
+                # remaining MAX_ATTEMPTS retries on). We route through the SAME
+                # _abandon_and_escalate path as abandoned (durable set_abandoned +
+                # guaranteed escalation) with category 'failed' so the wave closes
+                # deterministically. Attempt already charged at dispatch →
+                # charge_attempt=False. This adds NO new re-queue site (it only
+                # CLOSES), so the termination proof's single re-queue site
+                # (_handle_failed_attempt) is preserved.
+                self._abandon_and_escalate(
+                    infl.task,
+                    category="failed",
+                    attempt=infl.attempt,
+                    last_status="failed",
                     charge_attempt=False,
                 )
                 self.abandoned_ids.add(_task_id(infl.task))
@@ -599,13 +781,47 @@ class WaveDispatcher:
                 # Memex mode), so this call carries no mode-specific knowledge —
                 # the same contract that lets the abandon path stay engine-neutral.
                 tasks_mod.complete_task(self.db_path, _task_id(infl.task))
-            tracker.record(str(_task_id(infl.task)), status)  # done | abandoned
+            tracker.record(str(_task_id(infl.task)), status)  # done | abandoned | failed
         else:
             # blocked | needs-input — non-terminal, HOLDS the barrier. In v1
             # (no inline answer mechanism in the engine) an unanswered
             # blocked/needs-input is treated as a failed attempt: re-dispatch
             # until the budget is spent, then abandon. Keeps termination bounded.
             self._handle_failed_attempt(infl, f"non-terminal status {status!r}", tracker, pending)
+
+    # ── wave-summary context compression ─────────────────────────────────
+
+    def _retain_envelope(self, validated: Mapping[str, Any]) -> None:
+        """Retain a validated envelope for this wave + accumulate its verbatim
+        reply byte-size. Per the design, the accumulator measures only the
+        verbatim BULK this feature compresses — ``notes_md`` (utf-8) +
+        ``repr(artifacts)`` — never the small constant-size metadata. Pure
+        bookkeeping: appends to per-wave state, no routing, no IO."""
+        self._wave_envelopes.append(validated)
+        notes_md = validated.get("notes_md")
+        notes_bytes = len(notes_md.encode("utf-8")) if isinstance(notes_md, str) else 0
+        self._wave_reply_bytes += notes_bytes + len(repr(validated.get("artifacts")))
+
+    def _maybe_compress_wave(self, summary: dict[str, Any]) -> None:
+        """At the wave boundary, replace the verbatim reply bulk with a digest
+        IFF this wave's accumulated reply bytes crossed the threshold.
+
+        No-op (byte-identical to pre-feature) when the threshold is not crossed:
+        the summary is left untouched, no ``compressed`` / ``digest`` keys are
+        added. When crossed, ``summarize_fn`` (default
+        :func:`default_wave_digest`) is invoked ONCE for the wave over the
+        retained envelopes, and the digest is stored on the summary under
+        ``digest`` with a ``compressed`` flag + the pre-compression byte-count —
+        the verbatim bodies are NOT carried in the summary (they never were:
+        ``WaveTracker.summary`` only ever held status strings, so the metadata
+        the judge/abandonment path needs — status/task_id/attempt + abandon
+        line-1 — is preserved inside the digest, not the dropped bulk)."""
+        if self._wave_reply_bytes <= self._compress_threshold:
+            return
+        digest = self._summarize_fn(list(self._wave_envelopes))
+        summary["compressed"] = True
+        summary["reply_bytes"] = self._wave_reply_bytes
+        summary["digest"] = digest
 
     def _handle_failed_attempt(
         self,

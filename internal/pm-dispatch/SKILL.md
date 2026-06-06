@@ -20,7 +20,7 @@ companion to the docstrings in those modules — read both alongside this file.
 >   In Memex mode the dispatch-state mutators raise `NotImplementedError` —
 >   the engine is **Local-mode only** today (a documented followup).
 > - Companion contract: `internal/team-mode-rules/SKILL.md` (the reply-envelope
->   schema, the four closure tokens TM-006, and the single-sourced abandon
+>   schema, the TM-006 closure tokens, and the single-sourced abandon
 >   grammar — `ABANDON_RE` is compiled from that file at import).
 
 ## Hard gate

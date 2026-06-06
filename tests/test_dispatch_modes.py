@@ -519,6 +519,7 @@ from pathlib import Path  # noqa: E402
 from scripts.dispatch import (  # noqa: E402
     BRIDGE_REQUEST_KINDS,
     BridgeDispatchError,
+    BridgeTimeoutError,
     QueueBridgeDispatchTools,
     build_poll_fn,
 )
@@ -651,6 +652,60 @@ def test_create_team_times_out_and_raises_never_spins(bridge_db):
         tools.create_team("cycle-team", ["pm-1"])
     # The row is still pending (never serviced) — durable, not silently dropped.
     assert _rows(bridge_db, kind="create_team")[0]["status"] == "pending"
+
+
+def test_create_team_timeout_is_not_retried(bridge_db, monkeypatch):
+    """A timeout (nobody serviced the row) is FAIL-FAST — it must NOT be retried
+    even with retries configured. Retrying a timeout re-spends a fresh
+    PER_CALL_TIMEOUT_S per attempt and (with a non-advancing clock) spins the
+    inner poll forever — the regression that hung the suite. Assert
+    _create_team_once runs EXACTLY ONCE on a timeout regardless of the retry
+    budget. (A servicer-REPORTED 'error' IS still retried — see the e2e test.)"""
+    monkeypatch.setenv("ATELIER_BRIDGE_SPAWN_RETRIES", "3")  # would be 4 attempts if retried
+    # Strictly-advancing clock: each read jumps a full budget, so the deadline is
+    # crossed within the first attempt no matter how many internal reads (debounce
+    # window, poll) precede the check.
+    ticks = {"n": 0}
+
+    def fake_clock():
+        ticks["n"] += 1
+        return ticks["n"] * QueueBridgeDispatchTools.PER_CALL_TIMEOUT_S
+
+    tools = QueueBridgeDispatchTools(
+        "cycle-1", db_path=bridge_db, clock=fake_clock, sleep_fn=lambda _s: None
+    )
+    calls = {"n": 0}
+    real_once = tools._create_team_once
+
+    def counting_once(name, members):
+        calls["n"] += 1
+        return real_once(name, members)
+
+    monkeypatch.setattr(tools, "_create_team_once", counting_once)
+    with pytest.raises(BridgeTimeoutError, match="timed out"):
+        tools.create_team("cycle-team", ["pm-1"])
+    assert calls["n"] == 1  # EXACTLY one attempt — the timeout was not retried.
+
+
+def test_breaker_counts_logical_failures_not_internal_retries(bridge_db, monkeypatch):
+    """A single create_team that FULLY fails (1 initial + N retries) counts as
+    exactly ONE consecutive failure toward the breaker — not N+1. Otherwise one
+    dead-team create_team with retries=2 would trip a threshold-3 breaker on its
+    own. Guards MINOR-3 from the F9 review."""
+    monkeypatch.setenv("ATELIER_BRIDGE_SPAWN_RETRIES", "2")  # 1 initial + 2 retries
+    monkeypatch.setenv("ATELIER_BRIDGE_BREAKER_THRESHOLD", "3")
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, sleep_fn=lambda _s: None)
+
+    def always_servicer_error(name, members):
+        # A retryable servicer-REPORTED error (not a timeout) on every attempt.
+        raise BridgeDispatchError("create_team servicer error (injected)")
+
+    monkeypatch.setattr(tools, "_create_team_once", always_servicer_error)
+    with pytest.raises(BridgeDispatchError, match="servicer error"):
+        tools.create_team("cycle-team", ["pm-1"])
+    # ONE logical failure → counter == 1 (NOT spawn_retries+1 == 3); breaker stays
+    # below its threshold of 3, so a single dead team does not open it on its own.
+    assert tools._consecutive_failures == 1
 
 
 def test_create_team_raises_on_ready_without_team_id(bridge_db):
@@ -1075,3 +1130,189 @@ def test_queue_bridge_spawn_subagent_no_model_key_when_none(bridge_db):
     args = json.loads(rows[0]["args_json"])
     assert "model" not in args
     assert args == {"task_id": "task-7", "attempt": 2, "prompt": "PROMPT"}
+
+
+# ── bounded + hardened tool-call path: debounce / count-limit (unit) ─────────
+#
+# These exercise the REAL QueueBridgeDispatchTools._enqueue guards against the
+# real bridge_requests table. A manual clock makes the debounce sliding window
+# deterministic (no wall-sleep, no argless now()). Every test pins the relevant
+# ATELIER_BRIDGE_* env var so it is hermetic regardless of the ambient shell.
+
+
+class _ManualClock:
+    """A manually-advanceable monotonic clock (seconds). `advance` is the only
+    way time moves — mirrors test_pm_dispatch.FakeClock."""
+
+    def __init__(self, start: float = 1000.0):
+        self.t = float(start)
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += float(seconds)
+
+
+def test_debounce_drops_duplicate_identical_call_in_window(bridge_db, monkeypatch):
+    """Two IDENTICAL (kind, canonical-args) enqueues inside the window => the
+    second is DROPPED (no second INSERT) and returns the FIRST row id (idempotent
+    skip). A NOISE guard layered on top of idempotency — not a correctness mech."""
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "2000")
+    clock = _ManualClock()
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
+
+    # spawn_subagent is the ONLY debounced kind (its args carry `attempt`, so a
+    # genuine re-dispatch is a different key). Call it twice with IDENTICAL args.
+    args = {"prompt": "go", "attempt": 1, "task_id": "t-1"}
+    id1 = tools._enqueue("spawn_subagent", args)
+    clock.advance(0.5)  # still inside the 2000ms window
+    id2 = tools._enqueue("spawn_subagent", dict(args))
+
+    # EXACT-COUNT: the duplicate did NOT INSERT — exactly ONE row exists.
+    assert len(_rows(bridge_db, kind="spawn_subagent")) == 1
+    # The debounced call returns the FIRST row id (caller sees a successful enqueue).
+    assert id2 == id1
+
+
+def test_debounce_does_not_drop_after_window_elapses(bridge_db, monkeypatch):
+    """Once the window elapses, an identical call enqueues AGAIN (the guard is a
+    sliding window, not a permanent dedupe)."""
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "2000")
+    clock = _ManualClock()
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
+
+    tools._enqueue("send_message", {"team_id": "T", "to": "sdet-1", "message": "go"})
+    clock.advance(2.5)  # PAST the 2000ms window
+    tools._enqueue("send_message", {"team_id": "T", "to": "sdet-1", "message": "go"})
+
+    assert len(_rows(bridge_db, kind="send_message")) == 2
+
+
+def test_debounce_never_swallows_a_wave_retry_different_attempt(bridge_db, monkeypatch):
+    """CRITICAL: a legitimate WaveDispatcher re-dispatch carries a DIFFERENT
+    `attempt` in args => different canonical key => NEVER debounced. Two spawns
+    that differ ONLY in attempt both enqueue, even inside the window."""
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "2000")
+    clock = _ManualClock()
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
+
+    tools.spawn_subagent("task-7", 1, "PROMPT")
+    clock.advance(0.1)  # well inside the window
+    tools.spawn_subagent("task-7", 2, "PROMPT")  # attempt differs => different key
+
+    rows = _rows(bridge_db, kind="spawn_subagent")
+    assert len(rows) == 2
+    assert sorted(json.loads(r["args_json"])["attempt"] for r in rows) == [1, 2]
+
+
+def test_debounce_disabled_when_window_zero(bridge_db, monkeypatch):
+    """ATELIER_BRIDGE_DEBOUNCE_MS=0 disables debounce entirely (no drop)."""
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
+    clock = _ManualClock()
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
+    tools._enqueue("send_message", {"team_id": "T", "to": "x", "message": "m"})
+    tools._enqueue("send_message", {"team_id": "T", "to": "x", "message": "m"})
+    assert len(_rows(bridge_db, kind="send_message")) == 2
+
+
+def test_debounce_env_garbage_is_ignored_uses_default(bridge_db, monkeypatch):
+    """A garbage ATELIER_BRIDGE_DEBOUNCE_MS is IGNORED (valid-or-ignore, mirrors
+    model_tier._valid_tier) — the default 2000ms window still debounces."""
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "not-an-int")
+    clock = _ManualClock()
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
+    args = {"prompt": "m", "attempt": 1, "task_id": "t-1"}
+    tools._enqueue("spawn_subagent", args)
+    clock.advance(0.5)
+    tools._enqueue("spawn_subagent", dict(args))
+    # Default window applied => the duplicate was dropped.
+    assert len(_rows(bridge_db, kind="spawn_subagent")) == 1
+
+
+def test_debounce_exempts_attemptless_kinds_send_message(bridge_db, monkeypatch):
+    """send_message / spawn_teammate carry NO `attempt` to distinguish a genuine
+    re-dispatch from a duplicate, so they are EXEMPT from debounce: two identical
+    send_message enqueues inside the window BOTH insert (the no-swallow guarantee
+    is structural, not timing-based). Guards MINOR-1 from the F9 review."""
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "2000")
+    clock = _ManualClock()
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
+    tools._enqueue("send_message", {"team_id": "T", "to": "x", "message": "m"})
+    clock.advance(0.5)  # inside the window — but send_message is exempt
+    tools._enqueue("send_message", {"team_id": "T", "to": "x", "message": "m"})
+    assert len(_rows(bridge_db, kind="send_message")) == 2  # NOT debounced
+
+
+def test_count_limit_trips_at_exactly_n_plus_one(bridge_db, monkeypatch):
+    """EXACT-COUNT (multi-mechanism rule): with the per-kind limit pinned to N,
+    enqueues 1..N succeed and enqueue N+1 raises BridgeBudgetExceededError. The
+    Nth row is durably present; the (N+1)th never inserts."""
+    from scripts.dispatch import BridgeBudgetExceededError
+
+    n = 4
+    monkeypatch.setenv("ATELIER_BRIDGE_KIND_LIMIT", str(n))
+    # Disable debounce so each spawn (distinct attempt) is unrelated to the limit
+    # mechanism — we vary `attempt` so no two calls collide on the debounce key.
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+
+    # Exactly N succeed.
+    for attempt in range(1, n + 1):
+        tools.spawn_subagent("task-7", attempt, "P")
+    assert len(_rows(bridge_db, kind="spawn_subagent")) == n
+
+    # The (N+1)th trips the ceiling — fail-loud, and inserts NOTHING.
+    with pytest.raises(BridgeBudgetExceededError, match="per-kind enqueue limit"):
+        tools.spawn_subagent("task-7", n + 1, "P")
+    assert len(_rows(bridge_db, kind="spawn_subagent")) == n
+
+
+def test_count_limit_is_per_kind_not_global(bridge_db, monkeypatch):
+    """The ceiling is per-KIND: hitting the limit on one kind does NOT block a
+    different kind (the counter is keyed by kind)."""
+    from scripts.dispatch import BridgeBudgetExceededError
+
+    monkeypatch.setenv("ATELIER_BRIDGE_KIND_LIMIT", "1")
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+
+    tools.send_message("T", "a", "m")  # kind send_message #1 (== limit)
+    with pytest.raises(BridgeBudgetExceededError):
+        tools.send_message("T", "b", "m")  # send_message #2 trips
+    # A DIFFERENT kind is unaffected — its own counter starts at 0.
+    tools.spawn_subagent("task-9", 1, "P")
+    assert len(_rows(bridge_db, kind="spawn_subagent")) == 1
+
+
+def test_count_limit_resets_on_new_instance(bridge_db, monkeypatch):
+    """The counter is per-INSTANCE (one instance == one cycle/team_pk), so a
+    fresh instance resets the ceiling — the natural per-invocation boundary."""
+    from scripts.dispatch import BridgeBudgetExceededError
+
+    monkeypatch.setenv("ATELIER_BRIDGE_KIND_LIMIT", "1")
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
+
+    tools_a = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+    tools_a.send_message("T", "a", "m")
+    with pytest.raises(BridgeBudgetExceededError):
+        tools_a.send_message("T", "b", "m")
+
+    # A new instance (new cycle) starts its counter fresh.
+    tools_b = QueueBridgeDispatchTools("cycle-2", db_path=bridge_db)
+    tools_b.send_message("T", "c", "m")  # does NOT raise
+
+
+def test_count_limit_env_garbage_is_ignored_uses_high_default(bridge_db, monkeypatch):
+    """A garbage ATELIER_BRIDGE_KIND_LIMIT is ignored => the high default (200)
+    applies, so legitimate MAX_ATTEMPTS-scale traffic is NEVER blocked."""
+    from scripts.dispatch import BRIDGE_KIND_LIMIT_DEFAULT
+
+    monkeypatch.setenv("ATELIER_BRIDGE_KIND_LIMIT", "garbage")
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
+    # The default sits far above any realistic per-kind wave traffic.
+    assert BRIDGE_KIND_LIMIT_DEFAULT >= 200
+    for attempt in range(1, 11):
+        tools.spawn_subagent("task-7", attempt, "P")  # 10 << 200, never trips
+    assert len(_rows(bridge_db, kind="spawn_subagent")) == 10

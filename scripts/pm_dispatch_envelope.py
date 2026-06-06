@@ -51,8 +51,10 @@ from scripts.dispatch import RULES_SKILL, TERMINAL_STATUSES
 # ── Single-sourced abandon grammar ─────────────────────────────────────────
 
 # Statuses for which an empty artifacts list is acceptable per the rules SKILL
-# ("Empty array allowed only for `blocked`/`needs-input`.").
-_ARTIFACTS_OPTIONAL_STATUSES: frozenset[str] = frozenset({"blocked", "needs-input"})
+# ("Empty array allowed only for `blocked`/`needs-input`.") plus the terminal
+# `failed` (a hard run-and-failed signal — like `abandoned`, a failure may have
+# produced no artifacts, so an empty list is acceptable).
+_ARTIFACTS_OPTIONAL_STATUSES: frozenset[str] = frozenset({"blocked", "needs-input", "failed"})
 
 # ── Reference-stub artifact (cycle-1 payload referencing) ──────────────────
 #

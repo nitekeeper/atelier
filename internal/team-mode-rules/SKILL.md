@@ -1,6 +1,6 @@
 ---
 schema_version: 1
-version: 1.2
+version: 1.3
 description: Team-mode hard rules — atelier multi-party channel contract. Read by `scripts/dispatch.py` and prepended verbatim to every worker briefing.
 ---
 
@@ -38,6 +38,7 @@ You are a worker (or team-lead) operating inside an atelier team-mode run. This 
 | 1.1     | 2026-05-25 | Removed token budget caps (inaugural briefing + per-message payload). Rationale: token usage is task-dependent and not meaningfully cappable; heartbeat clause remains as separate liveness mechanism. Per-message BYTE cap (8192 B) stays in schema + bridge_send. |
 | 1.2     | 2026-05-29 | Added `attempt` to the reply-envelope schema (table + JSON example). PM's wave-dispatch validator (atelier#60, `scripts/pm_dispatch_envelope.py` check 3) cross-checks it against the dispatched attempt for anti-spoofing; workers MUST emit it. Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged). |
 | 1.2.1   | 2026-05-31 | Heartbeat clause cross-reference: a missed heartbeat is a GO-OBSERVE signal for PM (kaizen F15 / atelier#78) — PM confirms via a final reply read before charging a failed attempt (read-first stall detection in `scripts/pm_dispatch.py` `_observe_before_kill`). PM-side orchestrator behavior, not a worker MUST — no new TM-NNN rule. Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged). |
+| 1.3     | 2026-06-06 | Added the `failed` closure token (TM-006 + reply-envelope schema/table). `failed` is a terminal-ONLY, run-and-failed signal (deterministic hard failure) — distinct from the RETRYABLE `blocked`/`needs-input`; PM routes it to a terminal record+escalate handler and does NOT re-dispatch (`scripts/pm_dispatch.py` `_handle_envelope`). Single-sourced via `scripts/dispatch.py` `TERMINAL_STATUSES`/`TERMINAL_ONLY_STATUSES`; artifacts optional (like `abandoned`). Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged; the token set is application-validated, not a DB CHECK). |
 
 A `schema_version` bump REQUIRES a CHANGELOG row in the same commit. Dispatch refuses to spawn teammates whose runtime-reported version mismatches the migration's `PRAGMA user_version`.
 
@@ -77,7 +78,7 @@ On receiving a message of `type: "shutdown_request"`, reply within one message t
 `request_id` MUST be echoed verbatim. Approving shutdown means you commit to no further bridge writes after the response is sent. Refusing shutdown requires `reason` populated; PM may then hard-kill.
 
 **TM-006 — Closure tokens.**
-Terminal status is **exactly one of** `done | blocked | abandoned | needs-input`. No prose terminals (no "all good", no "I'm done"). Your final bridge message in any attempt carries a reply envelope (below) whose `status` field is one of these four values, and nothing else.
+Terminal status is **exactly one of** `done | blocked | abandoned | needs-input | failed`. No prose terminals (no "all good", no "I'm done"). Your final bridge message in any attempt carries a reply envelope (below) whose `status` field is one of these five values, and nothing else.
 
 | Token         | Meaning                                                                                 |
 |---------------|-----------------------------------------------------------------------------------------|
@@ -85,6 +86,7 @@ Terminal status is **exactly one of** `done | blocked | abandoned | needs-input`
 | `blocked`     | Cannot proceed; need PM/human input or external unblock. Non-terminal; PM may re-dispatch. |
 | `needs-input` | Specific question awaiting answer; otherwise able to continue. Non-terminal.            |
 | `abandoned`   | 5-attempt budget exhausted OR wall-clock/token cap hit without convergence. Terminal.   |
+| `failed`      | You RAN and hit a deterministic HARD failure (e.g. the task is impossible as specified, an unrecoverable error). Distinct from `blocked`/`needs-input` (which are RETRYABLE) — `failed` CLOSES the wave: PM records + escalates it and does NOT re-dispatch (it does not burn your remaining attempts). Terminal. Use only when retrying is pointless. |
 
 **TM-007 — Schema pin.**
 This file declares `schema_version: 1` in its frontmatter. The runtime asserts `PRAGMA user_version` on the bridge DB matches at session open; mismatch is a hard fail. Any `schema_version` bump REQUIRES a CHANGELOG row in this file in the same commit, plus a matching migration that lifts `PRAGMA user_version`. Workers MUST NOT silently tolerate a version skew.
@@ -107,7 +109,7 @@ Every worker's final message per attempt is a single JSON envelope with this sch
   "type": "task_result",
   "task_id": "<tasks.id you were dispatched against>",
   "attempt": "<integer; the dispatch attempt number this reply answers>",
-  "status": "done" | "blocked" | "abandoned" | "needs-input",
+  "status": "done" | "blocked" | "abandoned" | "needs-input" | "failed",
   "artifacts": [
     {"path": "<repo-relative path>", "sha": "<git-blob or content sha256>"}
   ],
@@ -121,8 +123,8 @@ Every worker's final message per attempt is a single JSON envelope with this sch
 | `type`        | Discriminator. MUST equal `"task_result"`.                                    |
 | `task_id`     | The `tasks.id` you were dispatched against. Bare integer or stringified.      |
 | `attempt`     | Integer; the dispatch attempt number this reply answers (PM cross-checks it against the dispatched attempt for anti-spoofing). |
-| `status`      | One of the four closure tokens (TM-006). No other value is accepted.          |
-| `artifacts`   | List of files you wrote or modified. `path` is repo-relative; `sha` lets reviewers verify you wrote what you claim. Empty array allowed only for `blocked`/`needs-input`. |
+| `status`      | One of the five closure tokens (TM-006). No other value is accepted.          |
+| `artifacts`   | List of files you wrote or modified. `path` is repo-relative; `sha` lets reviewers verify you wrote what you claim. Empty array allowed only for `blocked`/`needs-input`/`failed`. |
 | `notes_md`    | Short markdown narrative. ≤ 2k chars. Goes to the durable backend output doc. |
 | `next_action` | Hint to PM/reviewer. Not load-bearing; PM may override per its own scheduler. |
 

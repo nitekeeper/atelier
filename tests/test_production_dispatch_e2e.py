@@ -149,6 +149,9 @@ class _Servicer:
     Adversarial knobs (per-test): `inject_error_kind` flips a kind to 'error';
     `malformed_for` writes a non-envelope payload for a given task so the
     barrier must hold; `team_id` is the inbox every reply lands in.
+    `fail_create_team_times` flips the FIRST N `create_team` rows to 'error' then
+    services the rest normally — the hook for the bounded retry/breaker tests
+    (a transient spawn-init failure that recovers on a later attempt).
     """
 
     def __init__(
@@ -161,6 +164,7 @@ class _Servicer:
         status_for=None,
         inject_error_kind=None,
         malformed_for=frozenset(),
+        fail_create_team_times=0,
     ):
         self._db = db_path
         self._team_id = team_id
@@ -169,6 +173,8 @@ class _Servicer:
         self._status_for = status_for or {}
         self._inject_error_kind = inject_error_kind
         self._malformed_for = set(malformed_for)
+        self._fail_create_team_times = fail_create_team_times
+        self._create_team_failures = 0  # how many create_team rows we've errored
         self._minted = 0
         self.serviced = []  # list of (kind, args) tuples, in service order
         self._stop = threading.Event()
@@ -224,6 +230,21 @@ class _Servicer:
             return
 
         if kind == "create_team":
+            # Transient-failure injection: error the FIRST N create_team rows so
+            # the wrapper's bounded retry kicks in, then service the rest to
+            # 'ready' (the hook for create_team-retries-then-succeeds).
+            if self._create_team_failures < self._fail_create_team_times:
+                self._create_team_failures += 1
+                con.execute(
+                    "UPDATE bridge_requests SET status='error', error_text=?, "
+                    "completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
+                    (
+                        f"create_team transient init failure #{self._create_team_failures}",
+                        row["id"],
+                    ),
+                )
+                con.commit()
+                return
             self._minted += 1
             con.execute(
                 "UPDATE bridge_requests SET status='ready', response_json=?, "
@@ -477,6 +498,134 @@ def test_e2e_out_of_enum_kind_rejected_not_dispatched(workspace):
             con.commit()
     finally:
         con.close()
+
+
+# ── bounded + hardened path: debounce drops a duplicate enqueue end-to-end ───
+
+
+def test_e2e_debounce_drops_duplicate_spawn(workspace, monkeypatch):
+    """End-to-end debounce: two IDENTICAL fire-and-forget spawns inside the
+    window produce exactly ONE bridge_requests row (the dup is dropped); the
+    servicer therefore services exactly one. A NOISE guard on top of idempotency."""
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "5000")
+    team_id = "T-DEB"
+    recipient = "pm-1"
+    _seed_team(workspace, team_id, [recipient])
+
+    # Fixed clock so both calls fall inside the 5000ms window deterministically.
+    clock = {"t": 100.0}
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=workspace["db"], clock=lambda: clock["t"])
+    # Two byte-identical spawns (same task_id + attempt + prompt) => one row.
+    tools.spawn_subagent("task-7", 1, "PROMPT")
+    tools.spawn_subagent("task-7", 1, "PROMPT")
+
+    assert _count_kind(workspace["db"], "spawn_subagent") == 1
+
+
+# ── bounded + hardened path: hard per-kind count limit trips at exactly N+1 ──
+
+
+def test_e2e_count_limit_trips_at_exact_n_plus_one(workspace, monkeypatch):
+    """The hard per-kind ceiling trips at EXACTLY N+1 (exact-count, not a loose
+    bound): with the limit pinned to N, the first N spawns enqueue and the
+    (N+1)th raises BridgeBudgetExceededError, having inserted nothing extra."""
+    from scripts.dispatch import BridgeBudgetExceededError
+
+    n = 3
+    monkeypatch.setenv("ATELIER_BRIDGE_KIND_LIMIT", str(n))
+    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")  # isolate the limit mech
+    tools = QueueBridgeDispatchTools("cycle-1", db_path=workspace["db"])
+
+    for attempt in range(1, n + 1):
+        tools.spawn_subagent("task-7", attempt, "P")
+    assert _count_kind(workspace["db"], "spawn_subagent") == n
+
+    with pytest.raises(BridgeBudgetExceededError, match="per-kind enqueue limit"):
+        tools.spawn_subagent("task-7", n + 1, "P")
+    # EXACT-COUNT: the breach inserted nothing — still exactly N rows.
+    assert _count_kind(workspace["db"], "spawn_subagent") == n
+
+
+# ── bounded + hardened path: create_team retries a transient failure ─────────
+
+
+def test_e2e_create_team_retries_transient_failure_then_succeeds(workspace, monkeypatch):
+    """A transient create_team init failure is RETRIED (bounded retry-with-backoff)
+    and the team is created on the next attempt — the wave completes. The retry is
+    TRANSPARENT to the wave loop (one logical dispatch)."""
+    monkeypatch.setenv("ATELIER_BRIDGE_SPAWN_RETRIES", "2")  # 1 initial + 2 retries
+    monkeypatch.setenv("ATELIER_BRIDGE_BREAKER_THRESHOLD", "5")  # above the 1 failure
+    team_id = "T-RETRY"
+    recipient = "pm-1"
+    t1 = _seed_task(workspace, title="a", parallel_group=1)
+    role_a = str(t1)
+    _seed_team(workspace, team_id, [recipient, role_a])
+    tasks = [{"id": t1, "parallel_group": 1, "created_at": "2026-05-31T00:00:00Z"}]
+
+    # Fast backoff sleep so the retry does not wall-block the test.
+    tools = QueueBridgeDispatchTools(
+        "cycle-1", db_path=workspace["db"], sleep_fn=lambda s: time.sleep(0.005)
+    )
+    spawn_fn = build_spawn_fn(
+        DISPATCH_MODE_AGENT_TEAM,
+        tools=tools,
+        briefing_for=lambda task, attempt: "B",
+        members=[role_a],
+        team_name="cycle-team",
+        teams_root=workspace["root"] / "no-such-teams-root",
+    )
+    poll_fn = build_poll_fn(workspace["db"], team_id=team_id, role_id_for=lambda task: recipient)
+
+    # Fail the FIRST create_team row, succeed on the retry.
+    with _Servicer(workspace["db"], team_id=team_id, recipient=recipient, fail_create_team_times=1):
+        wd = WaveDispatcher(
+            workspace["db"], spawn_fn=spawn_fn, poll_fn=poll_fn, sleep_fn=lambda s: time.sleep(0.01)
+        )
+        summaries = wd.run(tasks)
+
+    # The wave completed despite the transient failure (the retry created the team).
+    assert summaries[0]["reports"] == {str(t1): "done"}
+    # TWO create_team rows exist (the failed one + the successful retry) — the
+    # retry is transparent to the wave (still exactly ONE logical create_team).
+    assert _count_kind(workspace["db"], "create_team") == 2
+    assert _count_status(workspace["db"], "error") == 1
+
+
+# ── bounded + hardened path: breaker opens after consecutive failures ────────
+
+
+def test_e2e_breaker_opens_after_threshold_consecutive_failures(workspace, monkeypatch):
+    """After N CONSECUTIVE create_team failures (>= breaker threshold), the
+    circuit-breaker trips and the NEXT enqueue short-circuits with
+    BridgeBreakerOpenError instead of re-attempting a dead team."""
+    from scripts.dispatch import BridgeBreakerOpenError
+
+    # No retries (each create_team is one attempt → one failure), threshold 3.
+    monkeypatch.setenv("ATELIER_BRIDGE_SPAWN_RETRIES", "0")
+    monkeypatch.setenv("ATELIER_BRIDGE_BREAKER_THRESHOLD", "3")
+    team_id = "T-BREAK"
+    recipient = "pm-1"
+    _seed_team(workspace, team_id, [recipient])
+
+    # Every create_team fails (huge fail count). The servicer also errors the
+    # row each call so each create_team attempt raises BridgeDispatchError.
+    tools = QueueBridgeDispatchTools(
+        "cycle-1", db_path=workspace["db"], sleep_fn=lambda s: time.sleep(0.005)
+    )
+
+    from scripts.dispatch import BridgeDispatchError
+
+    with _Servicer(
+        workspace["db"], team_id=team_id, recipient=recipient, fail_create_team_times=99
+    ):
+        # First 3 create_team calls each fail (consecutive). The 3rd pushes the
+        # consecutive counter to == threshold.
+        for _ in range(3):
+            with pytest.raises(BridgeDispatchError):
+                tools.create_team("cycle-team", ["pm-1"])
+        # The 4th enqueue (a spawn or create_team) now short-circuits: breaker OPEN.
+        with pytest.raises(BridgeBreakerOpenError, match="circuit-breaker OPEN"):
+            tools.spawn_teammate(team_id, "pm-1", "BRIEF")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

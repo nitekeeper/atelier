@@ -130,6 +130,24 @@ def test_valid_abandoned_envelope_with_good_abandon_line():
     assert result["status"] == "abandoned"
 
 
+def test_valid_failed_envelope_accepted():
+    """`failed` is a valid terminal closure token (TERMINAL_STATUSES, single-
+    sourced from dispatch.py) — validate_envelope accepts it via the imported
+    set with NO Python-side re-typing. A failed envelope WITH artifacts validates."""
+    env = _good_envelope(status="failed", artifacts=[{"path": "scripts/x.py", "sha": "z"}])
+    result = validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
+    assert result["status"] == "failed"
+
+
+def test_failed_envelope_is_artifacts_optional():
+    """`failed` is artifacts-OPTIONAL (like abandoned): an empty artifacts list
+    is acceptable because a hard failure may have produced nothing."""
+    env = _good_envelope(status="failed", artifacts=[])
+    result = validate_envelope(env, dispatched_task_id=7, dispatched_attempt=1)
+    assert result["status"] == "failed"
+    assert result["artifacts"] == []
+
+
 def test_stringified_task_id_and_attempt_accepted():
     """The SKILL permits a bare int OR stringified task_id/attempt; they are
     string-normalized before compare."""

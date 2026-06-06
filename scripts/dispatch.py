@@ -149,10 +149,19 @@ REQUIRED_VARS: frozenset[str] = frozenset(
 )
 
 # Terminal closure tokens from TM-006. The wave tracker uses this set to
-# decide whether a member's last status counts as "reported"; the two
-# terminal-only tokens are `done` and `abandoned`.
-TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "blocked", "abandoned", "needs-input"})
-TERMINAL_ONLY_STATUSES: frozenset[str] = frozenset({"done", "abandoned"})
+# decide whether a member's last status counts as "reported"; the three
+# terminal-only tokens are `done`, `abandoned`, and `failed`.
+#
+# `failed` (the bounded-path hardening feature) is a DETERMINISTIC run-and-failed
+# signal — the worker ran and hit a hard failure — distinct from the RETRYABLE
+# `blocked`/`needs-input`. It CLOSES the wave (terminal-only) and routes to a
+# terminal handler that records + escalates WITHOUT consuming MAX_ATTEMPTS retries
+# (a hard failure is not worth re-dispatching). This set is SINGLE-SOURCED here;
+# pm_dispatch_envelope.py and pm_dispatch.py import it — never re-type the tokens.
+TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"done", "blocked", "abandoned", "needs-input", "failed"}
+)
+TERMINAL_ONLY_STATUSES: frozenset[str] = frozenset({"done", "abandoned", "failed"})
 
 
 # ── Exceptions ─────────────────────────────────────────────────────────────
@@ -440,9 +449,9 @@ class WaveTracker:
 
     def record(self, role_id: str, status: str) -> None:
         """Record a member's terminal envelope status. Raises
-        :class:`ValueError` if ``status`` is not one of the four TM-006
-        closure tokens — silent acceptance of a typo would mask a
-        contract violation."""
+        :class:`ValueError` if ``status`` is not one of the TM-006
+        closure tokens (:data:`TERMINAL_STATUSES`) — silent acceptance of a
+        typo would mask a contract violation."""
         if status not in TERMINAL_STATUSES:
             raise ValueError(
                 f"unknown wave status {status!r}; expected one of {sorted(TERMINAL_STATUSES)}"
@@ -990,6 +999,81 @@ BRIDGE_POLL_INTERVAL_S: float = 0.2
 #: servicer never spuriously raise ``database is locked`` writing the same row.
 BRIDGE_BUSY_TIMEOUT_MS: int = 5000
 
+# ── Bounded + hardened tool-call path (env-tunable; valid-or-ignore) ─────────
+# Every constant below mirrors model_tier.py's _valid_tier/ENV_TIER_VAR posture:
+# a garbage/blank env value is IGNORED (falls back to the default), never raised
+# — a typo in an env var must not crash or wedge a cycle. The defaults sit ABOVE
+# legitimate MAX_ATTEMPTS-driven traffic so a healthy run never trips them.
+
+#: Sliding-window (ms) within which an IDENTICAL (kind, canonical-args) enqueue is
+#: treated as duplicate noise and DROPPED (idempotent skip). Small by design — a
+#: NOISE guard layered ON TOP of the migration-008 idempotency correctness
+#: guarantee, never a substitute for it. A legitimate WaveDispatcher re-dispatch
+#: carries a different ``attempt`` in args → different key → never debounced.
+BRIDGE_DEBOUNCE_MS_DEFAULT: int = 2000
+BRIDGE_DEBOUNCE_MS_ENV_VAR: str = "ATELIER_BRIDGE_DEBOUNCE_MS"
+
+#: Hard per-kind enqueue ceiling per instance (one instance == one cycle/team_pk,
+#: so it resets naturally). Sits WELL above legitimate traffic (≤ len(tasks) *
+#: MAX_ATTEMPTS spawns of any one kind in a real wave); a breach is a runaway
+#: loop, surfaced fail-loud as :class:`BridgeBudgetExceededError`.
+BRIDGE_KIND_LIMIT_DEFAULT: int = 200
+BRIDGE_KIND_LIMIT_ENV_VAR: str = "ATELIER_BRIDGE_KIND_LIMIT"
+
+#: Bounded create_team enqueue→poll retry count on a transient BridgeDispatchError
+#: (a dead/slow servicer turn). Backoff sleeps use the injected clock/sleep and
+#: stay WITHIN :data:`BRIDGE_PER_CALL_TIMEOUT_S`. A retry here is TRANSPARENT to
+#: the wave loop (one logical dispatch) — it adds NO new re-queue site.
+BRIDGE_SPAWN_RETRIES_DEFAULT: int = 2
+BRIDGE_SPAWN_RETRIES_ENV_VAR: str = "ATELIER_BRIDGE_SPAWN_RETRIES"
+
+#: Per-instance (per-team) circuit-breaker threshold: after this many CONSECUTIVE
+#: create_team/spawn failures the breaker TRIPS and further enqueues short-circuit
+#: with :class:`BridgeBreakerOpenError` instead of re-attempting a dead team. A
+#: success resets the consecutive counter.
+BRIDGE_BREAKER_THRESHOLD_DEFAULT: int = 3
+BRIDGE_BREAKER_THRESHOLD_ENV_VAR: str = "ATELIER_BRIDGE_BREAKER_THRESHOLD"
+
+#: Base backoff (s) for the create_team retry loop; doubled per retry. Kept tiny
+#: so the total backoff budget is a rounding error against PER_CALL_TIMEOUT_S.
+BRIDGE_BACKOFF_BASE_S: float = 0.5
+
+#: Kinds EXEMPT from the debounce noise-guard — every kind whose args do NOT
+#: carry a per-dispatch ``attempt`` to structurally distinguish a legitimate
+#: WaveDispatcher re-dispatch from an accidental duplicate. Debouncing such a
+#: kind could swallow a genuine retry (whose args are byte-identical), so they
+#: are exempt and ALWAYS enqueue a fresh row:
+#:   * ``create_team`` — fires once per cycle; its (d) retry-with-backoff
+#:     re-enqueues byte-identical args and must re-poll a fresh row.
+#:   * ``send_message`` (``{team_id, to, message}``) and ``spawn_teammate``
+#:     (``{team_id, name, prompt[, model]}``) — in agent-team mode a re-dispatch
+#:     to an already-spawned teammate is a fresh briefing send with NO ``attempt``
+#:     in args (``compose_briefing`` takes none), so the key would collide with a
+#:     prior identical send. Exempting them makes the no-swallow guarantee
+#:     STRUCTURAL rather than reliant on the re-dispatch out-pacing the window.
+#: Only ``spawn_subagent`` (whose args carry ``attempt``) is debounced — there a
+#: genuine re-dispatch is a different key and is never dropped, while an accidental
+#: duplicate of the SAME attempt is correctly suppressed.
+BRIDGE_DEBOUNCE_EXEMPT_KINDS: frozenset[str] = frozenset(
+    {"create_team", "send_message", "spawn_teammate"}
+)
+
+
+def _valid_positive_int_env(value: str | None, default: int) -> int:
+    """Return ``int(value)`` iff it parses to a non-negative int, else ``default``.
+
+    Mirrors :func:`scripts.model_tier._valid_tier`'s valid-or-ignore posture: a
+    blank/garbage/negative env value is IGNORED (a typo never crashes a dispatch).
+    """
+    if value is None:
+        return default
+    try:
+        parsed = int(value.strip())
+    except (ValueError, AttributeError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
 #: Repo-relative Local-mode DB path. The request-queue is Local-only at runtime
 #: (cf. the section comment); resolved against the workspace git root the same
 #: way ``scripts.backend_local`` resolves ``.ai/atelier.db``.
@@ -1003,6 +1087,43 @@ class BridgeDispatchError(DispatchError):
 
     A :class:`DispatchError` subclass (operator-facing fail-loud) — a failed
     transport call is a run-level failure, NOT a worker outcome to absorb.
+    """
+
+
+class BridgeTimeoutError(BridgeDispatchError):
+    """Raised when a create_team poll exceeds :data:`BRIDGE_PER_CALL_TIMEOUT_S`
+    WITHOUT the orchestrator ever servicing the row to ``ready``/``error``.
+
+    Distinct from the base (a servicer-REPORTED ``status='error'``) because the
+    two demand opposite handling: a servicer error is a *transient* init blip
+    worth a bounded RETRY (the run-55 pattern), whereas a timeout means *nobody
+    is servicing the queue* — retrying merely re-spends a fresh
+    :data:`BRIDGE_PER_CALL_TIMEOUT_S` budget per attempt and cannot help, so it
+    is FAIL-FAST (never retried). Still a :class:`BridgeDispatchError` so existing
+    ``except BridgeDispatchError`` / ``pytest.raises(BridgeDispatchError)`` callers
+    are unaffected.
+    """
+
+
+class BridgeBudgetExceededError(DispatchError):
+    """Raised when a single instance enqueues more than
+    :data:`BRIDGE_KIND_LIMIT` rows of one ``kind`` — a hard per-kind ceiling.
+
+    A :class:`DispatchError` subclass (operator-facing fail-loud): the ceiling
+    sits well above legitimate ``MAX_ATTEMPTS``-driven traffic, so a breach means
+    a runaway dispatch loop, not normal load. The instance is per-cycle/team_pk so
+    the counter resets naturally on the next cycle.
+    """
+
+
+class BridgeBreakerOpenError(DispatchError):
+    """Raised when the per-team circuit-breaker is OPEN — too many CONSECUTIVE
+    create_team/spawn failures (:data:`BRIDGE_BREAKER_THRESHOLD`).
+
+    A :class:`DispatchError` subclass (operator-facing fail-loud): once a team is
+    declared dead we short-circuit further enqueues rather than re-attempting it,
+    surfacing the failure to the operator. A success resets the counter, so a
+    transient blip that recovers never trips the breaker.
     """
 
 
@@ -1089,7 +1210,44 @@ class QueueBridgeDispatchTools:
         self._clock = clock
         self._sleep_fn = sleep_fn
 
+        # ── bounded + hardened tool-call path (per-instance == per-cycle) ──
+        # All counters/maps below RESET on a fresh instance — and a fresh
+        # instance is built once per cycle/team_pk — so they are the natural
+        # per-invocation reset boundary the feature requires.
+        self._debounce_ms = _valid_positive_int_env(
+            os.environ.get(BRIDGE_DEBOUNCE_MS_ENV_VAR), BRIDGE_DEBOUNCE_MS_DEFAULT
+        )
+        self._kind_limit = _valid_positive_int_env(
+            os.environ.get(BRIDGE_KIND_LIMIT_ENV_VAR), BRIDGE_KIND_LIMIT_DEFAULT
+        )
+        self._spawn_retries = _valid_positive_int_env(
+            os.environ.get(BRIDGE_SPAWN_RETRIES_ENV_VAR), BRIDGE_SPAWN_RETRIES_DEFAULT
+        )
+        self._breaker_threshold = _valid_positive_int_env(
+            os.environ.get(BRIDGE_BREAKER_THRESHOLD_ENV_VAR), BRIDGE_BREAKER_THRESHOLD_DEFAULT
+        )
+        #: key -> last-seen monotonic time (seconds). key == (kind, canonical args).
+        self._debounce_seen: dict[tuple[str, str], float] = {}
+        #: key -> row id of the accepted enqueue, so a debounced dup returns the
+        #: prior row id (idempotent: caller sees a successful enqueue).
+        self._debounce_last_rowid: dict[tuple[str, str], int] = {}
+        #: kind -> count of rows enqueued by THIS instance (hard ceiling check).
+        self._kind_counts: dict[str, int] = {}
+        #: consecutive create_team/spawn failures; reset to 0 on any success.
+        self._consecutive_failures: int = 0
+
     # ── enqueue primitive ───────────────────────────────────────────────
+
+    @staticmethod
+    def _canonical_args(args: Mapping[str, Any]) -> str:
+        """Canonical, order-insensitive JSON for the debounce key.
+
+        ``sort_keys=True`` so two logically-identical arg dicts map to the SAME
+        key regardless of insertion order. A legitimate WaveDispatcher
+        re-dispatch carries a different ``attempt`` value → different canonical
+        string → different key → NEVER debounced (idempotency is not weakened).
+        """
+        return json.dumps(dict(args), sort_keys=True)
 
     def _enqueue(self, kind: str, args: Mapping[str, Any]) -> int:
         """INSERT one pending ``bridge_requests`` row; return its id.
@@ -1098,12 +1256,67 @@ class QueueBridgeDispatchTools:
         SQLite CHECK would also reject it) so a caller bug surfaces as a clear
         :class:`BridgeDispatchError`, not an opaque IntegrityError. Untrusted
         input boundary: ``args`` is serialized to JSON as DATA — never executed.
+
+        Three guards layer in FRONT of the INSERT (bounded + hardened path):
+
+        * BREAKER — if the per-team circuit-breaker is OPEN (too many consecutive
+          create_team/spawn failures), short-circuit with
+          :class:`BridgeBreakerOpenError` rather than enqueue onto a dead team.
+        * DEBOUNCE — if an IDENTICAL (kind, canonical-args) call arrived within
+          the sliding window, DROP it (skip the INSERT) and return the prior
+          row id as if enqueued (idempotent noise-suppression). This NEVER
+          swallows a WaveDispatcher retry: those carry a different ``attempt``
+          in ``args`` → different key. It is a NOISE guard layered ON TOP of the
+          migration-008 idempotency guarantee, never a replacement for it.
+          ``create_team`` is EXEMPT (:data:`BRIDGE_DEBOUNCE_EXEMPT_KINDS`): it
+          fires once per cycle and its (d) retry re-enqueues byte-identical args,
+          so debouncing it would block the legitimate retry.
+        * COUNT LIMIT — a hard per-kind ceiling; a breach is a runaway loop and
+          raises :class:`BridgeBudgetExceededError` (fail-loud).
         """
         if kind not in BRIDGE_REQUEST_KINDS:
             raise BridgeDispatchError(
                 f"refusing to enqueue out-of-enum bridge kind {kind!r}; "
                 f"expected one of {sorted(BRIDGE_REQUEST_KINDS)}"
             )
+
+        # BREAKER gate — refuse to enqueue onto a team already declared dead.
+        if self._breaker_threshold and self._consecutive_failures >= self._breaker_threshold:
+            raise BridgeBreakerOpenError(
+                f"bridge circuit-breaker OPEN for team_pk={self._team_pk!r}: "
+                f"{self._consecutive_failures} consecutive create_team/spawn "
+                f"failures >= threshold {self._breaker_threshold}. Refusing to "
+                f"enqueue {kind!r} onto a dead team (set "
+                f"{BRIDGE_BREAKER_THRESHOLD_ENV_VAR} to tune)."
+            )
+
+        key = (kind, self._canonical_args(args))
+
+        # DEBOUNCE — drop a duplicate identical call inside the sliding window.
+        # window_s == 0 disables debounce (valid-or-ignore default never 0).
+        # create_team is EXEMPT: its retry re-enqueues identical args and MUST
+        # always produce a fresh row (never block the single legitimate call).
+        now = self._clock()
+        if self._debounce_ms > 0 and kind not in BRIDGE_DEBOUNCE_EXEMPT_KINDS:
+            window_s = self._debounce_ms / 1000.0
+            last = self._debounce_seen.get(key)
+            if last is not None and (now - last) < window_s:
+                # Idempotent skip: refresh nothing (sliding window anchors on the
+                # FIRST/last accepted call), return the prior row id so the caller
+                # sees a successful enqueue.
+                return self._debounce_last_rowid.get(key, -1)
+
+        # COUNT LIMIT — hard per-kind ceiling (above legitimate traffic).
+        new_count = self._kind_counts.get(kind, 0) + 1
+        if self._kind_limit and new_count > self._kind_limit:
+            raise BridgeBudgetExceededError(
+                f"bridge per-kind enqueue limit exceeded for kind={kind!r} on "
+                f"team_pk={self._team_pk!r}: attempted enqueue #{new_count} > "
+                f"ceiling {self._kind_limit}. This is a runaway dispatch loop "
+                f"(the ceiling sits above MAX_ATTEMPTS-driven traffic); set "
+                f"{BRIDGE_KIND_LIMIT_ENV_VAR} to tune."
+            )
+
         con = _open_bridge_db(self._db_path)
         try:
             cur = con.execute(
@@ -1112,9 +1325,16 @@ class QueueBridgeDispatchTools:
                 (self._team_pk, kind, json.dumps(dict(args))),
             )
             con.commit()
-            return int(cur.lastrowid)
+            row_id = int(cur.lastrowid)
         finally:
             con.close()
+
+        # Commit accounting AFTER a successful INSERT so a failed insert neither
+        # advances the counter nor poisons the debounce map.
+        self._kind_counts[kind] = new_count
+        self._debounce_seen[key] = now
+        self._debounce_last_rowid[key] = row_id
+        return row_id
 
     def _poll_row(self, row_id: int) -> tuple[str, str | None, str | None]:
         """Return ``(status, response_json, error_text)`` for ``row_id``.
@@ -1144,9 +1364,66 @@ class QueueBridgeDispatchTools:
         the ``team_id`` string and return it) or ``error`` (raise). Bounded by
         :data:`PER_CALL_TIMEOUT_S`: on timeout we raise
         :class:`BridgeDispatchError` rather than spin forever.
+
+        HARDENING (bounded + hardened path):
+
+        * RETRY + BACKOFF — a transient :class:`BridgeDispatchError` (dead/slow
+          servicer turn) is retried up to :data:`BRIDGE_SPAWN_RETRIES` times with
+          exponential backoff sized to stay WITHIN :data:`PER_CALL_TIMEOUT_S`
+          (the backoff sleeps use the injected ``_sleep_fn``/``_clock`` so tests
+          are deterministic). A retry here is TRANSPARENT to the wave loop — it
+          is one LOGICAL dispatch, adding NO new re-queue site (the termination
+          proof's single re-queue site stays :meth:`pm_dispatch._handle_failed_attempt`).
+        * CIRCUIT-BREAKER — each create_team failure increments the per-team
+          consecutive-failure counter; once it reaches
+          :data:`BRIDGE_BREAKER_THRESHOLD` the breaker trips and the NEXT
+          enqueue short-circuits with :class:`BridgeBreakerOpenError`. A success
+          resets the counter to 0.
         """
-        row_id = self._enqueue("create_team", {"name": name, "members": list(members)})
+        last_exc: BridgeDispatchError | None = None
+        # attempts == 1 initial try + N retries.
+        for retry in range(self._spawn_retries + 1):
+            try:
+                team_id = self._create_team_once(name, members)
+            except BridgeTimeoutError:
+                # Nobody is servicing the queue — a retry just re-spends another
+                # full PER_CALL_TIMEOUT_S budget and cannot help (and would spin a
+                # constant-clock test forever as the deadline is recomputed each
+                # attempt). FAIL-FAST; still count it toward the breaker.
+                self._consecutive_failures += 1
+                raise
+            except BridgeDispatchError as exc:
+                # Servicer-REPORTED transient error (the run-55 init blip) — retry.
+                last_exc = exc
+                if retry < self._spawn_retries:
+                    self._backoff_sleep(retry)
+                    continue
+                # Retries exhausted → ONE logical create_team failure. Count it
+                # toward the breaker HERE (not per retry iteration) so the breaker
+                # threshold counts CONSECUTIVE LOGICAL create_team failures, not
+                # the internal retries of a single dispatch — otherwise one fully
+                # failed create_team (1 + N retries) could trip a threshold of N+1
+                # on its own. _enqueue's breaker gate short-circuits the NEXT
+                # enqueue once the threshold is crossed.
+                self._consecutive_failures += 1
+                raise
+            else:
+                # Success resets the breaker — a recovered blip never trips it.
+                self._consecutive_failures = 0
+                return team_id
+        # Unreachable (the loop returns or raises), but keep mypy/readers honest.
+        raise last_exc  # type: ignore[misc]  # pragma: no cover
+
+    def _create_team_once(self, name: str, members: list[str]) -> str:
+        """One enqueue→poll create_team attempt (no retry/breaker accounting)."""
+        # Anchor the deadline at the TRUE attempt start, BEFORE _enqueue — the
+        # enqueue path reads self._clock() internally (the debounce sliding
+        # window), so anchoring after it would charge those reads against the
+        # budget and (with a non-advancing test clock) push the deadline forever
+        # ahead of the clock → an unbounded spin. The budget starts when the
+        # attempt starts, not after the row lands.
         deadline = self._clock() + self.PER_CALL_TIMEOUT_S
+        row_id = self._enqueue("create_team", {"name": name, "members": list(members)})
         while True:
             status, response_json, error_text = self._poll_row(row_id)
             if status == "ready":
@@ -1157,11 +1434,24 @@ class QueueBridgeDispatchTools:
                 )
             # status == 'pending' — bounded wait (NEVER unbounded).
             if self._clock() >= deadline:
-                raise BridgeDispatchError(
+                raise BridgeTimeoutError(
                     f"create_team row {row_id} timed out after {self.PER_CALL_TIMEOUT_S}s "
                     "(orchestrator never serviced it to 'ready'/'error')"
                 )
             self._sleep_fn(self.POLL_INTERVAL_S)
+
+    def _backoff_sleep(self, retry: int) -> None:
+        """Sleep an exponential backoff for retry index ``retry`` (0-based).
+
+        Capped so the cumulative backoff stays a rounding error against
+        :data:`PER_CALL_TIMEOUT_S` (a retry must not blow the per-call budget).
+        Uses the injected ``_sleep_fn`` so tests advance a fake clock instead of
+        wall-sleeping.
+        """
+        delay = BRIDGE_BACKOFF_BASE_S * (2**retry)
+        # Never let backoff approach the per-call poll budget.
+        delay = min(delay, self.PER_CALL_TIMEOUT_S / 10.0)
+        self._sleep_fn(delay)
 
     @staticmethod
     def _extract_team_id(row_id: int, response_json: str | None) -> str:

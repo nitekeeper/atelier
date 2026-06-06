@@ -536,6 +536,62 @@ def test_worker_self_abandon_always_escalates(workspace):
     assert row["attempts"] == 1
 
 
+# ── Engine: `failed` is a terminal hard-failure (record + escalate, NO retry) ─
+
+
+def test_failed_status_records_terminal_and_escalates_without_redispatch(workspace):
+    """A worker `failed` envelope is a TERMINAL hard failure: the engine records
+    it durably (set_abandoned, category 'failed') AND escalates on the SAME code
+    path, with NO re-dispatch — exactly ONE attempt charged (the dispatch charge),
+    NOT MAX_ATTEMPTS. Distinct from blocked/needs-input, which DO re-dispatch."""
+    tid = _seed_task(workspace, title="hardfail", parallel_group=0)
+
+    escalations = []
+    spawns = []
+
+    def poll_fn(task, attempt):
+        # `failed` with EMPTY artifacts — proves failed is artifacts-optional end
+        # to end (the envelope validates and routes terminally).
+        return {
+            "type": "task_result",
+            "task_id": task["id"],
+            "attempt": attempt,
+            "status": "failed",
+            "artifacts": [],
+            "notes_md": "hit an unrecoverable error",
+            "next_action": "escalate",
+        }
+
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: spawns.append(attempt),
+        poll_fn=poll_fn,
+        escalate_fn=lambda e: escalations.append(e),
+        clock=FakeClock(),
+        sleep_fn=lambda s: None,
+    )
+    summaries = d.run([_task_row(workspace, tid)])
+
+    row = _task_row(workspace, tid)
+    # Terminal: durable abandoned status with category 'failed' (NOT 'capacity'),
+    # so it is distinguishable from budget exhaustion.
+    assert row["status"] == "abandoned"
+    assert row["abandon_category"] == "failed"
+    # NO re-dispatch: exactly ONE spawn (the single dispatch), attempts == 1 —
+    # the hard failure did NOT burn the 5-attempt budget.
+    assert spawns == [1]
+    assert row["attempts"] == 1
+    # Guaranteed escalation on the same path, carrying the `failed` signal.
+    assert len(escalations) == 1
+    assert escalations[0]["category"] == "failed"
+    assert escalations[0]["last_status"] == "failed"
+    assert escalations[0]["task_id"] == tid
+    # The wave closes terminal-only (failed is a TERMINAL_ONLY status).
+    assert len(summaries) == 1
+    assert summaries[0]["terminal_only"] is True
+    assert summaries[0]["reports"][str(tid)] == "failed"
+
+
 # ── Engine: abandoned_ack_at is non-gating ──────────────────────────────────
 
 
@@ -1039,4 +1095,30 @@ def test_non_vacuity_confirming_read_invoked(workspace):
     # be [1, 2]; asserting spawns==[1] makes this RED without the confirming read.
     assert calls["n"] == 2
     assert spawns == [1]
+    assert _task_row(workspace, tid)["status"] == "complete"
+
+
+# ── Wave-summary context compression: no behavior change on small waves ──────
+
+
+def test_compression_seam_is_noop_on_small_wave(workspace):
+    """The default WaveDispatcher (no summarize_fn injected, no env) leaves a
+    small wave's summary byte-identical to pre-feature — the compression seam
+    adds NO keys and changes NO durable outcome on a sub-threshold wave."""
+    tid = _seed_task(workspace, title="noop", parallel_group=0)
+    d = WaveDispatcher(
+        workspace["db"],
+        spawn_fn=lambda task, attempt: None,
+        poll_fn=lambda task, attempt: _done_envelope(task["id"], attempt),
+        clock=FakeClock(),
+    )
+    summaries = d.run([_task_row(workspace, tid)])
+    assert set(summaries[0]) == {
+        "wave_id",
+        "expected",
+        "reports",
+        "outstanding",
+        "complete",
+        "terminal_only",
+    }
     assert _task_row(workspace, tid)["status"] == "complete"

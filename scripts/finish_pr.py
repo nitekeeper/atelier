@@ -19,7 +19,11 @@ Four surfaces:
   worktree dirty only with harness storage counts CLEAN.
 * :func:`open_pr` — a single ``gh pr create --base --head`` against the feature
   branch, fail-loud on non-zero / empty URL. The subprocess runner is
-  injectable so tests never shell out.
+  injectable so tests never shell out. **POLICY (A6): Atelier never pushes or
+  opens a PR — push + PR + merge belong to the human.** This function is RETAINED
+  for the human-side/operator tooling and its tests, but the ``internal/dev-finish``
+  team-mode procedure MUST NOT call it: finish consolidates the worktrees onto
+  the feature branch and hands that UNPUSHED branch off to the human.
 * :func:`write_retrospective` — ONE ``backend.write_document(domain='project_doc',
   subdomain='finish-result', ...)`` via the A2 facade. Mode-symmetric: there is
   NO mode branch here (the facade routes Local vs Memex), so the retro doc is
@@ -327,6 +331,10 @@ def open_pr(
     Returns the PR URL (gh prints it as the last non-empty stdout line). Raises
     :class:`RuntimeError` on a non-zero push/gh exit or an empty URL. The
     ``runner`` is injectable so tests can stub both subprocess calls.
+
+    POLICY (A6): push + PR are human-only. Atelier's ``dev:finish`` procedure
+    MUST NOT invoke this — it pushes and opens a PR, which is the human's step.
+    Retained for human-side/operator use and its unit tests only.
     """
     run = runner or _default_runner
 

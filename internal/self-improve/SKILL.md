@@ -167,6 +167,12 @@ Where:
 > **Note:** Decision and participant strings must not contain `|` characters. If a decision text contains `|`, replace it with ` / ` before passing.
 
 16. Push and merge:
+
+> **A6 exemption.** A6 forbids Atelier from pushing/PR/merge-to-main in every
+> other flow. This `push-merge` is the SINGLE documented carve-out (see
+> CLAUDE.md A6): it runs only in the operator-initiated, human-confirmed
+> self-update flow. Do not copy this push+merge pattern into the dev arc or any
+> cycle procedure.
 ```
 # If all changes are non-destructive (or all approved):
 python3 scripts/self_improve.py push-merge <clone_dir> <branch>

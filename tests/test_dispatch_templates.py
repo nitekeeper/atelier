@@ -22,6 +22,9 @@ briefing length.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 from jinja2 import Environment, UndefinedError, meta
 
@@ -33,9 +36,12 @@ from scripts.dispatch import (
     REQUIRED_VARS,
     TEMPLATE_DIR,
     MissingRenderVarsError,
+    compose_briefing,
     make_template_env,
     validate_render_context,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 ROLE_TEMPLATE = "briefings/role.j2"
 BASE_TEMPLATE = "_base.j2"
@@ -155,25 +161,52 @@ def test_role_template_renders_with_full_ctx() -> None:
 
 def test_role_template_includes_required_blocks() -> None:
     """role.j2 must fill all 6 blocks declared by _base.j2. Each block in
-    role.j2 emits a distinctive heading we can anchor on."""
+    role.j2 emits a distinctive heading we can anchor on.
+
+    The anchor list is EXACT and ORDERED (cycle-3 prompt-cache determinism,
+    AI-1): WAVE CONTEXT was moved from position 4 to LAST so the per-attempt
+    volatile deadline_iso/peers no longer truncate the cacheable
+    rules+persona+phase prefix on a same-role retry. A silent revert that
+    moves WAVE CONTEXT back ahead of TASK makes the explicit inversion asserts
+    below go RED.
+    """
     env = _make_env()
     tmpl = env.get_template(ROLE_TEMPLATE)
     out = tmpl.render(**_full_context())
 
+    # New canonical block order — WAVE CONTEXT is LAST.
     expected_block_anchors = [
         ("role", "# IDENTITY"),
         ("channel_handles", "# CHANNELS"),
         ("reply_contract", "# REPLY CONTRACT"),
-        ("wave_context", "# WAVE CONTEXT"),
         ("task", "# TASK"),
         ("abandon_clause", "# ABANDON GRAMMAR"),
+        ("wave_context", "# WAVE CONTEXT"),
     ]
     missing = [(block, anchor) for block, anchor in expected_block_anchors if anchor not in out]
     assert not missing, f"Rendered briefing missing block anchors: {missing}"
 
-    # Block ordering must match _base.j2 declaration order.
-    indices = [out.index(anchor) for _, anchor in expected_block_anchors]
-    assert indices == sorted(indices), f"Block anchors are out of declaration order: {indices}"
+    # EXACT ordered pin: each anchor must appear strictly before the next. A
+    # generic `indices == sorted(indices)` would silently pass any consistent
+    # ordering; this pins the precise sequence and FAILS on any reshuffle.
+    idx = {anchor: out.index(anchor) for _, anchor in expected_block_anchors}
+    assert idx["# IDENTITY"] < idx["# CHANNELS"], "IDENTITY must precede CHANNELS"
+    assert idx["# CHANNELS"] < idx["# REPLY CONTRACT"], "CHANNELS must precede REPLY CONTRACT"
+    assert idx["# REPLY CONTRACT"] < idx["# TASK"], "REPLY CONTRACT must precede TASK"
+    assert idx["# TASK"] < idx["# ABANDON GRAMMAR"], "TASK must precede ABANDON GRAMMAR"
+    assert idx["# ABANDON GRAMMAR"] < idx["# WAVE CONTEXT"], (
+        "ABANDON GRAMMAR must precede WAVE CONTEXT"
+    )
+
+    # The load-bearing inversion (AI-1): WAVE CONTEXT — carrying the volatile
+    # deadline_iso/peers — renders AFTER both TASK and ABANDON GRAMMAR so the
+    # big stable region is the longest deterministic same-role-retry prefix.
+    assert idx["# WAVE CONTEXT"] > idx["# TASK"], (
+        "WAVE CONTEXT (volatile) must render AFTER the stable TASK block"
+    )
+    assert idx["# WAVE CONTEXT"] > idx["# ABANDON GRAMMAR"], (
+        "WAVE CONTEXT (volatile) must render AFTER the stable ABANDON GRAMMAR block"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -325,3 +358,136 @@ def test_validate_render_context_treats_none_as_missing() -> None:
     with pytest.raises(MissingRenderVarsError) as excinfo:
         validate_render_context(ctx)
     assert "task_brief" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# 10 — cycle-3 prompt-cache determinism: list fields are byte-deterministic
+#      (AI-2) and same-role retries share a stable prefix through TASK (AI-3)
+# ---------------------------------------------------------------------------
+
+
+def _compose_kwargs(**overrides) -> dict:
+    """Minimal valid kwarg set for compose_briefing against the real on-disk
+    rules SKILL — mirrors the helper in test_caveman_levers.py so the
+    cache-determinism tests exercise the production assembly, not a mock."""
+    rules = (REPO_ROOT / "internal" / "team-mode-rules" / "SKILL.md").read_text(encoding="utf-8")
+    assert rules, "rules SKILL.md is empty — fixture broken"
+    base = {
+        "role_id": "backend-engineer-1",
+        "task_id": 7,
+        "persona_profile_text": "You are a backend engineer.",
+        "phase_procedure_text": "Follow the dev-tdd arc.",
+        "task_brief": "Add a unit test for X. UNIQUE_TASK_SENTINEL_4831.",
+        "team_id": "atelier-cache-team-1",
+        "team_lead_name": "team-lead",
+        "wave_id": "wave-1",
+        "wave_phase": "implement",
+        "deadline_iso": "2026-06-06T22:00:00Z",
+        "peers": [
+            {"role_id": "sdet-1", "mandate": "Author chaos tests."},
+            {"role_id": "frontend-engineer-1", "mandate": "Wire the UI."},
+        ],
+        "forbidden_actions": [
+            "Touching paths outside the clone.",
+            "Editing migrations/shared/001_*.sql.",
+        ],
+        "acceptance_criteria": [
+            "pytest -q is green.",
+            "ruff check . is clean.",
+        ],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_list_fields_are_byte_deterministic_under_reordering() -> None:
+    """AI-2 anti-revert: peers / forbidden_actions / acceptance_criteria are
+    sorted at composition time, so passing them in REVERSED order must produce
+    a BYTE-IDENTICAL briefing. NEUTER: remove any one of the three `sorted(...)`
+    calls in compose_briefing and the reversed-order render diverges → RED.
+
+    The sort keys are pinned implicitly by the assertion: peers sort by
+    `role_id`, the two string lists sort by their natural string order. An
+    unstable or partial key would let the reversed inputs render differently.
+    """
+    forward = _compose_kwargs()
+    reversed_ = _compose_kwargs(
+        peers=list(reversed(forward["peers"])),
+        forbidden_actions=list(reversed(forward["forbidden_actions"])),
+        acceptance_criteria=list(reversed(forward["acceptance_criteria"])),
+    )
+    # Sanity: the inputs really are in a different order so a no-op sort would
+    # NOT make these equal — the equality below is earned by sorting.
+    assert forward["peers"] != reversed_["peers"]
+    assert forward["forbidden_actions"] != reversed_["forbidden_actions"]
+    assert forward["acceptance_criteria"] != reversed_["acceptance_criteria"]
+
+    a = compose_briefing(**forward)
+    b = compose_briefing(**reversed_)
+    assert a == b, (
+        "compose_briefing must re-render byte-identically regardless of the order "
+        "peers/forbidden_actions/acceptance_criteria are supplied (cycle-3 "
+        "prompt-cache determinism, AI-2)"
+    )
+
+
+def test_same_role_retry_prefix_is_stable_through_task_block() -> None:
+    """AI-3 — same-role-retry PREFIX PARITY (cycle-3 prompt-cache determinism).
+
+    Two compose_briefing renders for the SAME role + SAME task that differ
+    ONLY in `deadline_iso` (the per-attempt volatile field) must share a
+    byte-identical PREFIX that runs through the ENTIRE stable region — the
+    rules+persona+phase TASK block and the ABANDON GRAMMAR block — with the
+    first byte of divergence falling at/after `# WAVE CONTEXT`.
+
+    This encodes the AI-1 reorder's contract: the volatile deadline_iso now
+    lives in the LAST structural block, so it can no longer truncate the
+    cacheable prefix in front of TASK. Under the pre-change ordering (WAVE
+    CONTEXT at position 4, deadline_iso ahead of TASK) the shared prefix would
+    end before `# TASK` and this test goes RED — i.e. it FAILS if AI-1 is
+    silently reverted.
+    """
+    attempt1 = _compose_kwargs(deadline_iso="2026-06-06T22:00:00Z")
+    attempt2 = _compose_kwargs(deadline_iso="2026-06-06T23:30:00Z")
+    a = compose_briefing(**attempt1)
+    b = compose_briefing(**attempt2)
+
+    # Only deadline_iso differs → the briefings are NOT identical (the volatile
+    # field must actually be present and divergent, else the test is vacuous).
+    assert a != b, "deadline_iso change must alter the rendered briefing"
+
+    common_prefix_len = len(os.path.commonprefix([a, b]))
+
+    # (a) The shared prefix CONTAINS the full stable region: the # TASK
+    # heading, the unique task_brief sentinel, and the # ABANDON GRAMMAR
+    # heading all fall INSIDE the byte-identical prefix.
+    shared = a[:common_prefix_len]
+    assert "# TASK" in shared, "stable # TASK heading must be inside the shared retry prefix"
+    assert "UNIQUE_TASK_SENTINEL_4831" in shared, (
+        "the full sanitized task_brief must be inside the shared retry prefix"
+    )
+    assert "# ABANDON GRAMMAR" in shared, (
+        "stable # ABANDON GRAMMAR heading must be inside the shared retry prefix"
+    )
+
+    # (b) The FIRST byte of divergence falls at/after the `# WAVE CONTEXT`
+    # heading — the volatile deadline_iso renders INSIDE that (now-last) block,
+    # so the heading itself is stable boilerplate inside the shared prefix and
+    # divergence only begins once we reach the deadline value beyond it.
+    # Equivalently: divergence index (== common_prefix_len) is AT/AFTER the
+    # WAVE CONTEXT heading index. Under the pre-AI-1 ordering, deadline_iso sat
+    # in front of # TASK, so divergence would begin BEFORE # TASK and this
+    # assertion (together with the TASK-in-shared assert above) goes RED.
+    wave_idx = a.index("# WAVE CONTEXT")
+    assert common_prefix_len >= wave_idx, (
+        "divergence must begin at/after the WAVE CONTEXT block (the volatile "
+        "deadline_iso lives there); it currently begins before it, which means "
+        "AI-1's reorder was reverted and volatility migrated in front of TASK"
+    )
+    # And the stable headings precede the divergence point, double-pinning the
+    # geometry against a partial revert that moves only one block.
+    assert a.index("# TASK") < common_prefix_len
+    assert a.index("# ABANDON GRAMMAR") < common_prefix_len
+    # The WAVE CONTEXT heading itself is inside the shared prefix; only the
+    # deadline value beyond it diverges.
+    assert wave_idx < common_prefix_len

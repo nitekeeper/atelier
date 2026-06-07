@@ -5,9 +5,16 @@
     1. role              — IDENTITY block (persona + team-lead binding)
     2. channel_handles   — team_id, bridge cmd one-liners, last_seq cursor
     3. reply_contract    — reply envelope + closure tokens + shutdown handshake
-    4. wave_context      — wave_id, phase, peers, deadline, quorum_rule
-    5. task              — {{ untrusted(task_brief, "pm") }} slot
-    6. abandon_clause    — abandon regex + 8 categories
+    4. task              — {{ untrusted(task_brief, "pm") }} slot
+    5. abandon_clause    — abandon regex + 8 categories
+    6. wave_context      — wave_id, phase, peers, deadline, quorum_rule
+
+  wave_context renders LAST so the per-attempt-volatile deadline_iso/peers do
+  not truncate the cacheable rules+persona+phase prefix on same-role retries
+  (cycle-3 prompt-cache determinism). The big stable rules+persona+phase
+  task_brief is now the longest deterministic prefix that a same-role re-spawn
+  re-renders byte-identically; the only field that moves between attempts
+  (deadline_iso, peers) lives behind it, after the shared prefix.
 
   All vars are STRICT-required. dispatch.py wires
   Environment(undefined=StrictUndefined, autoescape=False,
@@ -50,8 +57,8 @@
 
 {% block reply_contract %}{% endblock %}
 
-{% block wave_context %}{% endblock %}
-
 {% block task %}{% endblock %}
 
 {% block abandon_clause %}{% endblock %}
+
+{% block wave_context %}{% endblock %}

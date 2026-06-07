@@ -1,6 +1,6 @@
 ---
 schema_version: 1
-version: 1.3
+version: 1.3.1
 description: Team-mode hard rules — atelier multi-party channel contract. Read by `scripts/dispatch.py` and prepended verbatim to every worker briefing.
 ---
 
@@ -39,6 +39,7 @@ You are a worker (or team-lead) operating inside an atelier team-mode run. This 
 | 1.2     | 2026-05-29 | Added `attempt` to the reply-envelope schema (table + JSON example). PM's wave-dispatch validator (atelier#60, `scripts/pm_dispatch_envelope.py` check 3) cross-checks it against the dispatched attempt for anti-spoofing; workers MUST emit it. Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged). |
 | 1.2.1   | 2026-05-31 | Heartbeat clause cross-reference: a missed heartbeat is a GO-OBSERVE signal for PM (kaizen F15 / atelier#78) — PM confirms via a final reply read before charging a failed attempt (read-first stall detection in `scripts/pm_dispatch.py` `_observe_before_kill`). PM-side orchestrator behavior, not a worker MUST — no new TM-NNN rule. Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged). |
 | 1.3     | 2026-06-06 | Added the `failed` closure token (TM-006 + reply-envelope schema/table). `failed` is a terminal-ONLY, run-and-failed signal (deterministic hard failure) — distinct from the RETRYABLE `blocked`/`needs-input`; PM routes it to a terminal record+escalate handler and does NOT re-dispatch (`scripts/pm_dispatch.py` `_handle_envelope`). Single-sourced via `scripts/dispatch.py` `TERMINAL_STATUSES`/`TERMINAL_ONLY_STATUSES`; artifacts optional (like `abandoned`). Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged; the token set is application-validated, not a DB CHECK). |
+| 1.3.1   | 2026-06-07 | Added the *Context-budget discipline* reference subsection: a worker's context is NOT auto-managed by atelier's orchestrator-only hooks (`hooks/context_budget.py` 125k nudge + `hooks/pre_compact.py` snapshot fire only in the orchestrator session), so near ~125000 tokens a worker MUST checkpoint-then-wind-down rather than accumulate past ~150000. The load-bearing signal is the always-on `_CONTEXT_BUDGET_RULE` appended by `scripts/dispatch.py::compose_briefing` (single-sourced there); this file cross-references it. Worker-side discipline, not a new TM-NNN MUST. Doc-only change — no `schema_version` bump (the bridge DB schema is unchanged). |
 
 A `schema_version` bump REQUIRES a CHANGELOG row in the same commit. Dispatch refuses to spawn teammates whose runtime-reported version mismatches the migration's `PRAGMA user_version`.
 
@@ -166,6 +167,10 @@ bridge_send --channel <worker_channel> --kind heartbeat
 Heartbeats record liveness ONLY: `(team_id, role_id, last_seen_iso)`. NO transcript or content snapshots. Retention is lifetime-of-team-row; cascade-deleted on team teardown.
 
 A missed heartbeat is a **GO-OBSERVE signal** for PM, never a unilateral kill — PM confirms via a **final reply read** before charging a failed attempt (kaizen F15 / atelier#78; see `internal/pm-dispatch/SKILL.md` → *Read-first on the deadline trip*).
+
+## Context-budget discipline (reference)
+
+Your working context is INDEPENDENT and is NOT auto-managed by atelier. The PostToolUse 125k nudge (`hooks/context_budget.py`) and PreCompact snapshot (`hooks/pre_compact.py`) fire only in the **orchestrator's interactive session** (scoped to `.ai/active_project`) — they do NOT reach you as a spawned worker, and a one-shot subagent cannot self-fire `/compact`. So this is your responsibility: when your context approaches **~125000 tokens**, FIRST write a durable structured checkpoint of your decisions/blockers/partial-progress (a short file in your working dir or your returned structured summary), THEN wind down and return your terminal reply envelope rather than accumulating past ~150000 tokens. This is the same guidance carried verbatim in your briefing's `# CONTEXT BUDGET` section (single-sourced as `scripts/dispatch.py::compose_briefing`'s `_CONTEXT_BUDGET_RULE`); it is worker-side discipline, not a new TM-NNN MUST.
 
 ## Self-verify protocol (summary — full procedure in `internal/dev-verify/SKILL.md`)
 

@@ -145,6 +145,50 @@ _TERSE_OUTPUT_RULE = (
     "sequences), write that part in full."
 )
 
+# ── CONTEXT-BUDGET discipline — always-on, reaches EVERY dispatched worker ──
+#
+# The HONEST mechanism (read this before assuming the hooks cover you): atelier's
+# PostToolUse nudge (``hooks/context_budget.py``, 125k) and PreCompact snapshot
+# (``hooks/pre_compact.py``) fire ONLY in the ORCHESTRATOR's interactive session,
+# scoped to ``.ai/active_project`` presence. A worker spawned one-shot via the
+# bridge-poll ``Agent(...)`` servicer (``build_spawn_fn`` → ``briefing_for`` →
+# ``compose_briefing`` → ``dispatch_task`` → ``spawn_subagent``/``spawn_teammate``)
+# does NOT inherit those hooks — its working context is independent and is NOT
+# auto-managed by atelier. So the ONLY context-budget signal that reaches a
+# worker is THIS briefing text. This rule is that signal: it tells the worker to
+# checkpoint-then-wind-down near the threshold so a subagent does not silently
+# blow past ~150k mid-task (the measured pain this lever closes).
+#
+# Claude Code has NO native "auto-compact at a token threshold" trigger and a
+# one-shot subagent cannot self-fire ``/compact``; therefore this is honest
+# AGENT-ACTED discipline (checkpoint first, then wind down + return), NOT a claim
+# of silent automatic compaction.
+#
+# Threshold (125000) is kept consistent with
+# ``hooks/context_budget.py::DEFAULT_THRESHOLD_TOKENS`` — keep them in sync if it
+# changes (CLAUDE.md ``## Auto-trigger architecture`` documents the contract).
+#
+# Same append discipline as ``_TERSE_OUTPUT_RULE``: opens with "\n\n" + its own
+# ``# CONTEXT BUDGET`` heading, appended to the RENDERED briefing OUTSIDE the
+# template's ``untrusted`` TASK fence (guidance, never injectable task data). It
+# does NOT touch role.j2 / _base.j2 (their byte-parity tests stay green) and does
+# NOT touch the TM-006 reply envelope.
+_CONTEXT_BUDGET_RULE = (
+    "\n\n# CONTEXT BUDGET (read last)\n\n"
+    "Your working context is INDEPENDENT and is NOT auto-managed by atelier's "
+    "hooks — the PostToolUse 125k nudge and PreCompact snapshot fire only in the "
+    "orchestrator's interactive session, not inside your spawn. So YOU must act: "
+    "when your context approaches ~125000 tokens, do BOTH, in order. (1) FIRST "
+    "write a durable structured checkpoint of your decisions, blockers, and "
+    "partial-progress — either a short file in your working dir (e.g. "
+    "`.ai/subagent-checkpoints/<role>-checkpoint.md`) or your returned structured "
+    "summary — so nothing is lost. (2) THEN wind down and RETURN your terminal "
+    "`task_result` / structured summary rather than continuing to accumulate past "
+    "~150000 tokens. Claude Code cannot silently auto-compact a one-shot subagent "
+    "at a threshold, so this is your responsibility — checkpoint first, then "
+    "return; do not just keep going."
+)
+
 # Control-char sweep — C0 minus TAB (\x09), LF (\x0a), CR (\x0d). Bridge
 # payloads MUST be stripped of these before they reach the template per the
 # comment block at the top of internal/team-mode-templates/_base.j2.
@@ -438,11 +482,14 @@ def compose_briefing(
         "wave_id": wave_id,
         "wave_phase": wave_phase,
         "deadline_iso": deadline_iso,
-        "peers": list(peers or []),
+        # Sort list fields for byte-determinism so same-role retries re-render an
+        # identical prefix (cycle-3 prompt-cache determinism). Order is
+        # presentational only — workers read the same items.
+        "peers": sorted(peers or [], key=lambda p: str(p.get("role_id", ""))),
         "quorum_rule": quorum_rule,
-        "forbidden_actions": list(forbidden_actions or []),
+        "forbidden_actions": sorted(str(a) for a in (forbidden_actions or [])),
         "task_brief": composed_task_brief,
-        "acceptance_criteria": list(acceptance_criteria or []),
+        "acceptance_criteria": sorted(str(ac) for ac in (acceptance_criteria or [])),
         # team_chat is ALWAYS a non-None dict: coerce None → bridge fallback so
         # the template's {% if team_chat.transport == 'loom' %} branch is
         # byte-stable for existing callers and validate_render_context passes.
@@ -459,7 +506,14 @@ def compose_briefing(
     # its own paragraph; we rstrip the rendered body first so the separator is
     # exactly one clean paragraph break regardless of the template's trailing
     # whitespace. Does NOT modify role.j2 / _base.j2 or the TM-006 contract.
-    return rendered.rstrip() + _TERSE_OUTPUT_RULE
+    #
+    # CONTEXT-BUDGET discipline — also always-on, appended AFTER the terse rule
+    # (deterministic, stable order: terse → context-budget). Both sit OUTSIDE the
+    # untrusted TASK fence; both open with "\n\n" so each is its own paragraph.
+    # This is the single load-bearing channel that reaches a one-shot worker — the
+    # PostToolUse/PreCompact hooks fire only in the orchestrator session, never in
+    # a spawned worker (see `_CONTEXT_BUDGET_RULE`).
+    return rendered.rstrip() + _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
 
 
 # ── Wave tracking + heartbeat monitoring ──────────────────────────────────

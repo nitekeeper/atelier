@@ -69,8 +69,13 @@ def test_b1_terse_rule_present_in_composed_briefing():
     distinctive substring would be absent and the test goes RED."""
     body = compose_briefing(**_compose_kwargs())
     assert _TERSE_OUTPUT_RULE in body
-    # It is the briefing's FINAL guidance section (the append site).
-    assert body.rstrip().endswith(_TERSE_OUTPUT_RULE.rstrip())
+    # The terse rule is appended AFTER the rendered template body (the append
+    # site). It is no longer the briefing's very last section — the always-on
+    # context-budget rule (_CONTEXT_BUDGET_RULE) is appended directly after it
+    # in a stable terse → context-budget order (see test_context_budget_lever).
+    fence_close = body.rfind("</untrusted>")
+    assert fence_close != -1
+    assert body.find(_TERSE_OUTPUT_RULE) > fence_close
 
 
 def test_b1_terse_rule_appended_after_template_body_outside_untrusted_fence():

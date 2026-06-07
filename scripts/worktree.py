@@ -17,6 +17,7 @@ def detect_worktree(cwd: Path) -> tuple[bool, str]:
 
 
 def get_current_branch(cwd: Path) -> str:
+    """Return the current branch name in `cwd`, or "" when HEAD is detached."""
     result = _git(["branch", "--show-current"], cwd)
     return result.stdout.strip()
 

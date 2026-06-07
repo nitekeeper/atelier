@@ -7,6 +7,15 @@ from pathlib import Path
 
 
 def git(args: list[str], cwd: Path, check: bool = True, **kwargs) -> subprocess.CompletedProcess:
+    """Run a git subcommand in `cwd` and return the CompletedProcess.
+
+    `args` is the git argument list WITHOUT the leading ``git`` (e.g.
+    ``["status", "--porcelain"]``). Output is captured as utf-8 text
+    (``stdout`` / ``stderr`` on the returned object). When `check` is True
+    (the default) a non-zero exit raises ``CalledProcessError``; pass
+    ``check=False`` to inspect ``returncode`` yourself. Extra `kwargs` are
+    forwarded to ``subprocess.run``.
+    """
     return subprocess.run(
         ["git", *args],
         cwd=cwd,

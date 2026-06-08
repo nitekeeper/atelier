@@ -31,8 +31,10 @@ import datetime
 import importlib
 import importlib.util
 import json
+import os
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 from scripts import mode_detector, seed_data
@@ -80,6 +82,125 @@ def _require_memex_version(floor: tuple[int, int, int] = MIN_MEMEX_VERSION) -> s
     return version_str
 
 
+# ── Hook registration ─────────────────────────────────────────────────────────
+
+
+def _register_hooks() -> None:
+    """Merge Atelier's ``hooks/hooks.json`` entries into ``~/.claude/settings.json``.
+
+    Resolves ``${CLAUDE_PLUGIN_ROOT}`` to the actual plugin root path. Each
+    hook is identified by its script filename (e.g. ``context_budget.py``):
+
+    * If an entry with that filename is **absent** — the entry is appended.
+    * If it is **present with a different path** (version upgrade) — the
+      command is updated to the current plugin root in-place.
+    * If it is **present and already matches** — the entry is left unchanged.
+
+    Atomic write (temp file + ``os.replace``) so readers never see a partial
+    file. Silently no-ops on ANY error — hook registration must never abort a
+    session's pre-flight.
+    """
+    try:
+        plugin_root = Path(__file__).resolve().parents[1]
+        hooks_source = plugin_root / "hooks" / "hooks.json"
+        if not hooks_source.exists():
+            return
+
+        raw: dict = json.loads(hooks_source.read_text(encoding="utf-8"))
+        to_register: dict = raw.get("hooks", {})
+        if not to_register:
+            return
+
+        root_str = str(plugin_root)
+
+        def _resolve(cmd: str) -> str:
+            return cmd.replace("${CLAUDE_PLUGIN_ROOT}", root_str)
+
+        settings_file = Path.home() / ".claude" / "settings.json"
+        current: dict = {}
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            parsed = json.loads(settings_file.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                current = parsed
+
+        merged = dict(current)
+        existing_hooks: dict = merged.get("hooks", {})
+        if not isinstance(existing_hooks, dict):
+            existing_hooks = {}
+        # Work on a mutable copy of each per-event list.
+        new_hooks: dict = {
+            evt: list(lst) for evt, lst in existing_hooks.items() if isinstance(lst, list)
+        }
+        changed = False
+
+        for event_type, entries in to_register.items():
+            bucket: list = new_hooks.setdefault(event_type, [])
+            for entry in entries:
+                for hook_spec in entry.get("hooks", []):
+                    raw_cmd = hook_spec.get("command", "")
+                    if not raw_cmd:
+                        continue
+                    resolved_cmd = _resolve(raw_cmd)
+                    # Identity key: the script filename (last path component).
+                    script = resolved_cmd.rsplit("/", 1)[-1]
+
+                    # Locate any existing bucket entry that references the
+                    # same script filename — from any prior version's root.
+                    found_at: int | None = None
+                    for i, existing_entry in enumerate(bucket):
+                        for eh in existing_entry.get("hooks", []):
+                            ec = eh.get("command", "")
+                            if ec.rsplit("/", 1)[-1] == script:
+                                found_at = i
+                                if ec != resolved_cmd:
+                                    # Path changed (version upgrade) — update.
+                                    new_entry = dict(existing_entry)
+                                    new_entry["hooks"] = [
+                                        (
+                                            {**eh2, "command": resolved_cmd}
+                                            if eh2.get("command", "").rsplit("/", 1)[-1] == script
+                                            else eh2
+                                        )
+                                        for eh2 in existing_entry.get("hooks", [])
+                                    ]
+                                    bucket[i] = new_entry
+                                    changed = True
+                                break
+                        if found_at is not None:
+                            break
+
+                    if found_at is None:
+                        # Not present — append a fully-resolved copy.
+                        new_entry = dict(entry)
+                        new_entry["hooks"] = [
+                            ({**hs, "command": _resolve(hs["command"])} if "command" in hs else hs)
+                            for hs in entry.get("hooks", [])
+                        ]
+                        bucket.append(new_entry)
+                        changed = True
+
+        if not changed:
+            return
+
+        merged["hooks"] = new_hooks
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            prefix=".atelier-hooks-",
+            suffix=".json.tmp",
+            dir=str(settings_file.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(merged, fh, indent=2, sort_keys=True)
+                fh.write("\n")
+            os.replace(tmp, settings_file)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+    except Exception:
+        return  # never let hook registration abort a session's pre-flight
+
+
 # ── Public entry ──────────────────────────────────────────────────────────────
 
 
@@ -118,6 +239,10 @@ def run_bootstrap(*, force: bool = False) -> dict:
     """
     _refuse_half_installed_memex()
     _enforce_memex_version_floor()
+    # Register hooks every call — idempotent and cheap. Called before the
+    # marker check so existing installs pick up the hooks on the very next
+    # session without waiting for a version bump to invalidate the marker.
+    _register_hooks()
     if not force and _check_marker_and_skip():
         return _load_marker_result()
     mode = mode_detector.detect_mode()

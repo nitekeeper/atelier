@@ -79,6 +79,35 @@ def _settings_rec_offer() -> dict | None:
         return None
 
 
+def _write_active_project_file() -> None:
+    """Write ``.ai/active_project`` so Atelier's hook scope gate works in
+    Memex mode.
+
+    In Local mode the project-creation SKILL writes this file when a
+    project is created or opened. In Memex mode no SKILL writes it —
+    the active project is tracked in ``~/.atelier/state.json`` and in
+    the Memex DB. The hook scope gate (``hooks/context_budget.py`` and
+    ``hooks/session_open.py``) reads only the file, so it always bails
+    out silently for Memex sessions.
+
+    Called from the ``proceed-memex`` branch of ``startup_check``, this
+    writes a fixed sentinel so PostToolUse / PreCompact hooks know an
+    Atelier session is active. The sentinel value ``"memex"`` is
+    sufficient — the hooks only check presence and non-emptiness.
+
+    Silently no-ops on any error — a write failure must not abort a
+    session's pre-flight.
+    """
+    try:
+        ai = _project_ai_dir()
+        if ai is None:
+            return
+        ai.mkdir(parents=True, exist_ok=True)
+        (ai / "active_project").write_text("memex", encoding="utf-8")
+    except Exception:
+        return
+
+
 def startup_check() -> dict:
     """Run the pre-flight check for an entry skill and return an action
     token. See the module docstring for the action contract.
@@ -157,6 +186,10 @@ def startup_check() -> dict:
     settings_offer = _settings_rec_offer()
     if settings_offer is not None:
         memex_result["settings_rec_offer"] = settings_offer
+    # Ensure .ai/active_project exists for the hook scope gate. In Local mode
+    # the project-creation SKILL writes this; in Memex mode nothing does —
+    # so we write a sentinel here at session start (idempotent, no-op on error).
+    _write_active_project_file()
     return memex_result
 
 

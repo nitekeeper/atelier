@@ -1,0 +1,972 @@
+{
+  "version": "1.6.0",
+  "built_at": "2026-06-08T02:29:44.574688+00:00",
+  "file_count": 193,
+  "files": [
+    {
+      "path": ".claude-plugin/plugin.json",
+      "sha256": "5481fb06d94eba88b1dcf1f578305a41cc90e8f8a128919d311ca3ae3a29a1bf",
+      "bytes": 187
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "eaab2189dbdf48da6128f3d5030e518c26b21c3e89da7b98da167eefe037d739",
+      "bytes": 13305
+    },
+    {
+      "path": "INSTALL.md",
+      "sha256": "a9035a97b8206786ec960d0772c3f1eb277325dc52caa5a91477f8cb8b078e1f",
+      "bytes": 1938
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "8153e4cead4e45b0432835e471f7b5ebb3fab7deb3fc208bd34668ea79d885d5",
+      "bytes": 1068
+    },
+    {
+      "path": "README.md",
+      "sha256": "02bd56793ae00c9a9dadf2976d5763caff55c25a92cf432482d3c94061990960",
+      "bytes": 8356
+    },
+    {
+      "path": "hooks/context_budget.py",
+      "sha256": "10eacc9d384471e0cac81658f31b2f03024e5c58677d771dad22ff7dc171ad64",
+      "bytes": 10988
+    },
+    {
+      "path": "hooks/hooks.json",
+      "sha256": "c817c1cf6326fb44424abd12409eceb39e117f4de913a122df73caab21d5d8ab",
+      "bytes": 502
+    },
+    {
+      "path": "hooks/pre_compact.py",
+      "sha256": "5a909e350b305e84435db959e9278945f1f5c04d453b0c8b2e732edb7402bfcc",
+      "bytes": 8798
+    },
+    {
+      "path": "hooks/session_open.py",
+      "sha256": "93ba3f9f916ab1327f27a922547e67ffe56280360045e1d3172dd240ebcc14ee",
+      "bytes": 5562
+    },
+    {
+      "path": "hooks/session_start.py",
+      "sha256": "0597553d5be34bdc73461e6ac63c3a2733eb6a996a7579fef5cd3b9abe9e2656",
+      "bytes": 1731
+    },
+    {
+      "path": "internal/agent-desk/SKILL.md",
+      "sha256": "e71bee7d258cfbdabdce6a0428ab5834b876b1a295d727b09bc4e04f61528dfa",
+      "bytes": 1885
+    },
+    {
+      "path": "internal/agent/SKILL.md",
+      "sha256": "cf61e68b275cc0112acb37443ea412c4bf781a0988f19069d0a50a6c42fb0426",
+      "bytes": 2222
+    },
+    {
+      "path": "internal/bootstrap-memex/SKILL.md",
+      "sha256": "1cb4a224ab535fe5190f67a0dc97da310d588467e6fc27827cc2cdea3a77c76d",
+      "bytes": 9503
+    },
+    {
+      "path": "internal/bridge-poll/SKILL.md",
+      "sha256": "750db386a20a2b79f8026b3bb21566122e681b497b99efbd6f09cae7d8e1ec50",
+      "bytes": 11456
+    },
+    {
+      "path": "internal/dev-design/SKILL.md",
+      "sha256": "eda666883fdd58aaa047753c71a77aac15740b06d4713ce5991d9ab1c3df599d",
+      "bytes": 5088
+    },
+    {
+      "path": "internal/dev-diagnose/SKILL.md",
+      "sha256": "8c8427f123f7286ff1a991e8a2cb7ca3e9df43f7156b460a623f72c8e7dfe3e8",
+      "bytes": 4366
+    },
+    {
+      "path": "internal/dev-dispatch/SKILL.md",
+      "sha256": "a4c41794a73aa33cc91b9cab4aee5ccca58a7048af9944387fc8424aabb47787",
+      "bytes": 16099
+    },
+    {
+      "path": "internal/dev-finish/SKILL.md",
+      "sha256": "238e827e9e7a3a1f492494701fbee6d4e99a5734def12ba6ac63665f219f99ec",
+      "bytes": 14455
+    },
+    {
+      "path": "internal/dev-handoff/SKILL.md",
+      "sha256": "1b76b15e871ffd9763de00707e2f4f170beb022b340b725f1b5ce0a1e95801f6",
+      "bytes": 3337
+    },
+    {
+      "path": "internal/dev-plan/SKILL.md",
+      "sha256": "6b58492f120e69f7e6a2344777e6140245ea1f0bf2d2f3c60e3ecd8abf831b0c",
+      "bytes": 7819
+    },
+    {
+      "path": "internal/dev-qa/SKILL.md",
+      "sha256": "9ee4f9fd48256039042633f5643e969c435c8bf5a1b840ad47e4efc3ce2b0d59",
+      "bytes": 3704
+    },
+    {
+      "path": "internal/dev-receive-review/SKILL.md",
+      "sha256": "ace7958e0972e0adecefeb5e4567bab709160a4e57320b87d4daaa9ea0200774",
+      "bytes": 4154
+    },
+    {
+      "path": "internal/dev-review/SKILL.md",
+      "sha256": "2f674f4d87a17cf60d76fb97edab4f81d41e3eaa3c1dda48fc585207f226a5c8",
+      "bytes": 4063
+    },
+    {
+      "path": "internal/dev-security/SKILL.md",
+      "sha256": "72a4f63469b6be6499485422431879a9a96aa8dfa2d9f6c8a5e8c9c7692709ff",
+      "bytes": 4203
+    },
+    {
+      "path": "internal/dev-subagent/SKILL.md",
+      "sha256": "da71ae9b5fec68e5d460c793aed1f7c75d72f7b0e7386ffb3fe6ece5c67b3251",
+      "bytes": 4369
+    },
+    {
+      "path": "internal/dev-subagent/implementer-prompt.md",
+      "sha256": "74e390e454cf785f78d768aa2f12b3aba38d7f1d2e8c20193c4bdf087cbb357d",
+      "bytes": 1762
+    },
+    {
+      "path": "internal/dev-subagent/quality-reviewer-prompt.md",
+      "sha256": "5878b9c0f513f3702c9d4b57efc679266a4eb65d350db3e43c5e16c1c0f2703e",
+      "bytes": 1478
+    },
+    {
+      "path": "internal/dev-subagent/spec-reviewer-prompt.md",
+      "sha256": "1c7089457020e4fae96f15b4d35a3f65e4edb3d1293133db13b24d244b77e1b6",
+      "bytes": 1439
+    },
+    {
+      "path": "internal/dev-tdd/SKILL.md",
+      "sha256": "0eb299be444f59dff70fc464740744d5a0ec45c057a1748185dbe93692f453f1",
+      "bytes": 4776
+    },
+    {
+      "path": "internal/dev-verify/SKILL.md",
+      "sha256": "07668a9b383ac8facd91eaafcabd5dee079b89ea1b5265a72cc5a854fad4613e",
+      "bytes": 3867
+    },
+    {
+      "path": "internal/dev-write-skill/SKILL.md",
+      "sha256": "520241a1c0b639332813aa9e01e18c58c2383d9a4d52093553e32a0b550c578b",
+      "bytes": 6239
+    },
+    {
+      "path": "internal/doc/SKILL.md",
+      "sha256": "0200ca52c85cf64d695ce6ced98185c0db232b7d3946f8955faafff0836dbb45",
+      "bytes": 2338
+    },
+    {
+      "path": "internal/local/state-crud/SKILL.md",
+      "sha256": "dc7cd697f5560422fc00f265b0c8a3a5b4468b669fbd0488402a05972252c5d6",
+      "bytes": 3496
+    },
+    {
+      "path": "internal/local/wiki-archive/SKILL.md",
+      "sha256": "7f9dff5e62a9478f0fa9b115e87649a5de7f6c835e396049e590b4d321d4747a",
+      "bytes": 3033
+    },
+    {
+      "path": "internal/local/wiki-search/SKILL.md",
+      "sha256": "25b7e5f47e11fa5060e434e101ff5ae20284fd3ce302a16f9495d2a21575d636",
+      "bytes": 2609
+    },
+    {
+      "path": "internal/local/wiki-write/SKILL.md",
+      "sha256": "0b598cca4c34d0cc6bba6b6d017138a27e98c811299025d6b9e6e5432fcac5d0",
+      "bytes": 3117
+    },
+    {
+      "path": "internal/meeting/SKILL.md",
+      "sha256": "7baedc4b9163524ae28088d6e67c407190cc6cbd0015bbf78f067588c5a15116",
+      "bytes": 2896
+    },
+    {
+      "path": "internal/memex/atelier-search-shims.md",
+      "sha256": "0afa59bbf7168f9f341c0d4e144151d13c8aad0c1438873c1a1ae94ee4971d45",
+      "bytes": 12069
+    },
+    {
+      "path": "internal/memex/dispatch-core/SKILL.md",
+      "sha256": "5a4263394148fea0b200d5640d2e34f50230761b1abc082745c8a975dcc421a7",
+      "bytes": 8404
+    },
+    {
+      "path": "internal/memex/dispatch-write/SKILL.md",
+      "sha256": "5f42bf26c010abffb3e2f53231c8bd95e5bc6a0cae6919598241383589cd380f",
+      "bytes": 9068
+    },
+    {
+      "path": "internal/memex/domain-vocabulary.md",
+      "sha256": "666ab0659e80b6a00123f04e93ed3deab29f1f64e7e1b571d27bb7fd7ca0a30a",
+      "bytes": 6367
+    },
+    {
+      "path": "internal/migrate-local-to-memex/SKILL.md",
+      "sha256": "4f1115f9cb2422b6d87edc8319c9b77eb5111a1045a54269322d83ef92111017",
+      "bytes": 3465
+    },
+    {
+      "path": "internal/plan-wave-0/SKILL.md",
+      "sha256": "5054a8010a96671f0564f74129bb88378d4bfacf32ebd04bf4b2f265d1f741f1",
+      "bytes": 3230
+    },
+    {
+      "path": "internal/plan-wave-1/SKILL.md",
+      "sha256": "009421071e1c0baacf96424009d7c1d87f52c5e9d53e15dc972bce7dfc7543df",
+      "bytes": 8165
+    },
+    {
+      "path": "internal/pm-dispatch/SKILL.md",
+      "sha256": "51ddc9d5e6c541932bf2049eeb52e751375049f382986516c2fbf17e82d730c3",
+      "bytes": 19114
+    },
+    {
+      "path": "internal/project/SKILL.md",
+      "sha256": "ae99c88c72d1be5234ac36e35d9d2b49383807ca91fea3d879abd94f7c52b244",
+      "bytes": 2480
+    },
+    {
+      "path": "internal/role/SKILL.md",
+      "sha256": "3a15b464a481a3b544a2ce934a6f128060535f47f7a2b67d07e9fd1a6062d7cc",
+      "bytes": 1920
+    },
+    {
+      "path": "internal/room/SKILL.md",
+      "sha256": "934701b98d51232ec402f4c053a61ceb3878dfd500f4e87560f11db0aaea729b",
+      "bytes": 1997
+    },
+    {
+      "path": "internal/self-improve/SKILL.md",
+      "sha256": "ff5bcc0bc9c1c6c59a88d86909a8f56a5010c4f76be1a0464b3319f9b4bbbd3a",
+      "bytes": 8351
+    },
+    {
+      "path": "internal/settings-recommendation/SKILL.md",
+      "sha256": "1f04110376fe42f0df70ea10b28d8a01d00641dc21edff1ee53f59bf2e5bf0f9",
+      "bytes": 5005
+    },
+    {
+      "path": "internal/task/SKILL.md",
+      "sha256": "2dc48a76aa29dff432036ca9799786c316c3fc9a2b13c064f71d0bfc32c3358b",
+      "bytes": 2976
+    },
+    {
+      "path": "internal/team-mode-rules/SKILL.md",
+      "sha256": "21f6d53ac3cd7c61f4a0814c58db8820b3467132bfacdaf1f30e3c57a9e888d5",
+      "bytes": 18520
+    },
+    {
+      "path": "internal/team-mode-templates/_base.j2",
+      "sha256": "dd0d0ac02839175c73a22645cad94903e6cdd44cbcc9236941339166c0506eed",
+      "bytes": 3257
+    },
+    {
+      "path": "internal/team-mode-templates/briefings/role.j2",
+      "sha256": "e345ba6c3dc23088b286b54a4895c6160a92241bcebfa5f022ef8b639d99e632",
+      "bytes": 8261
+    },
+    {
+      "path": "internal/workspace/SKILL.md",
+      "sha256": "66cf3b2777826af89835e1da5f3eabb191f61f0adeddccb4b5a1cd6d5cba32a3",
+      "bytes": 1937
+    },
+    {
+      "path": "migrations/local-only/050_local_roles_agents.sql",
+      "sha256": "3d9c20bb8a9a0e3963e5ceb1646c4bdea1d17ab4d63e23a45f6204420199a2b1",
+      "bytes": 702
+    },
+    {
+      "path": "migrations/shared/001_v110_schema.sql",
+      "sha256": "4af6edd3ea13e43134640dd6b626255953bc731589bfedbba6d2206c32118d08",
+      "bytes": 16040
+    },
+    {
+      "path": "migrations/shared/002_source_ref_and_fts.sql",
+      "sha256": "37011a86da8271022b429b2df95b189c269cd6bd69110e7f7ee4daeeed2637e3",
+      "bytes": 4281
+    },
+    {
+      "path": "migrations/shared/003_team_mode.sql",
+      "sha256": "077dd12efe21520c988dcb6a161826e806d7e4a3d8acc503120c283bcc7a374e",
+      "bytes": 11654
+    },
+    {
+      "path": "migrations/shared/004_tasks_parallel_group.sql",
+      "sha256": "66f383c91c6c287208708dc083d1821d209f896137e7af6fcb383fb54b3b108a",
+      "bytes": 1580
+    },
+    {
+      "path": "migrations/shared/005_workspace_less_ops.sql",
+      "sha256": "6f3adda7f0dfedabb142b355f00d2bd5c89f566d54136e43894f1490936e7e2a",
+      "bytes": 5380
+    },
+    {
+      "path": "migrations/shared/006_pm_dispatch_attempts.sql",
+      "sha256": "1ec83264a37668de6a78ca66aee0336de8d9e407c7e3866dd5df2cc52895d67d",
+      "bytes": 3541
+    },
+    {
+      "path": "migrations/shared/007_project_documents_metadata.sql",
+      "sha256": "c33fff9f7d1e641d5f3af542f72119d9cd946ce57c4973acb3378c9f5ff3470f",
+      "bytes": 2493
+    },
+    {
+      "path": "migrations/shared/008_bridge_requests.sql",
+      "sha256": "d17bd30893ca35454cc83c56b86ace658a8cb9dc645c3caf793aaaaecb3b2a89",
+      "bytes": 5862
+    },
+    {
+      "path": "migrations/shared/009_bridge_requests_aborted_kind.sql",
+      "sha256": "0699f7e4333aafd88cdb2e801ea4f7feaac4797b248c5b3483ed37c4c9b60e4c",
+      "bytes": 8190
+    },
+    {
+      "path": "migrations/shared/010_tasks_team_pk.sql",
+      "sha256": "58a748f7e0d6cdbb83a801f70c8dd55758cd0e3b5b7839dff97bade443f6f599",
+      "bytes": 2661
+    },
+    {
+      "path": "migrations/shared/011_bridge_payload_refs.sql",
+      "sha256": "4589f85526b88c85b444cbebcb84980ec98a37d76b4112f65f19f3ce6e8fc436",
+      "bytes": 6555
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "54a28e045b13e552b1d43ed480b7a849cf458d773b24566848442e5234157c0f",
+      "bytes": 2423
+    },
+    {
+      "path": "requirements.txt",
+      "sha256": "d32de3b0e6daf3c012cec8d48a15a36a6485345b78c9726ee8d175f80cecb193",
+      "bytes": 112
+    },
+    {
+      "path": "scripts/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "scripts/abort.py",
+      "sha256": "185471161bf49c1d26a28e947e4aa529c4e85540fc1e2996b558fb79c33b6267",
+      "bytes": 31887
+    },
+    {
+      "path": "scripts/agents.py",
+      "sha256": "3fd8b09f054abd4aceafebfefa1206d817609ac524da39ff6055b6e5af7ce5c0",
+      "bytes": 10122
+    },
+    {
+      "path": "scripts/atelier_entrypoint.py",
+      "sha256": "a245ef15c82e3df7dcb2618ecfa89e9f69b849e7c29e16a73b40c81f4260b0f0",
+      "bytes": 24351
+    },
+    {
+      "path": "scripts/backend.py",
+      "sha256": "e25cea8044b2e06a6703360bd7156f8f41eac9a0862a03a79cce54c58f74c0a3",
+      "bytes": 30149
+    },
+    {
+      "path": "scripts/backend_local.py",
+      "sha256": "2c7ceb1efdd71aa14ed056d86645297142c73275ddda48b08e5ae6d64565a3af",
+      "bytes": 52495
+    },
+    {
+      "path": "scripts/backend_memex.py",
+      "sha256": "309709b7d38a10f484e68303aead2522d12c953022f5c81f2e4d1cb378921907",
+      "bytes": 73858
+    },
+    {
+      "path": "scripts/bootstrap.py",
+      "sha256": "813878a9f82e9348dc8dbcd9752f0181ededd57d90a1a2c2fda235233cb13a99",
+      "bytes": 34876
+    },
+    {
+      "path": "scripts/bridge_payloads.py",
+      "sha256": "61397400f7e11201c3699c7377723515c02a668b15ab21d1037a2ad7073c7168",
+      "bytes": 6884
+    },
+    {
+      "path": "scripts/bridge_read.py",
+      "sha256": "ebb007a074a4790b8d1822ed57e922fd433f5fe9815adc614bc5419ed400b50f",
+      "bytes": 25869
+    },
+    {
+      "path": "scripts/bridge_send.py",
+      "sha256": "fb28ae7ca8f68dd4b3150190f3c18ca778cc1ba2292fe7328c7a344e100ccdc0",
+      "bytes": 36761
+    },
+    {
+      "path": "scripts/bump.py",
+      "sha256": "585886604c77835976367d52a7f5e04053d7b931bc9f4e8f31a0ec3ea9dc8ed0",
+      "bytes": 7426
+    },
+    {
+      "path": "scripts/caveman_codec.py",
+      "sha256": "fa4fb5e6f606885920b57c6ce3b2c267101b8dbac2cbb33c8e5eca6634748771",
+      "bytes": 19775
+    },
+    {
+      "path": "scripts/dag.py",
+      "sha256": "8529a514a912c88175ed390d24b547e75776f255c65f5635b2490da7301015cd",
+      "bytes": 10244
+    },
+    {
+      "path": "scripts/destructive_check.py",
+      "sha256": "26e9a6bc7407fb59b954bf114c780f822ab8d01d6b4ad33af1b67b756366163c",
+      "bytes": 6005
+    },
+    {
+      "path": "scripts/dispatch.py",
+      "sha256": "e16a60370c2d5655073753968aa1e3eb54796357f953fdff5f7daafcd28b9f57",
+      "bytes": 93271
+    },
+    {
+      "path": "scripts/documents.py",
+      "sha256": "7aad9d513846a9d8d7a30f4e86471b793231e4fcbb80f1882edf7056e7ede586",
+      "bytes": 18689
+    },
+    {
+      "path": "scripts/domain_vocabulary.py",
+      "sha256": "6a4aed35a356d710b850d1b08bbd804dfd995373765f4408e3cb3a696f0e2cc4",
+      "bytes": 7244
+    },
+    {
+      "path": "scripts/finish_pr.py",
+      "sha256": "9946ea8f932393fe656fbee9e1e514af9f8b08bada11108b22cc06383e45180e",
+      "bytes": 19024
+    },
+    {
+      "path": "scripts/git_utils.py",
+      "sha256": "f93dbbce090dd14fb5747820c4a990e00cdf6e6a669b16c6fd9f01152c87353d",
+      "bytes": 2780
+    },
+    {
+      "path": "scripts/loom_comms.py",
+      "sha256": "96dee1dfe5fc8ed07e4fe7d84bb06dfe2943eb76e6ff3e7acfe191649da1bdff",
+      "bytes": 25949
+    },
+    {
+      "path": "scripts/meetings.py",
+      "sha256": "d0ff2e12d31c4b80aa7e956c9eee452ffb1be8da75105a481986d221250e8249",
+      "bytes": 16693
+    },
+    {
+      "path": "scripts/migrate.py",
+      "sha256": "63e9647f3de0db90b067ee78e33956f5340c81d4dc29d41f14c76aeb92b759e4",
+      "bytes": 2397
+    },
+    {
+      "path": "scripts/migrate_db_rename.py",
+      "sha256": "247470eac0a8d41f075c91323ee546c3b4dc7cf17040a0fe340a62b70690536f",
+      "bytes": 2878
+    },
+    {
+      "path": "scripts/migrate_to_memex.py",
+      "sha256": "1f71ea2e30b69a47b2bc45480856fb1ccc4b26be4f7b5a8642ac0c43e86732f6",
+      "bytes": 16218
+    },
+    {
+      "path": "scripts/mode_detector.py",
+      "sha256": "1ac81d783e459fe2554b610e0c0bd0e3cff182d153b91e7f346a0a5155f3f480",
+      "bytes": 6908
+    },
+    {
+      "path": "scripts/model_tier.py",
+      "sha256": "8679488288adbdcfe2dde30363f1f39532697e74d529f03d599a883bdc8b9a1f",
+      "bytes": 15259
+    },
+    {
+      "path": "scripts/planner.py",
+      "sha256": "beeaf9f50a7876a8f809d36640ec818a23d97891f10b858d76a64e800754ae1a",
+      "bytes": 18610
+    },
+    {
+      "path": "scripts/platform_utils.py",
+      "sha256": "e56d940820f38069b6e7647b97710490074b38afa7f481fa74df1ce40008a99f",
+      "bytes": 1141
+    },
+    {
+      "path": "scripts/pm_dispatch.py",
+      "sha256": "5d229a5d40db832014ea701214bf5e233b32540a43d3095a0b6860a87f369b86",
+      "bytes": 52707
+    },
+    {
+      "path": "scripts/pm_dispatch_envelope.py",
+      "sha256": "28eac78f86df43edd170ffa2c0d83d24b4291436c09f74eac196a8059be9e7ea",
+      "bytes": 15817
+    },
+    {
+      "path": "scripts/preflight.py",
+      "sha256": "355707fefab4c304feb01007f28ec2563317a68e0ac4535904403244293a5911",
+      "bytes": 7363
+    },
+    {
+      "path": "scripts/projects.py",
+      "sha256": "1a66e4068ec3f9e3f1ec3f17c6b0e365ea691940d40c7cf9c9145c26b4692c58",
+      "bytes": 13382
+    },
+    {
+      "path": "scripts/recommended_settings.py",
+      "sha256": "814388ba813ebc262dfd0fb07276b857a5af2302da15df36a742c7f8b8b3ea61",
+      "bytes": 11965
+    },
+    {
+      "path": "scripts/release.py",
+      "sha256": "8823925ac4d2275300dbd7818c719d14e7d72e30007c1453350a04c96fd4df00",
+      "bytes": 5433
+    },
+    {
+      "path": "scripts/resume.py",
+      "sha256": "7b6f60d836d202070d1d8b24fcdb70bee845ead6ed8f48431a4c951f7bcda92f",
+      "bytes": 12861
+    },
+    {
+      "path": "scripts/roles.py",
+      "sha256": "62081fbca78ca353a277c8eee0ce9d2d67d834466d7af1e1d9dc321d1cf7f855",
+      "bytes": 7999
+    },
+    {
+      "path": "scripts/roster_extension.py",
+      "sha256": "308091f9f695640fe3901b3c06fddc2d202b70e119bd3ee3a36616f6c3177f34",
+      "bytes": 5403
+    },
+    {
+      "path": "scripts/scope.py",
+      "sha256": "cd36fd4b6ba7efcb8268d0c3a2d2cc3e2cf94acce042b63b3650a264ba085586",
+      "bytes": 14077
+    },
+    {
+      "path": "scripts/seed_data.py",
+      "sha256": "6fbe5c7afae5944ed9c316ff358dd78ec29ddab80185e04e559fcaa3df36d9b4",
+      "bytes": 2870
+    },
+    {
+      "path": "scripts/seed_roles.py",
+      "sha256": "eb80f0207de89a117120ddd85458ed6e6c13cb215c368c1788fe7cd32ae2d036",
+      "bytes": 98831
+    },
+    {
+      "path": "scripts/self_improve.py",
+      "sha256": "f1f0ec52d45ccaa1be1aa03585d7ef97a4263e6eb1ce3699c4a23841db87c0d3",
+      "bytes": 10011
+    },
+    {
+      "path": "scripts/session.py",
+      "sha256": "6b5eed46f8b21b1082a838763f8018b18b8817b1a0891a28a7e4d8d9d3990dba",
+      "bytes": 16697
+    },
+    {
+      "path": "scripts/side_query.py",
+      "sha256": "019fcf77e862a4ef750f521f0fef82eab05f81a36283986b21be694487509159",
+      "bytes": 4251
+    },
+    {
+      "path": "scripts/status.py",
+      "sha256": "d3324936ac35926a4a0c0c380b51204523c0603ee7a32f154469c101ad3c3aee",
+      "bytes": 25366
+    },
+    {
+      "path": "scripts/sweep_leaked_teams.py",
+      "sha256": "c97c6286df57e0c8da87b80126f5ac9788bb4a8e7ea6bfe04a3cf42a9d47f935",
+      "bytes": 12796
+    },
+    {
+      "path": "scripts/tasks.py",
+      "sha256": "a380d6ab89666c410bb943d712bf2051c855d522ef47c6a9c6ab940c684468b0",
+      "bytes": 20181
+    },
+    {
+      "path": "scripts/team_meeting.py",
+      "sha256": "1d83e0bc140f26d812548c0955a516afb640a152e09f1a4437bc909dd30b3409",
+      "bytes": 23975
+    },
+    {
+      "path": "scripts/team_teardown.py",
+      "sha256": "6783873c8b5bd79f8a3a6ccf4574269e5763293ae179d221ea6a81173cf0726e",
+      "bytes": 11225
+    },
+    {
+      "path": "scripts/tmux_layout.py",
+      "sha256": "4869b51bbe12002f25f5a73b16217033a142ae0263dc26db2bc1e6931d735710",
+      "bytes": 9340
+    },
+    {
+      "path": "scripts/tmux_setup.py",
+      "sha256": "7b315e6fb4562c02ec8bdf876eda67152e1cfdfcd5a417b6843a0f7280827536",
+      "bytes": 22606
+    },
+    {
+      "path": "scripts/workflow.py",
+      "sha256": "f0e39d94b225d3c06e0f2bfef20d05e51b47e65a7bea3e6e1d143417cef916e9",
+      "bytes": 12460
+    },
+    {
+      "path": "scripts/workspace.py",
+      "sha256": "f66737ddc41b93d93ddfd2e9c1f9b906756a06e470d446ca8d735a7683facd9f",
+      "bytes": 11749
+    },
+    {
+      "path": "scripts/worktree.py",
+      "sha256": "92eb9b250c53a32554dd281faedffeb53554345aa8c59acd262d2b054e4bc862",
+      "bytes": 8140
+    },
+    {
+      "path": "skills/abort/SKILL.md",
+      "sha256": "76a26c60629e8984b39812561946a3cece47ae2268ad472827e1b51ebd63bc00",
+      "bytes": 7700
+    },
+    {
+      "path": "skills/ingest/SKILL.md",
+      "sha256": "29e78abcb0aed47e2911c3f0b4a18a1798ca9626e36e4a209f6585941d122dc7",
+      "bytes": 2761
+    },
+    {
+      "path": "skills/load/SKILL.md",
+      "sha256": "6b6723a53f11ff724e6e760c5a30ccbb613ce12f767c047a5b2a4b8a715ec63e",
+      "bytes": 3884
+    },
+    {
+      "path": "skills/migrate/SKILL.md",
+      "sha256": "89ec49c0fcfb12e09f0792a93ba7a829d17ca2c2802d7517f4155553ab6c8973",
+      "bytes": 3823
+    },
+    {
+      "path": "skills/run/SKILL.md",
+      "sha256": "a5c90dd528ea4221558ad9e8426158128c0b4accb4f09a7022d9d91618d908d7",
+      "bytes": 18531
+    },
+    {
+      "path": "skills/save/SKILL.md",
+      "sha256": "45c0c35bbd63a6c761130d07d6326470eaf038591045c3d72fa6ace53b3b3bb9",
+      "bytes": 5715
+    },
+    {
+      "path": "skills/status/SKILL.md",
+      "sha256": "01d1ed3112064308be177cc912c89b1a11c61066731488474b1572d44052b2b3",
+      "bytes": 5587
+    },
+    {
+      "path": "templates/CLAUDE-snippet.md",
+      "sha256": "62094d259da46653461afc15292e37e2833fb0fa20f928b3648f41c9f6c7823b",
+      "bytes": 1540
+    },
+    {
+      "path": "templates/agents/accessibility-specialist-1.json",
+      "sha256": "7aa847d1395df649adc5c8e11260a50ae0f14798b5939079ef7053c881340464",
+      "bytes": 1329
+    },
+    {
+      "path": "templates/agents/agent-systems-architect-1.json",
+      "sha256": "f40ac467c17aa4bb37e93e9884194cf1776b282e7200a9c898733bd4ca29b9f4",
+      "bytes": 1646
+    },
+    {
+      "path": "templates/agents/ai-ethicist-1.json",
+      "sha256": "7196a4db24e52253635f7bcbfd702c58f806bfffc30033c89b08dc6b405ed9ec",
+      "bytes": 1610
+    },
+    {
+      "path": "templates/agents/ai-infrastructure-engineer-1.json",
+      "sha256": "e28882f8037229b2d86a0deb1cd0c7e925f316de4c47eef69b2416d4606d704e",
+      "bytes": 1626
+    },
+    {
+      "path": "templates/agents/ai-policy-researcher-1.json",
+      "sha256": "2f0dde65b207171d5bdefdf0aa6780becdbde6cfccbabb3c97e02b8d02c5229b",
+      "bytes": 1617
+    },
+    {
+      "path": "templates/agents/ai-product-manager-1.json",
+      "sha256": "4c22cc4ae1dbb11ad9fdb33d960188f8b240eeae42669eeb2c08603939e4ea94",
+      "bytes": 1678
+    },
+    {
+      "path": "templates/agents/ai-research-scientist-1.json",
+      "sha256": "23cc45e8dc76ba1e864b90bd59483662e2441d54b73d7e1b310aca4b1d8db9ea",
+      "bytes": 1471
+    },
+    {
+      "path": "templates/agents/ai-safety-researcher-1.json",
+      "sha256": "b55ae63bcad79546c875fa4e45ed7644fa345aef020703922231d0f95c06f7f6",
+      "bytes": 1561
+    },
+    {
+      "path": "templates/agents/analytics-engineer-1.json",
+      "sha256": "0b83f3112e15a6c1256ba7b4d47685515ede1484cc85e0d47d2748160491e0cb",
+      "bytes": 1249
+    },
+    {
+      "path": "templates/agents/api-engineer-1.json",
+      "sha256": "5bcf9388030aa30cf443fd542bce0f672dcec9b888f6288525447b6e6ce2ab58",
+      "bytes": 1289
+    },
+    {
+      "path": "templates/agents/appsec-engineer-1.json",
+      "sha256": "355d7bd20f6a68ebd16c590b57c229cc347652f54a69d39f77c0186e9b68e3f6",
+      "bytes": 1287
+    },
+    {
+      "path": "templates/agents/backend-engineer-1.json",
+      "sha256": "506cc3add871f14cacfc2a6e0afe81ec3750495a08983c77d4d0bbe8236bf1f2",
+      "bytes": 1303
+    },
+    {
+      "path": "templates/agents/bi-engineer-1.json",
+      "sha256": "06b5b1d92d2103c2e2666893b0442bd1f52a984d46792e454841903851db0330",
+      "bytes": 1189
+    },
+    {
+      "path": "templates/agents/blockchain-engineer-1.json",
+      "sha256": "8831604ac36f138b0daffb1945b55d08daa8f3fc43f1badecff0be90f4eb3132",
+      "bytes": 1312
+    },
+    {
+      "path": "templates/agents/cli-engineer-1.json",
+      "sha256": "6a8c1932d01b7c9130532371882fc90e125fe3800af4393b1b7efa53ffa9fa9d",
+      "bytes": 1326
+    },
+    {
+      "path": "templates/agents/cloud-infra-1.json",
+      "sha256": "f37fbd0f49f8da96a25b388bdd6359c4b63f6fe5603e4b94ef3b2e6c9afc3981",
+      "bytes": 1272
+    },
+    {
+      "path": "templates/agents/cognitive-scientist-1.json",
+      "sha256": "0cd4b40cad89e64fe33a3b9fecb7cc25a500706ca90a91ec040f65af6d85cf5c",
+      "bytes": 1858
+    },
+    {
+      "path": "templates/agents/compiler-engineer-1.json",
+      "sha256": "b667f5228029c2a4e9c46f0b099690439184e37fe9bbd695dfdef47f017d2d66",
+      "bytes": 1277
+    },
+    {
+      "path": "templates/agents/computer-vision-engineer-1.json",
+      "sha256": "c1d2a1be082b3da6c232df77263f5c0ba18473d62e177213a8cd4c1e26455bee",
+      "bytes": 1582
+    },
+    {
+      "path": "templates/agents/data-engineer-1.json",
+      "sha256": "bf85bf4aedffed674c44ba8ce6bde51df38b6ced0813ddbf1a2f200c37e9c2d4",
+      "bytes": 1156
+    },
+    {
+      "path": "templates/agents/data-scientist-1.json",
+      "sha256": "326cb47b7a488d491871ac372951ddf8a5350a365e266e14dc0edf60dccc84d3",
+      "bytes": 1226
+    },
+    {
+      "path": "templates/agents/data-scientist-ai-1.json",
+      "sha256": "379902c5ce3e78937c5327f9054e9736a031b4d97677050753460cd13667d0d1",
+      "bytes": 1654
+    },
+    {
+      "path": "templates/agents/database-engineer-1.json",
+      "sha256": "2bb460b4d86b49f3e52780fd143c666f2ab7f34cac8ecf54c6c9a0886eb4c69d",
+      "bytes": 1284
+    },
+    {
+      "path": "templates/agents/design-systems-engineer-1.json",
+      "sha256": "a727fc9d6c463a9652c7c6973c743e2024f1b74d6c2f1e31da17653929f90e57",
+      "bytes": 1226
+    },
+    {
+      "path": "templates/agents/devops-1.json",
+      "sha256": "be0cc9cf8ada6741cd83c6bfbaa296a937a579031d229df727feb104d5282c92",
+      "bytes": 1200
+    },
+    {
+      "path": "templates/agents/devrel-1.json",
+      "sha256": "e1fcc639476a52fb9010820d3bc34ab3899880311cd785c2cdc0993f2aa9c4ae",
+      "bytes": 1318
+    },
+    {
+      "path": "templates/agents/devtools-engineer-1.json",
+      "sha256": "0ddb4b2680beac1b237688caf713201b7018075381673e51c55d82e7ae597cba",
+      "bytes": 1235
+    },
+    {
+      "path": "templates/agents/embedded-engineer-1.json",
+      "sha256": "6c0bec7723736169973c75dbdbea17ca64406150f3522d3822436eb2aca4c13f",
+      "bytes": 1289
+    },
+    {
+      "path": "templates/agents/firmware-engineer-1.json",
+      "sha256": "3225fb3b6edbe844e436cad1a2534d4e368244f6db4ed7a4443f98565635e4bd",
+      "bytes": 1210
+    },
+    {
+      "path": "templates/agents/frontend-engineer-1.json",
+      "sha256": "5e2f15587ed32f5d263479316d37c1df5aa55422fbc4c9007e7fc84ff4e66716",
+      "bytes": 1284
+    },
+    {
+      "path": "templates/agents/fullstack-engineer-1.json",
+      "sha256": "9ea3fbcdc75ac4ee2a196315daf31285cbefa81c5fd71b41d14900cf85461640",
+      "bytes": 1148
+    },
+    {
+      "path": "templates/agents/game-engineer-1.json",
+      "sha256": "1b0e52c835564f5f71cd1fff94200a51235caaed7bbc322064541e0e5370d435",
+      "bytes": 1265
+    },
+    {
+      "path": "templates/agents/graphics-engineer-1.json",
+      "sha256": "7f4d72b9a1788ed8c331fcfcbe65be548680772b4a679f5159300a99c196a383",
+      "bytes": 1252
+    },
+    {
+      "path": "templates/agents/integration-engineer-1.json",
+      "sha256": "638ec201bbaf43330571f725a9550974308e70b18d395e3c8c8bc2f360fbc263",
+      "bytes": 1314
+    },
+    {
+      "path": "templates/agents/knowledge-engineer-1.json",
+      "sha256": "9f62129b9ebdf400e019ac170ec0d44301c7e062c14cba3d5121b81286d267be",
+      "bytes": 1591
+    },
+    {
+      "path": "templates/agents/localization-engineer-1.json",
+      "sha256": "daf53ba929114bdf54ef7c3f617c6edb30f38d36d0b9342f3e8baba65a576fa9",
+      "bytes": 1305
+    },
+    {
+      "path": "templates/agents/ml-engineer-1.json",
+      "sha256": "6c7e2491a050c53aa724e34889d2b8c20167e193a25b9d934244004173512fe2",
+      "bytes": 1284
+    },
+    {
+      "path": "templates/agents/ml-engineer-ai-1.json",
+      "sha256": "c553c3e7294dafdcb12fc8156ab276f937e860a42738d2785c2888809ac6cd85",
+      "bytes": 1543
+    },
+    {
+      "path": "templates/agents/mobile-android-1.json",
+      "sha256": "9d6b229da8a0881345e5ec8229778f75bdfd9aae83a7fa7f52ad3e8fd607fa94",
+      "bytes": 1154
+    },
+    {
+      "path": "templates/agents/mobile-crossplatform-1.json",
+      "sha256": "077a4f1eee9024ddf09a32e5c698635296f65b7b9cbe651a5d33a6ddf7b799b7",
+      "bytes": 1139
+    },
+    {
+      "path": "templates/agents/mobile-ios-1.json",
+      "sha256": "4c75da4c1c27771a7bf079bb6513376cce022cc36bf67913637760438542d241",
+      "bytes": 1060
+    },
+    {
+      "path": "templates/agents/nlp-engineer-1.json",
+      "sha256": "4d6524764503bcf5a551dc5371e226e93c1141f92710520363f9cfbc1e90296a",
+      "bytes": 1597
+    },
+    {
+      "path": "templates/agents/performance-engineer-1.json",
+      "sha256": "56effff3c4928722a342255ddea1e4c059563024c51ad2bdd681d640415188ae",
+      "bytes": 1232
+    },
+    {
+      "path": "templates/agents/pm-1.json",
+      "sha256": "4504d8cf4613d7f733b9989ecf9ca7d819bd12edc1abc257308f4cdf17cbfda7",
+      "bytes": 1158
+    },
+    {
+      "path": "templates/agents/prompt-engineer-1.json",
+      "sha256": "9d0dce8265ed75b7ade3f4f1452cb53a35dc72a2f4b0f63488eef8f9f0da102d",
+      "bytes": 1607
+    },
+    {
+      "path": "templates/agents/qa-engineer-1.json",
+      "sha256": "3f6a9ed9b14b6350e5c6193d8f00afafa46f62f7972a6acb4342998f1b6f3120",
+      "bytes": 1213
+    },
+    {
+      "path": "templates/agents/realtime-engineer-1.json",
+      "sha256": "a68b4d34c0fe40dae4eac73a9a0dd533931a49bafc8937a77f0598712af0db64",
+      "bytes": 1289
+    },
+    {
+      "path": "templates/agents/release-manager-1.json",
+      "sha256": "c2e934d0522871ede77f27d16b5eaf0db355020ec77ba4979b5bfbc5c701fcef",
+      "bytes": 1246
+    },
+    {
+      "path": "templates/agents/rl-researcher-1.json",
+      "sha256": "36fa6f8ed76f41f2ad25ca5b33c8900fb9a22ddab634aa6a7fb7ff9392b46e73",
+      "bytes": 1553
+    },
+    {
+      "path": "templates/agents/sdet-1.json",
+      "sha256": "ee77be96b119e063ee0aefeb6b5de7afe496f641cb75d0913d5b59321f4d094c",
+      "bytes": 1384
+    },
+    {
+      "path": "templates/agents/search-engineer-1.json",
+      "sha256": "cfcb45d72e6e1fe42a3806ea1c423633ae496500c0aa381f3e4152e076abb6ed",
+      "bytes": 1304
+    },
+    {
+      "path": "templates/agents/security-engineer-1.json",
+      "sha256": "8d37119f4d2e2d227541bbf7e75380f5104307a627fa35d1e3a327c2cc10aaab",
+      "bytes": 1335
+    },
+    {
+      "path": "templates/agents/seo-engineer-1.json",
+      "sha256": "a284d87b66e386e37a5da00edc118e4eecd266e9d94f8cefecdbf6676878cfa5",
+      "bytes": 1282
+    },
+    {
+      "path": "templates/agents/software-architect-1.json",
+      "sha256": "31593639a9aa4c8780766c23981432590d2ed982e7cf6169a15fcd4ecedaf380",
+      "bytes": 1153
+    },
+    {
+      "path": "templates/agents/sre-1.json",
+      "sha256": "2a1c9013c6543a1fcaf765b15b6b6fce3fe7a8fbacde84be60e7bd599c9853c8",
+      "bytes": 1159
+    },
+    {
+      "path": "templates/agents/systems-architect-1.json",
+      "sha256": "7377807c2049c58053c0251abd89ea0937717aca6083c5ebeb375c9bd56d19c5",
+      "bytes": 1073
+    },
+    {
+      "path": "templates/agents/systems-engineer-1.json",
+      "sha256": "f91680a50e3ce198ae5b4e16781d43c96761b741008c09958127d5adb33c35a9",
+      "bytes": 1545
+    },
+    {
+      "path": "templates/agents/technical-writer-1.json",
+      "sha256": "a895d89dee6f027b7eba68614eef3e0492613568671fb762432f670211072c58",
+      "bytes": 1368
+    },
+    {
+      "path": "templates/agents/tpm-1.json",
+      "sha256": "c35541aeb9e9d8a71461d323f163cba73ba0ab2b3b903ccf5a428453a9ac06a6",
+      "bytes": 1176
+    },
+    {
+      "path": "templates/agents/ux-designer-1.json",
+      "sha256": "610bffab53579677ed3da0c4576041d62615a21ac59db25075d6ef2e35c7d90f",
+      "bytes": 1233
+    },
+    {
+      "path": "templates/agents/wasm-engineer-1.json",
+      "sha256": "74bd50411c33260899fb9a77bb3d796fd7aca0138e42ab2e09e99c79cff2c718",
+      "bytes": 1378
+    },
+    {
+      "path": "templates/roles.json",
+      "sha256": "2de07a0581ccd2dcdd7e6ef75fc35dedd190cc73b5deeb34b150de4934790a0e",
+      "bytes": 10828
+    }
+  ]
+}

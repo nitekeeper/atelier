@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.6.0 — 2026-06-08
+
+**Auto-register hooks + Memex scope gate.** Atelier now wires its PostToolUse
+and PreCompact hooks into `~/.claude/settings.json` automatically on every
+session start (idempotent; upgrades update the path in-place). In Memex mode,
+`.ai/active_project` is written at session open so the hook scope gate fires
+correctly — previously hooks silently bailed out for all Memex sessions.
+
+### Added
+- **Hook auto-registration** (`scripts/bootstrap.py::_register_hooks`). Merges
+  `hooks/hooks.json` into `~/.claude/settings.json` on every `run_bootstrap()`
+  call. Matched by script filename so re-runs after a version upgrade update
+  the path rather than duplicating the entry. Atomic write (temp + `os.replace`)
+  so readers never see a partial file. (#110)
+- **Memex scope gate fix** (`scripts/atelier_entrypoint.py::_write_active_project_file`).
+  Writes sentinel `"memex"` to `.ai/active_project` at the start of every
+  `proceed-memex` branch so `hooks/context_budget.py` and `hooks/pre_compact.py`
+  know an Atelier session is active. Previously these hooks always bailed out
+  silently in Memex mode. (#110)
+
 ## v1.3.0 — 2026-06-01
 
 **Team-mode: real multi-agent cycle execution.** This release lands the

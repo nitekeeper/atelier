@@ -635,7 +635,7 @@ def _atelier_version() -> str:
 
         return md.version("atelier")
     except Exception:
-        return "1.3.0"
+        return "1.5.0"
 
 
 def _write_marker(

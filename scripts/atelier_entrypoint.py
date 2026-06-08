@@ -61,6 +61,24 @@ def _project_ai_dir() -> Path | None:
     return None
 
 
+def _settings_rec_offer() -> dict | None:
+    """Compute the version-upgrade settings-recommendation offer, MODE-AGNOSTIC.
+
+    Lazily imports `scripts.recommended_settings` and calls its read-only
+    `maybe_offer()` ONCE. The whole thing degrades to `None` on ANY error so a
+    version-recommendation hiccup can never crash a skill's pre-flight — the
+    offer is an additive nicety, not a load-bearing token. Unlike `resume_offer`
+    (Local-only), this offer is attached on BOTH the proceed-local and
+    proceed-memex branches: a plugin version upgrade is mode-independent.
+    """
+    try:
+        from scripts import recommended_settings
+
+        return recommended_settings.maybe_offer()
+    except Exception:
+        return None
+
+
 def startup_check() -> dict:
     """Run the pre-flight check for an entry skill and return an action
     token. See the module docstring for the action contract.
@@ -75,6 +93,16 @@ def startup_check() -> dict:
          start using yet.
       3. Only on the clean Memex branch do we lazily import + run
          bootstrap.
+
+    Additive offers (never mutate the action-token contract):
+      * `resume_offer` — LOCAL-only aborted-arc resume (atelier#66).
+      * `settings_rec_offer` — MODE-AGNOSTIC version-upgrade settings
+        recommendation; attached on BOTH proceed-local and proceed-memex when
+        `recommended_settings.maybe_offer()` is non-None. Read-only: no write
+        happens here; the consent y/N + apply live in
+        `internal/settings-recommendation/SKILL.md`. NOT attached on the
+        prompt-migration short-circuit (it surfaces on the next pass once the
+        migration is decided).
     """
     mode = mode_detector.detect_mode()
     if mode == "local":
@@ -99,6 +127,12 @@ def startup_check() -> dict:
             offer = resume.find_resumable_arc(str(ai / "atelier.db"))
             if offer is not None:
                 result["resume_offer"] = offer
+        # Settings-recommendation offer (atelier settings-rec — MODE-AGNOSTIC):
+        # attach the version-upgrade offer alongside the proceed-local action.
+        # Read-only — the consent + apply happen in the SKILL, not here.
+        settings_offer = _settings_rec_offer()
+        if settings_offer is not None:
+            result["settings_rec_offer"] = settings_offer
         return result
 
     ai = _project_ai_dir()
@@ -115,7 +149,15 @@ def startup_check() -> dict:
     from scripts import bootstrap
 
     bootstrap_state = bootstrap.run_bootstrap()
-    return {"action": "proceed-memex", "bootstrap": bootstrap_state}
+    memex_result: dict = {"action": "proceed-memex", "bootstrap": bootstrap_state}
+    # Settings-recommendation offer (atelier settings-rec — MODE-AGNOSTIC):
+    # attach the SAME version-upgrade offer on the Memex branch too. A plugin
+    # version bump is mode-independent, so (unlike resume_offer) this is NOT
+    # Local-only. Read-only — the consent + apply happen in the SKILL.
+    settings_offer = _settings_rec_offer()
+    if settings_offer is not None:
+        memex_result["settings_rec_offer"] = settings_offer
+    return memex_result
 
 
 # ── Live WaveDispatcher wiring (atelier#81, AI-4) ───────────────────────────

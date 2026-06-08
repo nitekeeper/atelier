@@ -78,6 +78,15 @@ PM MUST ask the human VERBATIM — substituting `abort_phase` and `incomplete_co
 If no `resume_offer` field is present, there is nothing to resume; continue to
 Dispatch-mode selection.
 
+## Settings recommendation (after pre-flight)
+
+If `startup_check()` returned a `settings_rec_offer` with `eligible=True` and
+non-empty `changes`, read `internal/settings-recommendation/SKILL.md` and follow
+its prompt protocol BEFORE proceeding to the rest of this skill. After the
+user's choice, continue the original command. The offer is mode-agnostic (it
+fires on both `proceed-local` and `proceed-memex`); the procedure file is the
+single source of truth for the prompt text (do not inline it here).
+
 ## Dispatch-mode selection (after pre-flight, before any work request)
 
 Once `startup_check` returns a `proceed-*` action and BEFORE the Trigger contract's Ask gate fires for any new-work request, establish the session's **dispatch mode**. **The default is sub-agent mode** — adopt it silently, with no live pick, unless the user explicitly chooses agent-team for this session or has pre-authorized agent-team in CLAUDE.md / saved preferences. This mirrors the read-side default in `scripts/dispatch.py::resolve_dispatch_mode` (env override → marker → `subagent` default).

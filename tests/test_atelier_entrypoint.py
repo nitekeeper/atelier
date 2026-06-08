@@ -138,6 +138,98 @@ def test_startup_memex_branch_does_not_consult_resume(project_root, monkeypatch)
     assert "resume_offer" not in r
 
 
+# ── Settings-recommendation offer wiring (atelier settings-rec, AI-2) ───────
+#
+# The version-upgrade settings offer is MODE-AGNOSTIC: it attaches a
+# `settings_rec_offer` field on BOTH the proceed-local AND the proceed-memex
+# return (a plugin bump is mode-independent — unlike the Local-only
+# resume_offer). recommended_settings.maybe_offer is monkeypatched so these pin
+# the WIRING (both branches), not the eligibility logic (covered in
+# test_recommended_settings.py).
+
+
+def test_startup_local_attaches_settings_rec_offer(project_root, monkeypatch):
+    """LOCAL branch: a non-None maybe_offer() is attached as settings_rec_offer
+    alongside the unchanged proceed-local action."""
+    from scripts import recommended_settings
+
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
+    monkeypatch.setattr("scripts.resume.find_resumable_arc", lambda *a, **k: None)
+    sentinel = {"eligible": True, "current_version": "1.5.0", "changes": {"model": "sonnet"}}
+    monkeypatch.setattr(recommended_settings, "maybe_offer", lambda: sentinel)
+    from scripts.atelier_entrypoint import startup_check
+
+    r = startup_check()
+    assert r["action"] == "proceed-local"  # contract intact
+    assert r["settings_rec_offer"] is sentinel
+
+
+def test_startup_memex_attaches_settings_rec_offer(project_root, monkeypatch):
+    """MEMEX branch (no local DB to migrate): the SAME offer attaches on
+    proceed-memex. ANTI-REVERT (the Local-only-mirror trap): if the wiring is
+    attached on ONLY one branch, one of these two tests goes RED."""
+    from scripts import recommended_settings
+
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "memex")
+    monkeypatch.setattr("scripts.bootstrap.run_bootstrap", lambda: {"version": "1.1.0"})
+    sentinel = {"eligible": True, "current_version": "1.5.0", "changes": {"model": "sonnet"}}
+    monkeypatch.setattr(recommended_settings, "maybe_offer", lambda: sentinel)
+    from scripts.atelier_entrypoint import startup_check
+
+    r = startup_check()
+    assert r["action"] == "proceed-memex"
+    assert r["settings_rec_offer"] is sentinel
+
+
+def test_startup_no_settings_rec_offer_when_none(project_root, monkeypatch):
+    """maybe_offer() == None → the settings_rec_offer key is ABSENT under BOTH
+    modes (clean, already-applied, or declined-this-version run)."""
+    from scripts import recommended_settings
+
+    monkeypatch.setattr(recommended_settings, "maybe_offer", lambda: None)
+
+    # Local
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
+    monkeypatch.setattr("scripts.resume.find_resumable_arc", lambda *a, **k: None)
+    from scripts.atelier_entrypoint import startup_check
+
+    r_local = startup_check()
+    assert r_local["action"] == "proceed-local"
+    assert "settings_rec_offer" not in r_local
+
+    # Memex
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "memex")
+    monkeypatch.setattr("scripts.bootstrap.run_bootstrap", lambda: {"version": "1.1.0"})
+    r_memex = startup_check()
+    assert r_memex["action"] == "proceed-memex"
+    assert "settings_rec_offer" not in r_memex
+
+
+def test_startup_settings_rec_offer_error_is_swallowed(project_root, monkeypatch):
+    """A raising maybe_offer() degrades to a no-op — startup_check still returns
+    the bare action (no crash) under both modes."""
+    from scripts import recommended_settings
+
+    def _boom():
+        raise RuntimeError("manifest exploded")
+
+    monkeypatch.setattr(recommended_settings, "maybe_offer", _boom)
+
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "local")
+    monkeypatch.setattr("scripts.resume.find_resumable_arc", lambda *a, **k: None)
+    from scripts.atelier_entrypoint import startup_check
+
+    r_local = startup_check()
+    assert r_local["action"] == "proceed-local"
+    assert "settings_rec_offer" not in r_local
+
+    monkeypatch.setattr("scripts.mode_detector.detect_mode", lambda: "memex")
+    monkeypatch.setattr("scripts.bootstrap.run_bootstrap", lambda: {"version": "1.1.0"})
+    r_memex = startup_check()
+    assert r_memex["action"] == "proceed-memex"
+    assert "settings_rec_offer" not in r_memex
+
+
 # ── Live WaveDispatcher wiring (atelier#81, AI-4) ───────────────────────────
 
 

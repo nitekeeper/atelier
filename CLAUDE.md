@@ -249,6 +249,56 @@ Atelier now **AUTO-SELECTS the model tier per task** — it no longer defaults e
 - **Global override / escape hatch:** an operator can pin ONE tier for the entire run by setting `ATELIER_MODEL_TIER=haiku|sonnet|opus` in the shell (or `env` in `~/.claude/settings.json`). It wins over phase/difficulty/floor but NOT over an explicit per-call override.
 - **Effort:** `effortLevel: high` remains the maintainer's working posture for the orchestrator session; set `model` + `effortLevel` in `~/.claude/settings.json`, or accept your existing default. The recommendation supersedes any conflicting personal default *for atelier-on-atelier operations* per the precedence clause above.
 
+### First-session settings recommendation on version upgrade
+
+When atelier's plugin version is bumped, the **FIRST session on the new version
+OFFERS** (consent-gated, default **No**) to apply the cost-optimized recommended
+settings `{model: sonnet, effortLevel: high, autoCompactEnabled: true}` to the
+user's global `~/.claude/settings.json`. `scripts/recommended_settings.py`'s
+`RECOMMENDED` constant is the **single source of truth** for these values (the
+family alias `sonnet`, version-resilient — not a pinned `claude-sonnet-*` id).
+
+Properties:
+
+- **Consent-gated (default No).** The y/N prompt lives in
+  `internal/settings-recommendation/SKILL.md`; Python (`recommended_settings`)
+  only writes on the explicit `apply_recommended()` call. `eligibility()` /
+  `maybe_offer()` / `compute_changes()` are strictly read-only.
+- **Opt-in, once per version (idempotent).** Recording the version (applied OR
+  declined) via `write_state` means the same version never re-prompts; an
+  already-applied posture is a silent no-op; a NEW version re-offers. Delete
+  `~/.atelier/settings_rec_state.json` to re-trigger or disable for the current
+  version.
+- **Merge-safe + atomic.** Only those 3 keys are set; every existing top-level
+  key (`env`, `enabledPlugins`, `permissions`, `statusLine`, `hooks`, …) is
+  preserved; the write is a temp-file + `os.replace`.
+- **Distinct from the per-task `model_tier` policy.** This sets the session
+  DEFAULT in `~/.claude/settings.json`; the per-task tier policy applies on top,
+  per spawn.
+- **Managed settings are never touched.** Enterprise-managed settings may
+  override these, and only the user `~/.claude/settings.json` is ever written —
+  `managed-settings.json` is never written.
+
+The offer is wired into the startup pre-flight (`startup_check()` attaches a
+read-only `settings_rec_offer` on both `proceed-local` and `proceed-memex`) and
+referenced from every user-facing entry skill.
+
+**Enforcement model (advisory presentation over code-enforced safety).** The
+*presentation* of the y/N offer is **advisory**: like every Atelier agent
+procedure (see `## Skills and procedures`), it depends on the agent reading
+`internal/settings-recommendation/SKILL.md` and following it — there is no code
+path that forces the prompt to appear, so an agent that skips the step simply
+leaves the offer un-surfaced (a no-op, never a wrong write). The gap is
+minimized by referencing the procedure from ALL FIVE entry skills (`run`,
+`load`, `save`, `ingest`, `migrate`) so every command path carries the pointer,
+which the skill-contract test pins. What IS code-enforced — and never advisory —
+is the **safety**: `recommended_settings`'s compute/eligibility paths are
+strictly read-only, the only writer is the explicit `apply_recommended()` call
+the procedure makes on a `y`, the write is merge-safe + atomic, and
+`managed-settings.json` is never touched. So a skipped offer costs only the
+convenience of being asked; it can never clobber settings, write without
+consent, or re-prompt a handled version.
+
 ### Per-skill / role table — the DEFAULT/fallback when the policy has no signal
 
 The table below is the **advisory fallback** consulted when the automatic policy has no phase/difficulty/role signal to act on (e.g. a top-level skill spawn rather than a per-task cycle dispatch). It is **advisory, not enforced** — the per-task policy above is the primary mechanism for cycle teammates.

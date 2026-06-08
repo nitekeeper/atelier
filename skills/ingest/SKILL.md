@@ -31,6 +31,12 @@ Branch on the returned `action`:
   pre-flight (`startup_check()` will now return `proceed-memex` or
   `proceed-local` depending on the user's choice).
 
+**Settings recommendation (after pre-flight):** if `startup_check()` returned a
+`settings_rec_offer` with `eligible=True` and non-empty `changes`, read
+`internal/settings-recommendation/SKILL.md` and follow its prompt protocol
+BEFORE proceeding to the rest of this skill. After the user's choice, continue
+the original command.
+
 ## Procedure
 
 1. Ask the user (or calling agent): "What do you want to capture? Provide the content, file path, or URL."

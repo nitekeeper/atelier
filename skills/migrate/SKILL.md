@@ -47,6 +47,13 @@ exception cases.
    marker is written; the user can fix the underlying issue and re-run
    this skill.
 
+6. **Settings recommendation (after pre-flight).** If a `startup_check()` on
+   this session returned a `settings_rec_offer` with `eligible=True` and
+   non-empty `changes`, read `internal/settings-recommendation/SKILL.md` and
+   follow its prompt protocol before returning control to the user. After the
+   user's choice, continue. (Mode-agnostic; the procedure file is the single
+   source of truth for the prompt text — do not inline it here.)
+
 ## Differences from the auto-prompt path
 
 | Aspect | Auto-prompt (Task 2) | `/atelier:migrate` (this skill) |

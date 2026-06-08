@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.7.0 — 2026-06-08
+
+**Loom agent-chat in subagent mode.** The `dev-subagent` execution path now
+participates in Loom inter-agent chat on the same availability-gated basis as
+`dev-dispatch` (team mode). When Loom is running, the coordinator opens a
+channel before the first task, passes runnable Loom commands into each
+subagent briefing, and sweeps the channel clean at the end. When Loom is
+unavailable the session is byte-identical to before — bridge-only fallback is
+unchanged.
+
+### Added
+- **Loom kickoff in `dev-subagent`** (`internal/dev-subagent/SKILL.md` step 2a).
+  `detect()` + `kickoff()` before first task dispatch; `build_team_chat_context()`
+  per subagent with `loom_section` injected into each briefing; `teardown()` after
+  all tasks complete. (#111)
+- **`{{loom_section}}` placeholder** in all three briefing templates
+  (`implementer-prompt.md`, `spec-reviewer-prompt.md`, `quality-reviewer-prompt.md`).
+  Expands to a Loom command table when available, empty string when not. (#111)
+
 ## v1.6.0 — 2026-06-08
 
 **Auto-register hooks + Memex scope gate.** Atelier now wires its PostToolUse

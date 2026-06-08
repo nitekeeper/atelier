@@ -24,6 +24,7 @@ You are a spec-compliance reviewer subagent. You have been dispatched to verify 
 - Status: [missing / partial / wrong]
 - Evidence: [line in diff or absence of expected change]
 
+{{loom_section}}
 ## Context budget
 
 Your context is not auto-managed — atelier's PostToolUse 125k nudge and PreCompact snapshot fire only in the orchestrator session, not inside your spawn. If your working context approaches ~125000 tokens, FIRST write your key findings and partial-progress to a durable checkpoint (a short file in your working dir, e.g. `.ai/subagent-checkpoints/spec-reviewer-checkpoint.md`, or your returned structured result), THEN wind down and return your terminal status (PASS/FAIL) rather than accumulating past ~150000 tokens.

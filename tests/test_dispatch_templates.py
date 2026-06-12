@@ -22,7 +22,10 @@ briefing length.
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -39,6 +42,17 @@ from scripts.dispatch import (
     compose_briefing,
     make_template_env,
     validate_render_context,
+)
+
+# loom_comms is the source-of-truth for the loom availability gate + the
+# briefing-rendered command strings. Imported (not re-typed) so the doc-contract
+# tests below pin the SKILL.md wording AGAINST the code constants — env-var
+# rename in code without a doc update (or vice versa) fails here.
+from scripts.loom_comms import (
+    LOOM_COMMS_ENV_VAR,
+    build_team_chat_context,
+    detect,
+    loom_cmds,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -491,3 +505,272 @@ def test_same_role_retry_prefix_is_stable_through_task_block() -> None:
     # The WAVE CONTEXT heading itself is inside the shared prefix; only the
     # deadline value beyond it diverges.
     assert wave_idx < common_prefix_len
+
+
+# ---------------------------------------------------------------------------
+# 11 — mandatory loom-agent-chat comms contract (AI-4)
+#
+# Two layers:
+#   (a) doc-contract — the three SKILL.md files carry the MANDATORY-when-
+#       available posture, name ATELIER_LOOM_COMMS=0 as the SINGLE opt-out,
+#       and document the deregister-on-completion / rejoin-on-demand lifecycle;
+#   (b) injection — the PRODUCTION dispatch path (detect → build_team_chat_context
+#       → compose_briefing, the team-mode choke point) actually carries the
+#       mandate + runnable loom commands into the rendered briefing when Loom is
+#       available, and degrades byte-identical to bridge-only when disabled.
+#
+# Assertions pin contract TOKENS ("MANDATORY", the opt-out token built from the
+# code constant LOOM_COMMS_ENV_VAR, lifecycle verbs, cmd-dict keys) rather than
+# full sentences, so wording polish does not break them but a posture revert or
+# an env-var rename does.
+# ---------------------------------------------------------------------------
+
+# The single opt-out token, built from the CODE constant so a code-side env-var
+# rename that leaves the docs naming the old var (or vice versa) goes RED.
+_LOOM_OPT_OUT_TOKEN = f"{LOOM_COMMS_ENV_VAR}=0"
+
+_LOOM_MANDATE_SKILLS = {
+    "team-mode-rules": REPO_ROOT / "internal" / "team-mode-rules" / "SKILL.md",
+    "dev-subagent": REPO_ROOT / "internal" / "dev-subagent" / "SKILL.md",
+    "dev-dispatch": REPO_ROOT / "internal" / "dev-dispatch" / "SKILL.md",
+    "dev-plan": REPO_ROOT / "internal" / "dev-plan" / "SKILL.md",
+}
+
+# The deregister/rejoin/teardown lifecycle is claimed only by the three
+# dispatch-contract SKILLs above; dev-plan carries the kickoff-meeting mandate
+# (posture + opt-out tokens) but not the lifecycle, so it is swept for the
+# mandate tokens only.
+_LOOM_LIFECYCLE_SKILLS = sorted(set(_LOOM_MANDATE_SKILLS) - {"dev-plan"})
+
+# The three subagent-mode briefing templates that carry the `{{loom_section}}`
+# injection placeholder (the subagent-mode dispatch choke point).
+_SUBAGENT_PROMPT_TEMPLATES = [
+    REPO_ROOT / "internal" / "dev-subagent" / "implementer-prompt.md",
+    REPO_ROOT / "internal" / "dev-subagent" / "spec-reviewer-prompt.md",
+    REPO_ROOT / "internal" / "dev-subagent" / "quality-reviewer-prompt.md",
+]
+
+
+def _skill_text(name: str) -> str:
+    text = _LOOM_MANDATE_SKILLS[name].read_text(encoding="utf-8")
+    assert text.strip(), f"{name} SKILL.md is empty — fixture broken"
+    return text
+
+
+@pytest.mark.parametrize("skill_name", sorted(_LOOM_MANDATE_SKILLS))
+def test_loom_mandate_tokens_present_in_skill(skill_name: str) -> None:
+    """Each of the three SKILL.md files states the MANDATORY-when-available
+    posture AND names ATELIER_LOOM_COMMS=0 as the single opt-out. Token-level:
+    a downgrade back to 'default'/'optional' that drops the MANDATORY token, or
+    an opt-out rename that desyncs from LOOM_COMMS_ENV_VAR, goes RED."""
+    text = _skill_text(skill_name)
+    assert "MANDATORY" in text, f"{skill_name}: MANDATORY posture token missing"
+    assert _LOOM_OPT_OUT_TOKEN in text, (
+        f"{skill_name}: single opt-out token {_LOOM_OPT_OUT_TOKEN!r} missing "
+        f"(docs must name the code's LOOM_COMMS_ENV_VAR verbatim)"
+    )
+    # The opt-out is documented as the ONLY escape hatch — the exclusivity
+    # token must appear in the SAME paragraph (blank-line-delimited block) that
+    # names the opt-out var, not merely anywhere in the file.
+    opt_out_paragraphs = [
+        para for para in re.split(r"\n\s*\n", text) if _LOOM_OPT_OUT_TOKEN in para
+    ]
+    assert any(re.search(r"\bONLY\b", para) for para in opt_out_paragraphs), (
+        f"{skill_name}: opt-out exclusivity ('ONLY') not stated in the same "
+        f"paragraph that names {_LOOM_OPT_OUT_TOKEN}"
+    )
+
+
+@pytest.mark.parametrize("skill_name", _LOOM_LIFECYCLE_SKILLS)
+def test_loom_lifecycle_terms_present_in_skill(skill_name: str) -> None:
+    """The deregister-on-completion / rejoin-on-demand lifecycle is documented
+    in all three files (each claims it: rules §Loom transport lifecycle para,
+    dev-dispatch step 3b bullets, dev-subagent step 2a block)."""
+    text = _skill_text(skill_name).lower()
+    assert "deregister" in text, f"{skill_name}: deregister lifecycle term missing"
+    assert "rejoin" in text, f"{skill_name}: rejoin lifecycle term missing"
+    assert "teardown" in text, f"{skill_name}: teardown sweep backstop missing"
+
+
+def test_loom_doc_claimed_injection_points_exist_in_code() -> None:
+    """The SKILL.md files claim concrete code seams; each must actually exist
+    (this repo has prior green-but-dead history — pin doc claims to code).
+
+    * rules + both mode SKILLs name `detect` (scripts/loom_comms.py) as the
+      single availability choke point;
+    * dev-dispatch names `build_team_chat_context` feeding `compose_briefing`
+      (team-mode choke point);
+    * dev-subagent's documented loom_section block reads `cmds["..."]` keys —
+      every key it references must be produced by `loom_cmds`.
+    """
+    assert callable(detect)
+    assert callable(build_team_chat_context)
+    assert callable(compose_briefing)
+
+    # Every cmds["<key>"] reference in the dev-subagent documented block must be
+    # a real loom_cmds key — a key rename in code that orphans the doc block
+    # (or vice versa) fails here.
+    subagent_text = _skill_text("dev-subagent")
+    referenced_keys = set(re.findall(r'cmds\["([a-z_]+)"\]', subagent_text))
+    assert referenced_keys, "dev-subagent SKILL.md no longer references cmds[...] keys"
+    produced_keys = set(
+        loom_cmds(
+            role_id="implementer",
+            channel="dev-subagent-1",
+            client="/tmp/loom_chat.py",
+            team_lead_name="team-lead",
+        )
+    )
+    missing = referenced_keys - produced_keys
+    assert not missing, (
+        f"dev-subagent SKILL.md loom_section references cmds keys not produced "
+        f"by loom_cmds: {sorted(missing)}"
+    )
+
+
+def test_subagent_choke_point_placeholder_wired() -> None:
+    """Subagent-mode injection seam: dev-subagent SKILL.md documents the
+    MANDATORY loom_section block, and each of the three briefing prompt
+    templates carries the `{{loom_section}}` placeholder it is injected into.
+    A template that drops the placeholder silently un-wires the mandate for
+    that subagent role."""
+    subagent_text = _skill_text("dev-subagent")
+    assert "## Loom agent-chat (MANDATORY)" in subagent_text, (
+        "dev-subagent SKILL.md loom_section block heading lost its MANDATORY marker"
+    )
+    assert "{{loom_section}}" in subagent_text, (
+        "dev-subagent SKILL.md no longer documents the {{loom_section}} placeholder"
+    )
+    for template in _SUBAGENT_PROMPT_TEMPLATES:
+        text = template.read_text(encoding="utf-8")
+        placeholder_count = text.count("{{loom_section}}")
+        assert placeholder_count == 1, (
+            f"{template.name}: expected exactly one {{{{loom_section}}}} "
+            f"placeholder, found {placeholder_count}"
+        )
+
+
+# -- injection layer: the production team-mode caller -----------------------
+
+
+def _available_loom_status(tmp_path: Path):
+    """Drive the REAL detect() gate (injected runner, no subprocess) to an
+    available LoomStatus with a resolved client path — the same object the
+    dev-dispatch step-3b choke point feeds into build_team_chat_context."""
+    client = tmp_path / "loom_chat.py"
+    client.write_text("# fake loom client\n", encoding="utf-8")
+
+    def runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps(
+                {"available": True, "url": "http://127.0.0.1:7077/mcp", "port": 7077}
+            ),
+            stderr="",
+        )
+
+    status = detect(client=client, runner=runner, env={})
+    assert status.available and status.client == client, "fixture: detect gate broken"
+    return status
+
+
+def test_compose_briefing_loom_available_carries_mandate(tmp_path: Path) -> None:
+    """PRODUCTION injection path, Loom available: detect → build_team_chat_context
+    → compose_briefing. The rendered briefing a worker actually receives must
+    carry (a) the MANDATORY posture + the single opt-out token — delivered via
+    the team-mode-rules block compose_briefing prepends verbatim — and (b) the
+    rendered Loom subsection with RUNNABLE commands incl. the deregister
+    lifecycle command. No mock template, no doc-only assertion."""
+    status = _available_loom_status(tmp_path)
+    channel = "atelier-loom-mandate-1"
+    team_chat = build_team_chat_context(
+        status,
+        role_id="backend-engineer-1",
+        channel=channel,
+        team_lead_name="team-lead",
+    )
+    assert team_chat["transport"] == "loom"
+
+    out = compose_briefing(**_compose_kwargs(team_chat=team_chat))
+
+    # (a) The mandate physically reaches the worker: the rules block is
+    # prepended verbatim, so its posture tokens are IN the briefing.
+    assert "MANDATORY" in out
+    assert _LOOM_OPT_OUT_TOKEN in out
+
+    # Posture anti-revert: the old "default chat transport" framing must NOT
+    # resurface anywhere in the briefing, and the Loom subsection itself must
+    # not describe Loom as a default/declinable transport (markup-insensitive:
+    # emphasis asterisks are stripped before matching).
+    assert "DEFAULT chat transport" not in out
+    loom_section = out[out.index("## Loom team-chat") : out.index("# REPLY CONTRACT")]
+    loom_plain = loom_section.replace("*", "").lower()
+    assert "default transport" not in loom_plain, (
+        "Loom subsection regressed to the pre-mandate 'default transport' framing"
+    )
+    assert "default" not in loom_plain.split("\n")[0], (
+        "Loom subsection heading must not call Loom a default transport"
+    )
+
+    # (b) The Loom subsection rendered with runnable commands — the resolved
+    # client path is baked in (no <loom_client> placeholder survives).
+    assert "## Loom team-chat" in out
+    assert channel in out
+    assert team_chat["cmds"]["register"] in out
+    assert team_chat["cmds"]["send_to_peer"] in out
+    # The deregister-on-completion lifecycle: the runnable deregister command
+    # is rendered, and the briefing instructs deregistering at terminal closure.
+    assert team_chat["cmds"]["deregister"] in out
+    assert "deregister" in out.lower()
+
+
+@pytest.mark.parametrize("disable_via", ["opt_out_env", "loom_unavailable"])
+def test_compose_briefing_degrades_byte_identical_to_bridge(
+    tmp_path: Path, disable_via: str
+) -> None:
+    """PRODUCTION degrade path: with ATELIER_LOOM_COMMS=0 (the single opt-out)
+    or an unavailable Loom, the chain detect → build_team_chat_context →
+    compose_briefing renders BYTE-IDENTICAL to the no-team_chat default — no
+    Loom subsection, no runnable loom commands, bridge CHANNELS intact. Under
+    the opt-out the runner must never even be invoked (detect short-circuits
+    before any subprocess)."""
+    client = tmp_path / "loom_chat.py"
+    client.write_text("# fake loom client\n", encoding="utf-8")
+
+    if disable_via == "opt_out_env":
+
+        def runner(argv, **kwargs):
+            raise AssertionError("opt-out must short-circuit BEFORE any runner call")
+
+        status = detect(client=client, runner=runner, env={LOOM_COMMS_ENV_VAR: "0"})
+    else:
+
+        def runner(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv, 3, stdout=json.dumps({"available": False}), stderr=""
+            )
+
+        status = detect(client=client, runner=runner, env={})
+
+    assert status.available is False
+    team_chat = build_team_chat_context(
+        status,
+        role_id="backend-engineer-1",
+        channel="atelier-loom-mandate-1",
+        team_lead_name="team-lead",
+    )
+    assert team_chat == {"transport": "bridge"}
+
+    degraded = compose_briefing(**_compose_kwargs(team_chat=team_chat))
+    baseline = compose_briefing(**_compose_kwargs())  # team_chat omitted → None coerced
+
+    # The documented contract is BYTE-identical degrade, not merely "similar".
+    assert degraded == baseline
+
+    # No Loom subsection, no runnable loom commands leak into the briefing...
+    assert "## Loom team-chat" not in degraded
+    assert str(client) not in degraded
+    # ...while the bridge control-plane block is intact.
+    assert "# CHANNELS" in degraded
+    assert "# REPLY CONTRACT" in degraded

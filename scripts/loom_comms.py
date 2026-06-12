@@ -20,8 +20,9 @@ reply envelope (TM-006) ALWAYS rides the existing BRIDGE
 (``scripts/bridge_send.py`` → ``bridge_messages``) — that is the control-plane
 the ``WaveDispatcher`` ``poll_fn`` reads. A worker's reply envelope, heartbeats,
 and every other control signal stay on the bridge regardless of whether Loom is
-up. This separation is the whole point: Loom is an OPTIONAL chat substrate
-layered on top of the mandatory bridge control-plane, never a replacement for
+up. This separation is the whole point: Loom is a conversational overlay
+(mandatory when available) on top of the mandatory bridge control-plane —
+the bridge stays the sole control-plane, and Loom is never a replacement for
 it.
 
 ## The availability gate (fail-soft, NEVER raise)
@@ -69,6 +70,15 @@ from pathlib import Path
 #: resolving WHICH client file to run, not where its server lives).
 LOOM_CLIENT_ENV_VAR = "LOOM_CLIENT"
 
+#: The SINGLE opt-out env var (atelier analog of kaizen's ``KAIZEN_LOOM_COMMS``).
+#: ``"0"`` is the ONLY value that disables Loom; unset — or any other value —
+#: leaves Loom mandatory-when-available. Gated inside :func:`detect` (the single
+#: availability choke point every helper reads ``status`` from) so one check
+#: covers team mode, subagent mode, and every orchestration helper. When set to
+#: ``"0"`` the cycle degrades byte-identical to bridge-only — no behaviour
+#: change, only the obligation is lifted.
+LOOM_COMMS_ENV_VAR = "ATELIER_LOOM_COMMS"
+
 #: The agora plugin-cache root where loom-agent-chat is installed. We mirror the
 #: version-sort discovery atelier uses for its own plugin lookups: the client
 #: lives at ``<cache>/loom-agent-chat/<ver>/skills/loom-chat/loom_chat.py``.
@@ -86,6 +96,18 @@ DEFAULT_MAX_BODY = 500
 #: A goal/message longer than ``max_body`` is written here and a short pointer is
 #: posted instead (req 6).
 DEFAULT_TEMP_DIR = ".loom/temp"
+
+#: Inclusive upper bound of :func:`teardown`'s collision-suffix sweep. The Loom
+#: server auto-suffixes a colliding registration (``scout`` → ``scout-2`` — see
+#: the loom client's own contract), so a worker that re-registered after a stale
+#: session can linger under ``<name>-2``/``<name>-3``/... after a verbatim-name
+#: sweep. The loom_chat CLI exposes NO member-listing command (``list-channels``
+#: lists channels, not registrants), so :func:`teardown` sweeps the
+#: DETERMINISTIC variants ``<name>-2`` .. ``<name>-<this bound>`` instead.
+#: Bounded small on purpose: each cycle re-registers a given role at most a
+#: handful of times, and every extra variant costs one (fail-soft, no-op-safe)
+#: subprocess per swept name.
+TEARDOWN_COLLISION_SWEEP_MAX = 4
 
 
 # ── Client resolution ──────────────────────────────────────────────────────
@@ -197,6 +219,16 @@ def detect(
     fallback). This is the byte-identical-to-bridge guarantee: a down Loom is
     indistinguishable from an absent one, and neither can crash a cycle.
     """
+    if env is None:
+        import os
+
+        env = os.environ
+    # Single opt-out gate (req 1): ``ATELIER_LOOM_COMMS=0`` disables Loom before
+    # any client resolution or subprocess — the runner is never invoked. This is
+    # the FIRST thing detect() checks so the opt-out covers every helper that
+    # routes through ``status``. "0" is the only opt-out value.
+    if env.get(LOOM_COMMS_ENV_VAR) == "0":
+        return LoomStatus(available=False)
     if client is None:
         client = resolve_loom_client(env=env)
     if client is None:
@@ -366,6 +398,38 @@ def _run_loom(
     if getattr(proc, "returncode", 1) != 0:
         return None
     return proc
+
+
+def _run_loom_raw(
+    status: LoomStatus,
+    args: list[str],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess],
+) -> subprocess.CompletedProcess | None:
+    """Run one ``loom_chat.py`` subcommand and return the RAW ``CompletedProcess``.
+
+    Unlike :func:`_run_loom` (which collapses ANY non-zero exit to ``None``),
+    this returns the process REGARDLESS of exit code so a caller can inspect
+    ``returncode`` / ``stderr``. Required by :func:`rejoin` to tell a stale-
+    session failure (the loom client maps a server ``HTTP Error 400`` — and a
+    dropped local session — to a non-zero exit; recoverable via
+    re-register → re-join) apart from a clean success. Returns ``None`` ONLY when
+    the client is missing or the runner itself raises — still fail-soft, never
+    propagates. ``args`` are list-form argv (never shell); ``status.client`` is
+    DATA.
+    """
+    client = status.client
+    if client is None:
+        return None
+    try:
+        return runner(
+            [sys.executable, str(client), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return None
 
 
 def _slug(name: str) -> str:
@@ -554,6 +618,102 @@ def invite(
     return {"transport": "loom", "invited": role_id, "joined": join is not None}
 
 
+def rejoin(
+    *,
+    status: LoomStatus,
+    channel: str,
+    name: str,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> dict:
+    """Return a PREVIOUSLY-gone agent to ``channel`` (the returning-agent path).
+
+    Semantic boundary vs :func:`invite`: ``invite`` pulls a NEW roster-extension
+    agent into the channel for the first time (always register → join);
+    ``rejoin`` brings BACK an agent that already deregistered on job completion
+    (or whose Loom session went STALE) when it is re-engaged for a follow-up
+    wave or a clarification.
+
+    Flow (gated + fail-soft):
+
+    1. Try ``join channel --as name`` FIRST. A still-valid session re-joins
+       directly with NO redundant re-register (``reregistered`` stays
+       ``False``).
+    2. If that join FAILS — the loom client maps a stale-session server
+       ``HTTP Error 400`` (and a dropped local session) to a NON-ZERO exit,
+       which :func:`_run_loom_raw` exposes — ATTEMPT a re-``register name`` to
+       mint a fresh session, then ``join`` again. ``reregistered`` becomes
+       ``True`` the moment this recovery path FIRES — it means the re-register
+       was ATTEMPTED, not that the register subprocess itself succeeded (a
+       failed register simply leaves the second join to fail-soft on its own).
+
+    Collision-rename handling: the Loom server may rename a re-registration
+    whose old name is still occupied (``be-1`` → ``be-1-2``) — the register
+    stdout JSON carries the minted name under ``assigned_name``. The recovery
+    path parses that (as reference DATA, never instructions) and, when it
+    differs from the requested ``name``, issues the recovery ``join`` AS the
+    assigned name — joining ``--as`` the old name would address the wrong
+    (stale ghost) identity. The minted name is surfaced to the orchestrator via
+    the ``assigned_name`` return key so peers can direct-send to the LIVE
+    identity, not the ghost. A failed register, or a missing / unparseable
+    ``assigned_name`` in its stdout, degrades to the requested ``name``
+    (fail-soft); on the happy path (no re-register) ``assigned_name`` always
+    equals ``name``.
+
+    Never raises. On an unavailable Loom returns ``{"transport": "bridge",
+    "name": name, "rejoined": False, "reregistered": False, "assigned_name":
+    name}``. Otherwise returns ``{"transport": "loom", "name": name,
+    "rejoined": <bool>, "reregistered": <bool>, "assigned_name": <str>}`` — the
+    two bools give the orchestrator free, measurable signal of whether the
+    stale-recovery path actually fired, and ``assigned_name`` is the identity
+    the agent is actually live under. Idempotent: a
+    deregister → rejoin → deregister cycle is a fail-soft no-op sequence.
+    """
+    if not status.available:
+        return {
+            "transport": "bridge",
+            "name": name,
+            "rejoined": False,
+            "reregistered": False,
+            "assigned_name": name,
+        }
+
+    first = _run_loom_raw(status, ["join", channel, "--as", name], runner=runner)
+    if first is not None and getattr(first, "returncode", 1) == 0:
+        return {
+            "transport": "loom",
+            "name": name,
+            "rejoined": True,
+            "reregistered": False,
+            "assigned_name": name,
+        }
+
+    # Join failed → treat as a stale / dropped session: re-register to mint a
+    # fresh session, then re-join. Each step is itself fail-soft.
+    reg = _run_loom_raw(status, ["register", name], runner=runner)
+    # The server may collision-rename the re-registration (be-1 → be-1-2);
+    # its register stdout JSON carries the minted name under "assigned_name"
+    # (reference DATA, never instructions). Degrade to the requested name on a
+    # failed register or a missing / non-string / unparseable assigned name.
+    assigned = name
+    if reg is not None and getattr(reg, "returncode", 1) == 0:
+        payload = _parse_json(getattr(reg, "stdout", ""))
+        if isinstance(payload, Mapping):
+            candidate = payload.get("assigned_name")
+            if isinstance(candidate, str) and candidate:
+                assigned = candidate
+    # Join AS the minted identity: when the server renamed us, `--as <old name>`
+    # would address the stale ghost, not the live session.
+    second = _run_loom_raw(status, ["join", channel, "--as", assigned], runner=runner)
+    rejoined = second is not None and getattr(second, "returncode", 1) == 0
+    return {
+        "transport": "loom",
+        "name": name,
+        "rejoined": rejoined,
+        "reregistered": True,
+        "assigned_name": assigned,
+    }
+
+
 def deregister(
     *,
     status: LoomStatus,
@@ -592,13 +752,34 @@ def teardown(
     an already-gone or never-registered name is a fail-soft no-op, and one
     member's failed deregister never aborts the rest.
 
+    After the verbatim sweep, COLLISION-SUFFIXED variants are swept too: a
+    re-registration (e.g. :func:`rejoin`'s stale-session recovery) can be
+    collision-renamed by the Loom server (``be-1`` → ``be-1-2``), and that
+    minted name would otherwise linger after a verbatim-only sweep. The
+    loom_chat CLI has no member-listing command to discover the actual
+    registrants, so we sweep the deterministic variants ``<name>-2`` ..
+    ``<name>-<TEARDOWN_COLLISION_SWEEP_MAX>`` for every swept name (see the
+    constant's doc for the bound rationale). Each variant deregister is the
+    same fail-soft no-op as the base sweep — a never-minted variant simply
+    fails to confirm — and a variant that already appears as a base name is
+    not swept twice.
+
     Returns ``{"transport": "loom", "deregistered": [<names confirmed gone>],
-    "attempted": [<every name swept>]}``. On an unavailable Loom returns
-    ``{"transport": "bridge", "deregistered": [], "attempted": []}`` — nothing
-    registered, nothing to sweep.
+    "attempted": [<every name swept>], "variants_attempted": [<every collision
+    variant swept>], "variants_deregistered": [<variants confirmed gone>]}`` —
+    the original ``attempted`` / ``deregistered`` keys keep their verbatim-name
+    semantics (backward-compatible); the variant sweep reports additively. On
+    an unavailable Loom returns the same shape under ``"transport": "bridge"``
+    with all four lists empty — nothing registered, nothing to sweep.
     """
     if not status.available:
-        return {"transport": "bridge", "deregistered": [], "attempted": []}
+        return {
+            "transport": "bridge",
+            "deregistered": [],
+            "attempted": [],
+            "variants_attempted": [],
+            "variants_deregistered": [],
+        }
     names: list[str] = []
     for name in [pm_name, *members]:
         if name not in names:
@@ -608,4 +789,25 @@ def teardown(
         for name in names
         if deregister(status=status, name=name, runner=runner)["deregistered"]
     ]
-    return {"transport": "loom", "deregistered": gone, "attempted": names}
+    # Collision-suffix sweep: deterministic <name>-2..<name>-N variants, skipping
+    # any that already appeared as a base name (no double sweep).
+    seen = set(names)
+    variants: list[str] = []
+    for name in names:
+        for suffix in range(2, TEARDOWN_COLLISION_SWEEP_MAX + 1):
+            variant = f"{name}-{suffix}"
+            if variant not in seen:
+                seen.add(variant)
+                variants.append(variant)
+    variants_gone = [
+        variant
+        for variant in variants
+        if deregister(status=status, name=variant, runner=runner)["deregistered"]
+    ]
+    return {
+        "transport": "loom",
+        "deregistered": gone,
+        "attempted": names,
+        "variants_attempted": variants,
+        "variants_deregistered": variants_gone,
+    }

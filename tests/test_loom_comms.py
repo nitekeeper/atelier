@@ -28,16 +28,22 @@ import pytest
 from scripts.dispatch import REQUIRED_VARS, compose_briefing, validate_render_context
 from scripts.loom_comms import (
     DEFAULT_MAX_BODY,
+    TEARDOWN_COLLISION_SWEEP_MAX,
     LoomStatus,
+    _run_loom_raw,
     build_team_chat_context,
     deregister,
     detect,
     invite,
     kickoff,
     loom_cmds,
+    rejoin,
     resolve_loom_client,
     teardown,
 )
+
+#: Number of collision variants swept per name (<name>-2 .. <name>-MAX).
+_VARIANTS_PER_NAME = TEARDOWN_COLLISION_SWEEP_MAX - 1
 
 # ---------------------------------------------------------------------------
 # Fake subprocess runner — mirrors the real loom_chat.py CLI contract
@@ -742,7 +748,9 @@ def test_deregister_fallback_when_unavailable() -> None:
 
 
 def test_teardown_deregisters_all_participants(tmp_path: Path) -> None:
-    """teardown sweeps pm + every member, marking each gone (history retained)."""
+    """teardown sweeps pm + every member, marking each gone (history retained).
+    The verbatim base sweep fires FIRST, in roster order, before any collision
+    variant — the `attempted`/`deregistered` keys keep base-name-only semantics."""
     runner = FakeRunner(available=True)
     status = LoomStatus(available=True, client=_client(tmp_path))
     result = teardown(status=status, members=["be-1", "fe-1", "qa-1"], runner=runner)
@@ -750,29 +758,45 @@ def test_teardown_deregisters_all_participants(tmp_path: Path) -> None:
     assert result["attempted"] == ["team-lead", "be-1", "fe-1", "qa-1"]
     assert result["deregistered"] == ["team-lead", "be-1", "fe-1", "qa-1"]
     dereg = [c[3:] for c in runner.calls if c[2] == "deregister"]
-    assert dereg == [
+    # Base names sweep first, verbatim, in order; variants only after.
+    assert dereg[:4] == [
         ["--as", "team-lead"],
         ["--as", "be-1"],
         ["--as", "fe-1"],
         ["--as", "qa-1"],
     ]
+    # Every later deregister is a collision variant of a base name.
+    assert all(
+        args[1].rsplit("-", 1)[0] in ("team-lead", "be-1", "fe-1", "qa-1") for args in dereg[4:]
+    )
 
 
 def test_teardown_dedups_pm_in_members(tmp_path: Path) -> None:
-    """A pm_name that also appears in members is swept exactly once."""
+    """A pm_name that also appears in members is swept exactly once — base AND
+    variant sweeps both dedupe."""
     runner = FakeRunner(available=True)
     status = LoomStatus(available=True, client=_client(tmp_path))
     result = teardown(status=status, members=["lead", "be-1"], pm_name="lead", runner=runner)
     assert result["attempted"] == ["lead", "be-1"]
     dereg = [c for c in runner.calls if c[2] == "deregister"]
-    assert len(dereg) == 2
+    # 2 deduped base names + their collision variants — NOT 3 names' worth.
+    assert len(dereg) == 2 * (1 + _VARIANTS_PER_NAME)
+    # No name (base or variant) is deregistered twice.
+    swept = [c[4] for c in dereg]
+    assert len(swept) == len(set(swept))
 
 
 def test_teardown_fallback_when_unavailable() -> None:
     """teardown on an unavailable Loom is fail-soft: no subprocess, nothing swept."""
     runner = FakeRunner(available=False)
     result = teardown(status=LoomStatus(available=False), members=["be-1"], runner=runner)
-    assert result == {"transport": "bridge", "deregistered": [], "attempted": []}
+    assert result == {
+        "transport": "bridge",
+        "deregistered": [],
+        "attempted": [],
+        "variants_attempted": [],
+        "variants_deregistered": [],
+    }
     assert runner.calls == []
 
 
@@ -784,8 +808,401 @@ def test_teardown_failures_are_soft_and_never_abort(tmp_path: Path) -> None:
     result = teardown(status=status, members=["be-1", "fe-1"], runner=runner)
     assert result["attempted"] == ["team-lead", "be-1", "fe-1"]
     assert result["deregistered"] == []
+    assert result["variants_deregistered"] == []
     dereg = [c for c in runner.calls if c[2] == "deregister"]
-    assert len(dereg) == 3
+    # All-failing deregisters still attempt every base name AND every variant.
+    assert len(dereg) == 3 * (1 + _VARIANTS_PER_NAME)
+
+
+def test_teardown_sweeps_collision_suffixed_variants(tmp_path: Path) -> None:
+    """The prefix sweep deregisters the deterministic collision variants
+    <name>-2..<name>-MAX of every swept name (pm included), in name order —
+    so a re-registered worker the server renamed (be-1 → be-1-2) does not
+    linger after teardown."""
+    runner = FakeRunner(available=True)
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = teardown(status=status, members=["be-1"], runner=runner)
+    expected_variants = [
+        f"{name}-{n}"
+        for name in ("team-lead", "be-1")
+        for n in range(2, TEARDOWN_COLLISION_SWEEP_MAX + 1)
+    ]
+    assert result["variants_attempted"] == expected_variants
+    # FakeRunner confirms every deregister → every variant confirms gone.
+    assert result["variants_deregistered"] == expected_variants
+    # Each variant got a REAL `deregister --as <variant>` subprocess call.
+    dereg_names = [c[4] for c in runner.calls if c[2] == "deregister"]
+    assert dereg_names == ["team-lead", "be-1", *expected_variants]
+
+
+def test_teardown_variant_failure_does_not_abort_rest(tmp_path: Path) -> None:
+    """One variant's failed deregister (the realistic never-registered exit 4)
+    never aborts the sweep — later variants are still attempted and the failed
+    one is simply absent from `variants_deregistered`."""
+
+    base = FakeRunner(available=True)
+
+    def runner(argv, **kw):
+        # `deregister --as be-1-3` fails (never minted → loom_chat exit 4);
+        # everything else succeeds.
+        if argv[2] == "deregister" and argv[4] == "be-1-3":
+            return subprocess.CompletedProcess(
+                argv,
+                4,
+                stdout='{"error": "not registered as be-1-3 — run register first"}',
+                stderr="",
+            )
+        return base(argv, **kw)
+
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = teardown(status=status, members=["be-1"], runner=runner)
+    assert "be-1-3" in result["variants_attempted"]
+    assert "be-1-3" not in result["variants_deregistered"]
+    # The variants AFTER the failure were still swept and confirmed.
+    assert "be-1-4" in result["variants_deregistered"]
+    assert result["deregistered"] == ["team-lead", "be-1"]
+
+
+def test_teardown_collision_sweep_max_is_four() -> None:
+    """Pin the literal sweep bound: every other teardown test derives its
+    expectations FROM the constant, so mutating the value would otherwise pass
+    the suite unnoticed. Changing this bound is a deliberate decision that
+    requires updating this test (and the constant's rationale doc)."""
+    assert TEARDOWN_COLLISION_SWEEP_MAX == 4
+
+
+def test_teardown_member_that_is_already_a_variant_not_swept_twice(tmp_path: Path) -> None:
+    """A roster name that IS a collision variant of another roster name (be-1 +
+    be-1-2 both in members) is swept once as a base name and skipped by the
+    variant sweep — no double deregister."""
+    runner = FakeRunner(available=True)
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = teardown(status=status, members=["be-1", "be-1-2"], runner=runner)
+    assert result["attempted"] == ["team-lead", "be-1", "be-1-2"]
+    assert "be-1-2" not in result["variants_attempted"]
+    dereg_names = [c[4] for c in runner.calls if c[2] == "deregister"]
+    assert dereg_names.count("be-1-2") == 1
+
+
+# ---------------------------------------------------------------------------
+# rejoin — returning-agent path: join-first, stale-session re-register recovery
+# ---------------------------------------------------------------------------
+
+#: The EXACT stale-session failure shape the live loom client emits: the server
+#: rejects the dead transport session with HTTP 400, loom_chat.py's error
+#: boundary maps it to exit 4 with this stdout. rejoin's recovery trigger is the
+#: NON-ZERO exit, not a "400" string match.
+_STALE_EXIT = 4
+_STALE_STDOUT = '{"error": "HTTPError: HTTP Error 400: Bad Request"}'
+
+
+class StaleFirstJoinRunner(FakeRunner):
+    """First `join` fails with the realistic stale-session shape (exit 4 +
+    HTTPError-400 stdout); every later call follows the normal contract."""
+
+    def __init__(self) -> None:
+        super().__init__(available=True)
+        self._join_seen = False
+
+    def __call__(self, argv, **kw):
+        if len(argv) > 2 and argv[2] == "join" and not self._join_seen:
+            self._join_seen = True
+            self.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, _STALE_EXIT, stdout=_STALE_STDOUT, stderr="")
+        return super().__call__(argv, **kw)
+
+
+def test_rejoin_happy_path_no_redundant_register(tmp_path: Path) -> None:
+    """A still-valid session re-joins directly: rejoined=True, reregistered=False,
+    assigned_name == requested name, and NO register call is ever issued —
+    exactly one subprocess (the join)."""
+    runner = FakeRunner(available=True)
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = rejoin(status=status, channel="cycle-1", name="be-1", runner=runner)
+    assert result == {
+        "transport": "loom",
+        "name": "be-1",
+        "rejoined": True,
+        "reregistered": False,
+        "assigned_name": "be-1",
+    }
+    assert len(runner.calls) == 1
+    assert runner.calls[0][2:] == ["join", "cycle-1", "--as", "be-1"]
+
+
+def test_rejoin_stale_session_reregisters_then_rejoins(tmp_path: Path) -> None:
+    """The stale-session recovery: first join fails (exit 4, the HTTPError-400
+    stdout the live client emits) → re-register → second join succeeds. The
+    contract is join-BEFORE-register: the first call MUST be the join attempt,
+    register fires only after it failed."""
+    runner = StaleFirstJoinRunner()
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = rejoin(status=status, channel="cycle-1", name="be-1", runner=runner)
+    assert result == {
+        "transport": "loom",
+        "name": "be-1",
+        "rejoined": True,
+        "reregistered": True,
+        # FakeRunner's register echoes the requested name (no collision) →
+        # assigned_name degrades-to / equals the requested name.
+        "assigned_name": "be-1",
+    }
+    # Exact call sequence: join (stale) → register → join. No extra calls.
+    assert [c[2:] for c in runner.calls] == [
+        ["join", "cycle-1", "--as", "be-1"],
+        ["register", "be-1"],
+        ["join", "cycle-1", "--as", "be-1"],
+    ]
+
+
+def test_rejoin_both_joins_fail_is_soft(tmp_path: Path) -> None:
+    """Both joins failing never raises: rejoined=False, reregistered=True (the
+    recovery path fired), and the full join → register → join sequence ran."""
+    runner = FakeRunner(available=True, fail_cmds={"join"})
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = rejoin(status=status, channel="cycle-1", name="be-1", runner=runner)
+    assert result == {
+        "transport": "loom",
+        "name": "be-1",
+        "rejoined": False,
+        "reregistered": True,
+        "assigned_name": "be-1",
+    }
+    assert [c[2] for c in runner.calls] == ["join", "register", "join"]
+
+
+def test_rejoin_fallback_when_unavailable() -> None:
+    """rejoin on an unavailable Loom is fail-soft: bridge transport, no
+    subprocess at all."""
+    runner = FakeRunner(available=False)
+    result = rejoin(status=LoomStatus(available=False), channel="c", name="be-1", runner=runner)
+    assert result == {
+        "transport": "bridge",
+        "name": "be-1",
+        "rejoined": False,
+        "reregistered": False,
+        "assigned_name": "be-1",
+    }
+    assert runner.calls == []
+
+
+def test_rejoin_runner_raises_never_propagates(tmp_path: Path) -> None:
+    """A runner that RAISES mid-rejoin (transport died) never propagates — the
+    never-crash gate holds on the returning-agent path too."""
+
+    def raising(argv, **kw):
+        raise OSError("transport down mid-call")
+
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = rejoin(status=status, channel="c", name="be-1", runner=raising)
+    assert result["rejoined"] is False
+    assert result["transport"] == "loom"
+
+
+def test_deregister_rejoin_deregister_sequence_is_noop_safe(tmp_path: Path) -> None:
+    """The full lifecycle round-trip — deregister → rejoin → deregister — is
+    fail-soft no-op-safe in BOTH worlds: every transport call succeeding, and
+    every join/deregister failing (the already-gone / never-registered case).
+    Neither sequence raises."""
+    status = LoomStatus(available=True, client=_client(tmp_path))
+
+    # Happy world: all calls succeed.
+    ok = FakeRunner(available=True)
+    assert deregister(status=status, name="be-1", runner=ok)["deregistered"] is True
+    assert rejoin(status=status, channel="c", name="be-1", runner=ok)["rejoined"] is True
+    assert deregister(status=status, name="be-1", runner=ok)["deregistered"] is True
+
+    # Degraded world: joins + deregisters all fail (exit 4) — pure no-ops.
+    bad = FakeRunner(available=True, fail_cmds={"join", "deregister"})
+    assert deregister(status=status, name="be-1", runner=bad)["deregistered"] is False
+    result = rejoin(status=status, channel="c", name="be-1", runner=bad)
+    assert result["rejoined"] is False
+    assert result["reregistered"] is True
+    assert deregister(status=status, name="be-1", runner=bad)["deregistered"] is False
+
+
+class CollisionRenameRunner(FakeRunner):
+    """Stale first join (exit 4, HTTPError-400 stdout) AND a server that
+    collision-renames the recovery registration: ``register be-1`` mints
+    ``be-1-2``. The recovery ``join`` succeeds ONLY ``--as be-1-2`` — joining
+    as the stale ghost ``be-1`` keeps failing, exactly like the live server."""
+
+    def __init__(self, *, requested: str, minted: str) -> None:
+        super().__init__(available=True)
+        self._requested = requested
+        self._minted = minted
+
+    def __call__(self, argv, **kw):
+        self.calls.append(list(argv))
+        cmd = argv[2] if len(argv) > 2 else ""
+        if cmd == "join":
+            as_name = argv[argv.index("--as") + 1] if "--as" in argv else ""
+            if as_name == self._minted:
+                return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true}', stderr="")
+            return subprocess.CompletedProcess(argv, _STALE_EXIT, stdout=_STALE_STDOUT, stderr="")
+        if cmd == "register":
+            out = {
+                "assigned_name": self._minted,
+                "session_id": "sid-456",
+                "url": "http://127.0.0.1:7077/mcp",
+            }
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(out), stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+
+
+def test_rejoin_collision_rename_surfaces_assigned_name_and_rejoins_as_it(
+    tmp_path: Path,
+) -> None:
+    """When the recovery register is collision-renamed (be-1 → be-1-2), rejoin
+    MUST (a) issue the recovery join AS the minted name — joining as the old
+    name addresses the stale ghost and fails — and (b) surface the minted name
+    via ``assigned_name`` so peers direct-send to the LIVE identity."""
+    runner = CollisionRenameRunner(requested="be-1", minted="be-1-2")
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = rejoin(status=status, channel="cycle-1", name="be-1", runner=runner)
+    assert result == {
+        "transport": "loom",
+        "name": "be-1",
+        "rejoined": True,
+        "reregistered": True,
+        "assigned_name": "be-1-2",
+    }
+    # Exact sequence: join as requested (stale) → register → join AS MINTED name.
+    assert [c[2:] for c in runner.calls] == [
+        ["join", "cycle-1", "--as", "be-1"],
+        ["register", "be-1"],
+        ["join", "cycle-1", "--as", "be-1-2"],
+    ]
+
+
+@pytest.mark.parametrize(
+    "register_stdout",
+    [
+        "not json at all",  # unparseable
+        "",  # empty
+        '{"session_id": "sid-789"}',  # parseable but no assigned_name key
+        '{"assigned_name": 7}',  # assigned_name present but not a string
+        '{"assigned_name": ""}',  # assigned_name an empty string
+    ],
+)
+def test_rejoin_unusable_register_stdout_degrades_to_requested_name(
+    tmp_path: Path, register_stdout: str
+) -> None:
+    """A recovery register whose stdout carries NO usable assigned name (garbage,
+    empty, missing key, non-string, empty string) degrades fail-soft to the
+    requested name: the second join goes ``--as <requested>`` and the return
+    dict reports ``assigned_name == name``."""
+
+    base = FakeRunner(available=True)
+
+    def runner(argv, **kw):
+        cmd = argv[2] if len(argv) > 2 else ""
+        if cmd == "join" and not any(c[2] == "register" for c in base.calls):
+            base.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, _STALE_EXIT, stdout=_STALE_STDOUT, stderr="")
+        if cmd == "register":
+            base.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, stdout=register_stdout, stderr="")
+        return base(argv, **kw)
+
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = rejoin(status=status, channel="cycle-1", name="be-1", runner=runner)
+    assert result == {
+        "transport": "loom",
+        "name": "be-1",
+        "rejoined": True,
+        "reregistered": True,
+        "assigned_name": "be-1",
+    }
+    assert [c[2:] for c in base.calls] == [
+        ["join", "cycle-1", "--as", "be-1"],
+        ["register", "be-1"],
+        ["join", "cycle-1", "--as", "be-1"],
+    ]
+
+
+def test_rejoin_failed_register_degrades_to_requested_name(tmp_path: Path) -> None:
+    """A recovery register that FAILS (non-zero exit) never contributes an
+    assigned name — even if its error stdout happens to carry one. rejoin
+    degrades to the requested name for the second join and the return key."""
+
+    base = FakeRunner(available=True, fail_cmds={"join"})
+
+    def runner(argv, **kw):
+        cmd = argv[2] if len(argv) > 2 else ""
+        if cmd == "register":
+            base.calls.append(list(argv))
+            return subprocess.CompletedProcess(
+                argv, 4, stdout='{"assigned_name": "be-1-9", "error": "boom"}', stderr=""
+            )
+        return base(argv, **kw)
+
+    status = LoomStatus(available=True, client=_client(tmp_path))
+    result = rejoin(status=status, channel="cycle-1", name="be-1", runner=runner)
+    assert result["assigned_name"] == "be-1"
+    assert result["rejoined"] is False
+    # The second join still addressed the requested name, not the error echo.
+    assert [c[2:] for c in base.calls][-1] == ["join", "cycle-1", "--as", "be-1"]
+
+
+# ---------------------------------------------------------------------------
+# _run_loom_raw — client-None guard
+# ---------------------------------------------------------------------------
+
+
+def test_run_loom_raw_client_none_guard_no_subprocess(tmp_path: Path) -> None:
+    """An available-but-clientless status (LoomStatus(available=True, client=None))
+    pins _run_loom_raw's client-None guard: fail-soft ``None`` return and NO
+    subprocess ever invoked. Without the guard the runner would be handed
+    ``str(None)`` as the client path. Also driven through the production caller
+    (rejoin), where a deleted guard would record calls and flip ``rejoined``."""
+    runner = FakeRunner(available=True)
+    status = LoomStatus(available=True, client=None)
+
+    assert _run_loom_raw(status, ["join", "c", "--as", "be-1"], runner=runner) is None
+    assert runner.calls == []
+
+    result = rejoin(status=status, channel="c", name="be-1", runner=runner)
+    assert result["rejoined"] is False
+    assert runner.calls == []
+
+
+# ---------------------------------------------------------------------------
+# ATELIER_LOOM_COMMS=0 — the single opt-out gate inside detect()
+# ---------------------------------------------------------------------------
+
+
+def test_opt_out_disables_before_any_resolution_or_subprocess(monkeypatch) -> None:
+    """ATELIER_LOOM_COMMS=0 short-circuits detect() BEFORE client resolution and
+    BEFORE any subprocess: resolve_loom_client is never called and the runner is
+    never invoked."""
+    import scripts.loom_comms as lc
+
+    def must_not_resolve(env=None):
+        raise AssertionError("resolve_loom_client must not be called under opt-out")
+
+    monkeypatch.setattr(lc, "resolve_loom_client", must_not_resolve)
+    runner = FakeRunner(available=True)
+    status = detect(runner=runner, env={"ATELIER_LOOM_COMMS": "0"})
+    assert status.available is False
+    assert runner.calls == []
+
+
+def test_opt_out_applies_even_with_explicit_client(tmp_path: Path) -> None:
+    """The opt-out wins even when a resolved client is handed in directly — the
+    gate is checked FIRST, so the runner still never fires."""
+    runner = FakeRunner(available=True)
+    status = detect(client=_client(tmp_path), runner=runner, env={"ATELIER_LOOM_COMMS": "0"})
+    assert status.available is False
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("value", ["1", "false", "no", ""])
+def test_opt_out_only_zero_disables(tmp_path: Path, value: str) -> None:
+    """ "0" is the ONLY opt-out value — any other value leaves Loom available."""
+    runner = FakeRunner(available=True)
+    status = detect(client=_client(tmp_path), runner=runner, env={"ATELIER_LOOM_COMMS": value})
+    assert status.available is True
 
 
 # ---------------------------------------------------------------------------

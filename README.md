@@ -113,9 +113,13 @@ Atelier defines a default dev arc and trigger contract that every session follow
 
 The methodology applies identically in both modes; only the storage backend changes.
 
-### Inter-agent chat (optional — loom-agent-chat)
+### Inter-agent chat (mandatory when available — loom-agent-chat)
 
-In **agent-team** mode, Atelier can optionally use the **loom-agent-chat** plugin for inter-agent PEER chat, the plan-phase kickoff meeting, and the PM's team/individual goals. This is **fully gated and bridge-fallback**: if Loom is installed and running, teammates converse over a per-cycle Loom channel; if it is absent or down, behavior is byte-identical to today — all coordination rides the existing bridge (`scripts/bridge_send.py`). Loom never carries control-flow: the terminal `task_result` reply envelope and heartbeats **always** ride the bridge control-plane regardless of Loom. No cycle can fail because Loom is unavailable. See `scripts/loom_comms.py` and `internal/dev-dispatch/SKILL.md`.
+In **both team and subagent modes**, Atelier uses the **loom-agent-chat** plugin for inter-agent PEER chat, the plan-phase kickoff meeting, and the PM's team/individual goals. When Loom is installed and running, its use is **MANDATORY** — agents converse over a per-cycle Loom channel rather than the bridge for all conversational comms. The single opt-out is the operator env var `ATELIER_LOOM_COMMS=0` (`"0"` is the only disabling value); when set, behavior is byte-identical to the no-Loom path.
+
+Agents follow a **deregister-on-completion / rejoin-on-demand** lifecycle: each agent deregisters from the channel when its job completes (chat history is retained), the orchestrator's end-of-cycle teardown sweep — including collision-suffixed name variants — is the backstop, and a re-engaged agent is brought back via `rejoin()` (join-first; a stale session is transparently re-registered and re-joined).
+
+This is all **fail-soft and bridge-fallback**: if Loom is absent or down, behavior is byte-identical to bridge-only — all coordination rides the existing bridge (`scripts/bridge_send.py`) — and a Loom error never blocks or aborts a cycle. Loom never carries control-flow: the terminal `task_result` reply envelope and heartbeats **always** ride the bridge control-plane regardless of Loom, and Loom never replaces the mandatory completion reply. See `scripts/loom_comms.py`, `internal/dev-dispatch/SKILL.md`, and `internal/dev-subagent/SKILL.md`.
 
 ## Skills
 

@@ -33,11 +33,11 @@ Requires `plan:approved`.
    ```
    Work tasks in order. If any task is tagged `[DESTRUCTIVE]` in its description, note it — these require explicit human confirmation before dispatch (step 4b).
 
-2a. **Loom chat kickoff (availability-gated).** Before dispatching the first task, probe Loom and open a session channel for the subagent chain. This is the **same availability gate** used in `internal/dev-dispatch/SKILL.md` step 3b — the only difference is that subagents run sequentially, so `individual_goals` and `members` are empty at kickoff (each subagent is registered at dispatch time, not pre-announced).
+2a. **Loom chat kickoff (MANDATORY when Loom is available).** Before dispatching the first task, probe Loom and open a session channel for the subagent chain. When `detect()` reports Loom available, Loom agent-chat is **REQUIRED** for the chain's conversational comms — this step and the per-dispatch `loom_section` injection below are NOT optional. The ONLY opt-out is `ATELIER_LOOM_COMMS=0` (the single operator env var, checked inside `detect()`; `"0"` is the only disabling value), which degrades the chain byte-identical to the no-Loom path. Loom failures are fail-soft and never block or abort a task. This is the **same availability gate** used in `internal/dev-dispatch/SKILL.md` step 3b — the only difference is that subagents run sequentially, so `individual_goals` and `members` are empty at kickoff (each subagent is registered at dispatch time, not pre-announced).
 
    ```python
    from scripts.loom_comms import (
-       detect, build_team_chat_context, kickoff, teardown,
+       detect, build_team_chat_context, kickoff, rejoin, teardown,
    )
    status = detect()                              # never raises; fail-soft
    channel = f"dev-subagent-{<project_id>}"
@@ -51,7 +51,12 @@ Requires `plan:approved`.
    ```
 
    For **each subagent dispatch** (implementer, spec-reviewer, quality-reviewer), build
-   the per-role chat ctx and render the `{{loom_section}}` to inject into the briefing:
+   the per-role chat ctx and render the `{{loom_section}}` to inject into the briefing.
+   This injection is the subagent-mode **dispatch choke point**: every briefing assembled
+   here MUST carry the Loom comms instruction block whenever Loom is available (the
+   team-mode analog is the `compose_briefing` `team_chat` ctx in
+   `internal/dev-dispatch/SKILL.md` step 3b — the block is injected at the dispatch
+   choke point in BOTH modes):
    ```python
    team_chat = build_team_chat_context(
        status,
@@ -61,9 +66,12 @@ Requires `plan:approved`.
    )
    if team_chat["transport"] == "loom":
        cmds = team_chat["cmds"]
-       loom_section = f"""## Loom agent-chat
+       loom_section = f"""## Loom agent-chat (MANDATORY)
 
-Use Loom to send status to the team-lead or check your inbox.
+Loom is available — its use is REQUIRED for conversational comms: send status
+to the team-lead and check your inbox via Loom. Loom never replaces your
+mandatory terminal status reply, and Loom failures never block your task —
+on any Loom error, note it and continue.
 
 | Action | Command |
 |---|---|
@@ -81,6 +89,10 @@ Use Loom to send status to the team-lead or check your inbox.
        loom_section = ""
    ```
    Inject the resulting `loom_section` string into the briefing template's `{{loom_section}}` placeholder.
+
+   **Deregister on completion / rejoin on demand.** Each subagent MUST deregister from the channel when its job completes — its briefing makes `deregister` the final action before it returns terminal status (the worker self-deregister above); the step-6 `teardown()` sweep is the cycle-end backstop, not a substitute. When a subagent that already deregistered is **re-dispatched** (e.g. an implementer retry after a failed review in steps e/f), bring it back with `rejoin(status=status, channel=channel, name=<subagent_role_id>)` — join-first; on a stale-session non-zero exit it re-registers and re-joins automatically. Fail-soft, idempotent.
+
+   **Invariant.** Loom never replaces the subagent's mandatory completion reply (its returned terminal status to the coordinator — the control-plane), and Loom failures never block or abort a task: on any Loom error the dispatch proceeds and the subagent continues without chat.
 
 3. **Human checkpoint at task ceiling.** If the plan contains more than 10 tasks, pause now:
    > "This plan has [N] tasks. After task 10 I will pause for a human checkpoint. Proceeding."
@@ -134,7 +146,7 @@ Use Loom to send status to the team-lead or check your inbox.
    ```python
    teardown(status=status, members=[])
    ```
-   Fail-soft, idempotent, no-op when Loom was unavailable. Belt-and-suspenders with each subagent's own `deregister` call before it returns its terminal status.
+   Fail-soft, idempotent, no-op when Loom was unavailable. `teardown` also sweeps the deterministic **collision-suffix variants** (`<name>-2` .. `<name>-4`) so a name minted by a stale-session re-register (via `rejoin`) cannot linger after a verbatim-only sweep. This sweep is the guaranteed backstop behind each subagent's own MANDATORY `deregister` call before it returns its terminal status.
 
 ## Hard rules
 

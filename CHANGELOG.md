@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+**Loom agent-chat comms mandatory when available.** Loom inter-agent chat is
+upgraded from default-when-available to **MANDATORY when Loom is available**,
+in BOTH team mode and subagent mode. The single opt-out is the operator env
+var `ATELIER_LOOM_COMMS=0` (`"0"` is the only disabling value, gated inside
+`loom_comms.detect()` — the single availability choke point). Agents now
+follow a deregister-on-completion / rejoin-on-demand lifecycle. Everything
+stays fail-soft: Loom failures never block or abort a cycle, Loom never
+replaces the mandatory bridge `task_result` completion reply, and when Loom
+is unavailable (or opted out) behavior is byte-identical to bridge-only.
+
+### Added
+- **`ATELIER_LOOM_COMMS` opt-out env var** (`scripts/loom_comms.py`). Checked
+  inside `detect()` so one gate covers team mode, subagent mode, and every
+  orchestration helper; `"0"` is the only disabling value.
+- **`loom_comms.rejoin()`** — returns a previously-deregistered agent to the
+  cycle channel on re-engagement. Join-first; a stale-session join failure
+  (non-zero exit, surfaced via the new `_run_loom_raw()`) re-registers then
+  re-joins. Fail-soft, idempotent; reports `rejoined` / `reregistered` flags
+  plus the `assigned_name` it joined as — on a collision rename the agent
+  joins AS the server-renamed identity, and the orchestrator must use the
+  returned `assigned_name` for subsequent directed sends.
+- **Teardown collision-suffix sweep** (`TEARDOWN_COLLISION_SWEEP_MAX = 4`).
+  `teardown()` now also deregisters the deterministic collision-suffixed
+  variants `<name>-2` .. `<name>-4` left behind when an agent re-registered
+  after a stale session.
+
+### Changed
+- **Posture: MANDATORY when available** across the dispatch choke points —
+  `internal/dev-dispatch/SKILL.md` (team mode, step 3b),
+  `internal/dev-subagent/SKILL.md` (subagent mode, step 2a + `loom_section`
+  injection per briefing), and the worker contract in
+  `internal/team-mode-rules/SKILL.md` (v1.3.2): when Loom is detected,
+  conversational comms MUST ride Loom; the briefing's Loom block is no longer
+  an option to skip.
+- **Deregister on completion / rejoin on demand.** Workers self-`deregister`
+  as their final Loom action at terminal closure; the orchestrator's
+  end-of-cycle `teardown()` sweep is the guaranteed backstop, not a
+  substitute; re-engaged agents come back via `rejoin()`.
+
+### Docs / Ops
+- Operational rule **A9** (mandatory loom-agent-chat comms) added to
+  `CLAUDE.md`; `## Inter-agent communication transport` and the README's
+  inter-agent chat section updated to the mandatory-when-available posture.
+
 ## v1.7.0 — 2026-06-08
 
 **Loom agent-chat in subagent mode.** The `dev-subagent` execution path now
@@ -241,7 +287,7 @@ following typed exceptions propagated from memex:
 - Install the SessionStart hook per README "Auto-trigger setup" section.
 - (Optional) paste `templates/CLAUDE-snippet.md` into your project's `CLAUDE.md`.
 
-## Unreleased
+## Unreleased (historical — pre-v0.2.0 entry, heading retained for audit trail)
 
 ### Added
 - `dev:self-improve` skill — autonomous multi-agent improvement cycle with isolated git clone, unanimous consensus gate, destructive-change detection, and full test gate before merge

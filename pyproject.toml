@@ -49,7 +49,11 @@ markers = [
     "live: hits the real claude CLI / network — deselected by default",
 ]
 # Keep the live smoke out of the default gate; `-m live` re-selects it.
-addopts = "-m 'not live'"
+# `-p no:libtmux`: libtmux is a runtime dep (tmux features) whose auto-loaded
+# pytest plugin applies a mark to a fixture — a hard error on pytest>=8.4. No
+# atelier test uses libtmux fixtures, so disable its plugin to keep CI green
+# regardless of the resolved libtmux/pytest versions.
+addopts = "-m 'not live' -p no:libtmux"
 
 [tool.bandit]
 exclude_dirs = ["tests", ".github", "__pycache__", ".claude"]

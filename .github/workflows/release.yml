@@ -47,6 +47,7 @@ jobs:
       - name: Run tests
         env:
           PYTHONPATH: .
+          PYTEST_ADDOPTS: "-p no:libtmux"
         run: pytest tests/ -q
 
       - name: Extract version from tag

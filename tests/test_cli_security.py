@@ -23,6 +23,7 @@ from scripts.cli_dispatch import (
     FakeCliRunner,
     UnsandboxedBypassError,
     UnsandboxedRealRunError,
+    _runner_spawns_real_process,
     build_subprocess_env,
     bwrap_sandbox_wrap,
     is_failed_attempt,
@@ -142,9 +143,17 @@ def test_disallowed_tools_configurable(tmp_path):
 
 class _FakeRealRunner(FakeCliRunner):
     """A fake that ADVERTISES it spawns a real process (so the sandbox gate
-    applies) but spawns nothing — lets us test the gate with no real `claude`."""
+    applies) but spawns nothing — lets us test the gate with no real `claude`.
+
+    Under the FAIL-CLOSED gate polarity (security #0), a runner is treated as
+    real UNLESS it sets the fake marker, so this subclass must OVERRIDE the
+    inherited ``no_real_process``/``is_fake`` exemption back to False to re-enter
+    the gate. ``spawns_real_process = True`` is the explicit belt-and-suspenders
+    positive signal (no longer load-bearing, but kept for documentation)."""
 
     spawns_real_process = True
+    no_real_process = False
+    is_fake = False
 
 
 def test_real_runner_refused_unsandboxed_no_optout(tmp_path, monkeypatch):
@@ -237,9 +246,113 @@ def test_fake_runner_is_exempt_from_sandbox_gate(tmp_path, monkeypatch):
     assert env["status"] == "done"
 
 
-def test_real_cli_runner_is_marked_real():
-    """The real runner advertises spawns_real_process so the gate keys on it."""
+def test_real_cli_runner_is_treated_as_real_fail_closed():
+    """FAIL-CLOSED polarity (security #0): the real runner is treated as REAL by
+    the gate, and it carries the belt-and-suspenders positive marker too."""
+    # The gate decision is the load-bearing assertion.
+    assert _runner_spawns_real_process(real_cli_runner) is True
+    # The positive marker is retained as documentation / belt-and-suspenders.
     assert getattr(real_cli_runner, "spawns_real_process", False) is True
+
+
+def test_unmarked_runner_is_treated_as_real_and_gated(tmp_path, monkeypatch):
+    """An UNMARKED runner (no fake marker, no positive marker) FAILS CLOSED: the
+    gate treats it as real and refuses it without a sandbox. This is the security
+    #0 invariant — a real-spawning runner that FORGOT the marker is gated, not
+    silently exempt."""
+    monkeypatch.delenv(UNSANDBOXED_OPT_OUT_ENV, raising=False)
+
+    class _UnmarkedRunner:
+        """Spawns nothing, but advertises NEITHER a fake marker NOR the positive
+        ``spawns_real_process`` marker — simulating a forgotten real runner."""
+
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        @property
+        def call_count(self) -> int:
+            return len(self.calls)
+
+        async def __call__(self, argv, cwd):
+            self.calls.append({"argv": list(argv), "cwd": cwd})
+            return {
+                "usage": {"output_tokens": 1},
+                "is_error": False,
+                "subtype": "success",
+                "structured_output": _envelope(),
+            }
+
+    runner = _UnmarkedRunner()
+    # The gate decision itself: an unmarked runner is real.
+    assert _runner_spawns_real_process(runner) is True
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    with pytest.raises(UnsandboxedRealRunError):
+        _run(
+            run_attempt(
+                _task(),
+                1,
+                budget=BudgetPool(total_tokens=100_000),
+                journal=ResultJournal(),
+                model="sonnet",
+                briefing="b",
+                clone_dir=str(clone),
+                runner=runner,
+            )
+        )
+    # Refused PRE-spawn — the forgotten-marker runner never ran.
+    assert runner.call_count == 0
+
+
+def test_explicit_spawns_real_false_does_not_exempt(tmp_path, monkeypatch):
+    """A runner setting only ``spawns_real_process = False`` (a forgotten default,
+    NOT an affirmative fake attestation) is still GATED — only an affirmative
+    ``no_real_process``/``is_fake`` marker exempts."""
+    monkeypatch.delenv(UNSANDBOXED_OPT_OUT_ENV, raising=False)
+
+    class _SpawnsRealFalseRunner:
+        spawns_real_process = False  # forgotten default, NOT a fake attestation
+
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        @property
+        def call_count(self) -> int:
+            return len(self.calls)
+
+        async def __call__(self, argv, cwd):
+            self.calls.append({"argv": list(argv), "cwd": cwd})
+            return {
+                "usage": {"output_tokens": 1},
+                "is_error": False,
+                "subtype": "success",
+                "structured_output": _envelope(),
+            }
+
+    runner = _SpawnsRealFalseRunner()
+    assert _runner_spawns_real_process(runner) is True
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    with pytest.raises(UnsandboxedRealRunError):
+        _run(
+            run_attempt(
+                _task(),
+                1,
+                budget=BudgetPool(total_tokens=100_000),
+                journal=ResultJournal(),
+                model="sonnet",
+                briefing="b",
+                clone_dir=str(clone),
+                runner=runner,
+            )
+        )
+    assert runner.call_count == 0
+
+
+def test_fake_marker_exempts_runner():
+    """The affirmative fake markers (``no_real_process`` / ``is_fake``) are what
+    exempt a runner — the gate decision is False for the FakeCliRunner."""
+    assert _runner_spawns_real_process(FakeCliRunner()) is False
 
 
 def test_journal_hit_skips_sandbox_gate(tmp_path, monkeypatch):

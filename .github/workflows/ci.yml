@@ -73,4 +73,8 @@ jobs:
       - name: Run test suite
         env:
           PYTHONPATH: .
+          # Propagates to subprocess pytest runs too (e.g. self_improve's
+          # run_tests_in_clone) so the broken libtmux plugin is disabled
+          # everywhere, not just the outer run.
+          PYTEST_ADDOPTS: "-p no:libtmux"
         run: pytest tests/ -q

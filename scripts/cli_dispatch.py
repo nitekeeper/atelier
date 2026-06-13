@@ -417,17 +417,38 @@ async def real_cli_runner(argv: Sequence[str], cwd: str) -> dict[str, Any]:
     return json.loads(stdout_b.decode("utf-8"))
 
 
-# Marker: a runner that spawns a REAL, write-capable claude process. The
-# mandatory-sandbox gate keys on this — a real runner with no sandbox is refused.
-# A custom real runner SHOULD set ``runner.spawns_real_process = True`` (or be
-# wrapped so this attribute is visible) to inherit the gate; the FakeCliRunner
-# leaves it False so tests are exempt.
+# Marker polarity is FAIL-CLOSED (security #0, M4): the mandatory-sandbox gate
+# treats EVERY runner as REAL (→ gated) by default and a runner must EXPLICITLY
+# opt OUT of realness to be exempt. A runner that forgets to mark itself is
+# therefore GATED (refused without a sandbox), never silently exempt. This
+# inverts the prior fail-OPEN keying on a positive ``spawns_real_process`` flag —
+# a real-spawning runner that forgot the marker would have been exempt.
+#
+# The exemption marker is ``no_real_process`` (aka ``is_fake``): set True ONLY on
+# a runner that spawns no OS process (e.g. :class:`FakeCliRunner`). The positive
+# ``spawns_real_process = True`` is RETAINED on ``real_cli_runner`` as a
+# belt-and-suspenders explicit signal, but it is no longer load-bearing: an
+# UNMARKED runner is already treated as real.
 real_cli_runner.spawns_real_process = True  # type: ignore[attr-defined]
 
 
 def _runner_spawns_real_process(runner: Runner) -> bool:
-    """True iff *runner* spawns a real OS process (so the sandbox gate applies)."""
-    return bool(getattr(runner, "spawns_real_process", False))
+    """True iff the sandbox gate must apply to *runner* (it may spawn a real
+    OS process).
+
+    FAIL-CLOSED: a runner is considered real (→ gated) UNLESS it EXPLICITLY
+    attests that it spawns no real process via ``no_real_process`` / ``is_fake``
+    (set True). An unmarked/forgotten runner is treated as real and gated — the
+    inverse of the prior keying on a positive ``spawns_real_process`` marker,
+    which failed OPEN when a real runner forgot to set it.
+
+    An explicit ``spawns_real_process = False`` does NOT exempt a runner on its
+    own (it could be a forgotten default); only an affirmative fake marker
+    (``no_real_process``/``is_fake`` True) exempts. This keeps the gate
+    fail-closed against silent omissions.
+    """
+    # Real (→ gated) UNLESS the runner affirmatively attests it is a fake.
+    return not (getattr(runner, "no_real_process", False) or getattr(runner, "is_fake", False))
 
 
 class FakeCliRunner:
@@ -456,6 +477,16 @@ class FakeCliRunner:
         Optional exception to raise instead of returning (simulates a subprocess
         crash / non-zero exit → failed attempt).
     """
+
+    #: Explicit FAIL-CLOSED exemption marker (security #0): this runner spawns NO
+    #: real OS process, so the mandatory-sandbox gate must NOT apply. The gate
+    #: (:func:`_runner_spawns_real_process`) treats every runner as real UNLESS
+    #: it sets this True — so a subclass that DOES spawn a real process (or wants
+    #: to exercise the gate) must override it to False (see the security tests'
+    #: ``_FakeRealRunner``).
+    no_real_process: bool = True
+    #: Alias accepted by the gate, for callers preferring ``is_fake`` semantics.
+    is_fake: bool = True
 
     def __init__(
         self,

@@ -181,8 +181,12 @@ def test_prune_noop_when_fewer_than_keep(db_path, project_id):
 
 def test_prune_sessions_memex_mode_routes_through_memex_module(monkeypatch):
     """Regression: prune_sessions in Memex mode must reach the Memex
-    ``stores`` module via ``backend_memex._memex_module("stores")`` —
-    NOT via ``from scripts import stores`` (which does not exist).
+    ``stores`` module via the backend_memex facade (which resolves it
+    through ``backend_memex._memex_module("stores")``) — NOT via
+    ``from scripts import stores`` (which does not exist). Post the
+    memex>=2.10 call-shim retrofit the delete is issued by
+    ``backend_memex._memex_core_delete``, so the fake mirrors Memex's
+    real ``stores.delete(name, table, row_id)`` positional signature.
     """
     import scripts.session as session_module
     from scripts import backend_memex, mode_detector
@@ -194,7 +198,7 @@ def test_prune_sessions_memex_mode_routes_through_memex_module(monkeypatch):
 
     class _FakeStores:
         @staticmethod
-        def delete(*, name, table, row_id):
+        def delete(name, table, row_id):
             delete_calls.append({"name": name, "table": table, "row_id": row_id})
 
     module_calls = []

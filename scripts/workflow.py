@@ -56,16 +56,17 @@ class WorkflowError(Exception):
 def _catalog_query(sql: str, params: tuple = ()) -> list[dict]:
     """SELECT-only read against the workspace DB.
 
-    Memex mode delegates to `memex_stores.query("atelier", ...)`; Local
-    mode opens a connection against `<workspace-root>/.ai/atelier.db`
-    via `backend_local._conn()`. Both targets share the same v1.1.0
-    schema, so the same SQL works against either."""
+    Memex mode delegates to `backend_memex._memex_core_raw_query`
+    (which routes through `memex_stores.query("atelier", ...)` UNDER the
+    Memex call shim — deferred call-time `scripts.*` imports in Memex >=
+    2.10 require it; see that helper's docstring); Local mode opens a
+    connection against `<workspace-root>/.ai/atelier.db` via
+    `backend_local._conn()`. Both targets share the same v1.1.0 schema,
+    so the same SQL works against either."""
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
-        memex_stores = backend_memex._memex_module("stores")
-        rows = memex_stores.query("atelier", sql, params)
-        return [dict(r) for r in rows]
+        return backend_memex._memex_core_raw_query(store="atelier", sql=sql, params=params)
     from scripts import backend_local
 
     c = backend_local._conn()

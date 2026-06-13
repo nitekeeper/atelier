@@ -6,8 +6,11 @@ either `backend_local` (workspace-local `roles` table) or
 `backend_memex` (Memex's `~/.memex/agents.db`). Reads + non-create
 mutations (`get`, `update`, `delete`, `list`, `search`) reach the
 appropriate backend directly because the facade does not expose
-narrow-surface helpers for them — `_memex_core_query` / `memex_stores`
-on the Memex side, `backend_local._conn()` on the Local side.
+narrow-surface helpers for them — the `backend_memex._memex_core_*`
+primitives on the Memex side (never `memex_stores` directly: every call
+into Memex must run under backend_memex's call shim so deferred
+call-time `scripts.*` imports resolve — see `_memex_core_raw_query`'s
+docstring), `backend_local._conn()` on the Local side.
 
 Public function signatures are preserved from pre-retrofit. The
 `db_path` argument is retained for back-compat — Local mode discovers
@@ -69,9 +72,9 @@ def update_role(db_path: str, role_id: int, **kwargs) -> dict | None:
     update; if no allowed keys are supplied, the call is a no-op and the
     current row is returned without touching `updated_at`.
 
-    In Memex mode, dispatches to `memex_stores.update` against the
-    `agents` store (Memex's roles module does not expose a dedicated
-    `update_role` helper). In Local mode, opens a fresh connection
+    In Memex mode, dispatches to `backend_memex._memex_core_update`
+    against the `agents` store (Memex's roles module does not expose a
+    dedicated `update_role` helper). In Local mode, opens a fresh connection
     via `backend_local._conn()` and updates in-place."""
     allowed = {"name", "description"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
@@ -83,8 +86,9 @@ def update_role(db_path: str, role_id: int, **kwargs) -> dict | None:
         from scripts import backend_memex
 
         updates["updated_at"] = _now()
-        memex_stores = backend_memex._memex_module("stores")
-        memex_stores.update(name="agents", table="roles", row_id=role_id, updates=updates)
+        backend_memex._memex_core_update(
+            store="agents", table="roles", row_id=role_id, changes=updates
+        )
         return get_role(db_path, role_id)
     from scripts import backend_local
 
@@ -111,8 +115,7 @@ def delete_role(db_path: str, role_id: int) -> bool:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
-        memex_stores = backend_memex._memex_module("stores")
-        memex_stores.delete(name="agents", table="roles", row_id=role_id)
+        backend_memex._memex_core_delete(store="agents", table="roles", row_id=role_id)
         return True
     from scripts import backend_local
 
@@ -130,8 +133,9 @@ def list_roles(db_path: str) -> list[dict]:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
-        memex_stores = backend_memex._memex_module("stores")
-        return memex_stores.query("agents", "SELECT * FROM roles ORDER BY name", ())
+        return backend_memex._memex_core_raw_query(
+            store="agents", sql="SELECT * FROM roles ORDER BY name"
+        )
     from scripts import backend_local
 
     c = backend_local._conn()
@@ -144,17 +148,17 @@ def list_roles(db_path: str) -> list[dict]:
 
 def search_roles(db_path: str, query: str) -> list[dict]:
     """Substring search on name + description. Uses raw SQL via
-    `memex_stores.query()` in Memex mode (SELECT-only, never commits)
-    because the equality-only `where=` dict cannot express LIKE."""
+    `backend_memex._memex_core_raw_query` in Memex mode (SELECT-only,
+    never commits, runs under the Memex call shim) because the
+    equality-only `where=` dict cannot express LIKE."""
     pattern = f"%{query}%"
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
-        memex_stores = backend_memex._memex_module("stores")
-        return memex_stores.query(
-            "agents",
-            "SELECT * FROM roles WHERE name LIKE ? OR description LIKE ? ORDER BY name",
-            (pattern, pattern),
+        return backend_memex._memex_core_raw_query(
+            store="agents",
+            sql="SELECT * FROM roles WHERE name LIKE ? OR description LIKE ? ORDER BY name",
+            params=(pattern, pattern),
         )
     from scripts import backend_local
 

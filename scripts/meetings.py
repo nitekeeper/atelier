@@ -181,10 +181,12 @@ def remove_participant(db_path: str, meeting_id: int, agent_id: str) -> None:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
-        backend_memex._ensure_memex_importable()
         # No row_id-based delete here (composite primary key). Use the
         # dedicated execute helper from backend_memex — `stores.query()`
-        # is SELECT-only and won't accept DELETE.
+        # is SELECT-only and won't accept DELETE. (The legacy
+        # `_ensure_memex_importable()` priming call was dropped here:
+        # `_memex_core_execute` resolves Memex modules via
+        # `_load_memex_module` and needs no sys.path mutation.)
         backend_memex._memex_core_execute(
             store="atelier",
             sql="DELETE FROM meeting_participants WHERE meeting_id = ? AND agent_id = ?",
@@ -206,15 +208,18 @@ def get_participants(db_path: str, meeting_id: int) -> list[dict]:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
-
-        # Cross-table JOIN — fall back to raw SQL via SELECT-only query().
-        return memex_stores.query(
-            "atelier",
-            "SELECT a.* FROM agents a JOIN meeting_participants mp "
+        # Cross-table JOIN — raw SQL via the SELECT-only facade helper.
+        # (Previously: `_ensure_memex_importable()` + `from scripts
+        # import stores` — broken-by-design per backend_memex's own
+        # docstring; Atelier's `scripts` package wins the submodule
+        # resolution and raises ImportError. The facade helper also runs
+        # the query under the Memex call shim, see
+        # `backend_memex._memex_core_raw_query`'s boundary note.)
+        return backend_memex._memex_core_raw_query(
+            store="atelier",
+            sql="SELECT a.* FROM agents a JOIN meeting_participants mp "
             "ON a.id = mp.agent_id WHERE mp.meeting_id = ?",
-            (meeting_id,),
+            params=(meeting_id,),
         )
     from scripts import backend_local
 
@@ -286,9 +291,6 @@ def delete_meeting(db_path: str, meetings_dir: Path, meeting_id: int) -> bool:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
-
         # Two-step (participants DELETE, then meeting DELETE) is NOT
         # wrapped in a transaction here because Memex Core's API splits
         # writes across two helpers: `_memex_core_execute` (raw SQL,
@@ -300,12 +302,17 @@ def delete_meeting(db_path: str, meetings_dir: Path, meeting_id: int) -> bool:
         # the meeting DELETE fails — re-running delete_meeting is
         # idempotent (orphan participants don't exist because we deleted
         # them; the meeting row is still there, so caller can retry).
+        # Both steps go through backend_memex facade helpers (never
+        # `memex_stores.*` directly) so they run under the Memex call
+        # shim — see `backend_memex._memex_core_raw_query`'s boundary note.
         backend_memex._memex_core_execute(
             store="atelier",
             sql="DELETE FROM meeting_participants WHERE meeting_id = ?",
             params=(meeting_id,),
         )
-        memex_stores.delete(name="atelier", table="meeting_minutes", row_id=meeting_id)
+        backend_memex._memex_core_delete(
+            store="atelier", table="meeting_minutes", row_id=meeting_id
+        )
     else:
         from scripts import backend_local
 
@@ -333,15 +340,15 @@ def search_meetings(db_path: str, query: str) -> list[dict]:
     if mode_detector.detect_mode() == "memex":
         from scripts import backend_memex
 
-        backend_memex._ensure_memex_importable()
-        from scripts import stores as memex_stores  # type: ignore
-
-        return memex_stores.query(
-            "atelier",
-            "SELECT * FROM meeting_minutes "
+        # Raw LIKE SQL via the SELECT-only facade helper (runs under
+        # the Memex call shim; replaces the broken legacy
+        # `from scripts import stores` pattern — see get_participants).
+        return backend_memex._memex_core_raw_query(
+            store="atelier",
+            sql="SELECT * FROM meeting_minutes "
             "WHERE title LIKE ? OR summary LIKE ? OR decisions LIKE ? "
             "ORDER BY date DESC",
-            (pattern, pattern, pattern),
+            params=(pattern, pattern, pattern),
         )
     from scripts import backend_local
 

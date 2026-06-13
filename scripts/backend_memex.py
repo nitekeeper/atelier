@@ -33,16 +33,46 @@ from types import ModuleType
 
 from scripts import domain_vocabulary
 
-# Modules that the shim itself injects under `sys.modules['scripts.*']`.
-# `_load_memex_module` MUST NOT wrap their exec in `_scripts_db_shim` —
-# doing so re-enters the shim while it is still computing these very
-# modules, which produces the infinite recursion documented in
-# `tests/test_regression_backend_memex_shim_recursion.py`.
+# Modules that the shim itself injects under `sys.modules['scripts.*']`,
+# mapped to the (strictly earlier-tier) shim modules each one needs
+# exposed during its OWN exec. `_load_memex_module` MUST NOT wrap their
+# exec in `_scripts_db_shim` — doing so re-enters the shim while it is
+# still computing these very modules, which produces the infinite
+# recursion documented in
+# `tests/test_regression_backend_memex_shim_recursion.py`. Instead the
+# bootstrap branch execs them with ONLY their declared dependencies
+# injected (via `_expose_scripts_modules`), never the full shim.
 #
-# Must stay in sync with `_scripts_db_shim`'s eager-load list (the three
-# `_load_memex_module(...)` calls in its body). If you add or remove one
-# there, update this set.
-_SHIM_BOOTSTRAP: frozenset[str] = frozenset({"db", "paths", "registry"})
+# Dependency tiers (verified against memex/2.11.0):
+#   tier 0: db, paths        — stdlib-only at module level.
+#   tier 1: registry         — `from scripts.db import memex_home`
+#                              (registry.py:13).
+#   tier 2: stores           — db + paths + registry (stores.py:8-10);
+#           agents           — db only today (agents/__init__.py:19),
+#                              all three declared for headroom;
+#           embeddings       — db only today (embeddings.py:32),
+#                              all three declared for headroom.
+#
+# `stores`, `agents`, `embeddings` joined the set for Memex >= 2.10:
+# `agents/librarian.py` does module-level `from scripts import agents` /
+# `from scripts import stores` (librarian.py:42-43) and
+# `agents/reference_librarian.py` does `from scripts import embeddings`
+# (reference_librarian.py:38), so the shim must expose all six for those
+# execs to resolve. The dependency graph is acyclic by construction
+# (deps reference strictly earlier tiers), so the bootstrap branch
+# terminates without ever entering `_scripts_db_shim`.
+#
+# `_scripts_db_shim` eager-loads exactly the keys of this map. If you
+# add or remove an entry, no other site needs touching — the shim and
+# the bootstrap branch both iterate this map.
+_SHIM_BOOTSTRAP: dict[str, tuple[str, ...]] = {
+    "db": (),
+    "paths": (),
+    "registry": ("db",),
+    "stores": ("db", "paths", "registry"),
+    "agents": ("db", "paths", "registry"),
+    "embeddings": ("db", "paths", "registry"),
+}
 
 
 # ── Memex plugin location + import bootstrap ───────────────────────────────
@@ -115,46 +145,102 @@ def _ensure_memex_importable() -> None:
 
 
 @contextlib.contextmanager
-def _scripts_db_shim(plugin_root: Path):
-    """Temporarily expose Memex's `scripts/db.py`, `scripts/registry.py`,
-    and `scripts/paths.py` as `sys.modules['scripts.*']` entries so that
-    Memex modules exec'd by `_load_memex_module` resolve their intra-package
-    imports against Memex's own copies rather than crashing against Atelier's
-    empty `scripts/` package.
+def _expose_scripts_modules(mods: dict[str, ModuleType]):
+    """Temporarily expose `mods` (name → Memex module) BOTH as
+    `sys.modules['scripts.<name>']` entries AND as attributes on the real
+    `scripts` package object.
 
-    Affected imports in Memex's `stores.py` (and siblings):
-      - `from scripts.db import get_connection` → `scripts.db`
+    Both surfaces matter, because Python resolves the two import forms
+    differently:
+      - `from scripts.db import memex_home` goes through the submodule
+        import, which `sys.modules['scripts.db']` satisfies directly.
+      - `from scripts import agents` consults `getattr(scripts, 'agents')`
+        FIRST and only falls back to `sys.modules['scripts.agents']` when
+        the attribute is absent. Atelier ships a REAL `scripts/agents.py`,
+        so once it has been imported anywhere in the process the package
+        attribute exists — and a sys.modules-only shim would silently hand
+        Memex's `from scripts import agents as agents_mod`
+        (librarian.py:42 in memex >= 2.10) Atelier's module instead of
+        Memex's `agents/` package. Overriding the attribute for the scope
+        of the block closes that hole.
+
+    Restoration is unconditional and per-key / per-attribute: we snapshot
+    the pre-block state (present/absent + value) and restore it on exit.
+    If a key/attr was absent before the block (the common case), we
+    `pop`/`delattr` it; if another shim was already active (nested
+    activation), we put back the prior object. Either way both the module
+    table and the `scripts` package namespace are bit-for-bit identical
+    before and after — Atelier code outside the block always sees its own
+    `scripts.agents`.
+    """
+    saved_mods: dict[str, tuple[bool, object]] = {
+        f"scripts.{name}": (f"scripts.{name}" in sys.modules, sys.modules.get(f"scripts.{name}"))
+        for name in mods
+    }
+    scripts_pkg = sys.modules.get("scripts")
+    saved_attrs: dict[str, tuple[bool, object]] = {}
+    if scripts_pkg is not None:
+        saved_attrs = {
+            name: (hasattr(scripts_pkg, name), getattr(scripts_pkg, name, None)) for name in mods
+        }
+    for name, mod in mods.items():
+        sys.modules[f"scripts.{name}"] = mod
+        if scripts_pkg is not None:
+            setattr(scripts_pkg, name, mod)
+    try:
+        yield
+    finally:
+        for key, (was_present, prior) in saved_mods.items():
+            if was_present:
+                sys.modules[key] = prior  # type: ignore[assignment]
+            else:
+                sys.modules.pop(key, None)
+        if scripts_pkg is not None:
+            for name, (had_attr, prior) in saved_attrs.items():
+                if had_attr:
+                    setattr(scripts_pkg, name, prior)
+                else:
+                    with contextlib.suppress(AttributeError):
+                        delattr(scripts_pkg, name)
+
+
+@contextlib.contextmanager
+def _scripts_db_shim(plugin_root: Path):
+    """Temporarily expose Memex's `db` / `paths` / `registry` / `stores` /
+    `agents` / `embeddings` as `scripts.*` (sys.modules entries AND
+    `scripts` package attributes, via `_expose_scripts_modules`) so that
+    Memex code exec'd or CALLED under the shim resolves its intra-package
+    imports against Memex's own copies rather than crashing against — or
+    silently binding — Atelier's `scripts/` package.
+
+    Affected imports in Memex >= 2.10 (verified against memex/2.11.0):
+      - `from scripts.db import get_connection`  → `scripts.db`
       - `from scripts import registry`           → `scripts.registry`
       - `from scripts.paths import DB_DIR`       → `scripts.paths`
+      - `from scripts import stores`             → `scripts.stores`
+                                                   (librarian.py:43)
+      - `from scripts import agents as agents_mod` → `scripts.agents`
+                                                   (librarian.py:42 — would
+                                                   otherwise bind ATELIER's
+                                                   real scripts/agents.py)
+      - `from scripts import embeddings`         → `scripts.embeddings`
+                                                   (reference_librarian.py:38)
 
-    All three are loaded via `_load_memex_module` (file-path loader, cached)
-    before any injection. Crucially, each of `db` / `paths` / `registry`
-    lives in `_SHIM_BOOTSTRAP` and is loaded through the bootstrap branch
-    in `_load_memex_module` — that branch does NOT re-enter
-    `_scripts_db_shim`. Re-entering the shim while it was still computing
-    these modules is exactly the infinite recursion this design avoids
-    (see `tests/test_regression_backend_memex_shim_recursion.py`). Loading
-    order from the shim's perspective:
-      1. `db`       — stdlib-only, exec'd directly.
-      2. `paths`    — stdlib-only, exec'd directly.
-      3. `registry` — `_load_memex_module`'s bootstrap branch temporarily
-                      injects Memex's `db` into `sys.modules['scripts.db']`
-                      for the duration of registry's exec, then restores
-                      the pre-injection state.
+    Every exposed module is loaded via `_load_memex_module` (file-path
+    loader, cached) before any injection. Crucially, every name lives in
+    `_SHIM_BOOTSTRAP` and is loaded through the bootstrap branch in
+    `_load_memex_module` — that branch execs with only its declared
+    dependencies injected and does NOT re-enter `_scripts_db_shim`.
+    Re-entering the shim while it was still computing these modules is
+    exactly the infinite recursion this design avoids (see
+    `tests/test_regression_backend_memex_shim_recursion.py`).
 
-    Must stay in sync with `_SHIM_BOOTSTRAP` — if you add or remove an
-    eager-load call below, update that set in lockstep.
-
-    Restoration is unconditional and per-key: for each injected key we
-    snapshot the pre-shim state (present/absent + value) and restore it on
-    exit.  If a key was absent before the block (the common case), we `pop`
-    it; if another shim was already active (paranoia case), we put back the
-    prior object.  Either way the module table is bit-for-bit identical
-    before and after, so concurrent or nested activations are isolated.
-
-    If `db.py` is absent from the plugin root (synthetic test fixtures), the
-    shim degrades to a no-op — modules loaded inside the `with` block are
-    presumably self-contained, so leaving `scripts.*` absent is correct.
+    Missing submodules (stripped test fixtures) are silently skipped —
+    any genuine dependency on them surfaces at the module's own import
+    site. If `db.py` itself is absent from the plugin root (synthetic
+    test fixtures), the shim degrades to a no-op — modules loaded inside
+    the `with` block are presumably self-contained, so leaving
+    `scripts.*` absent is correct.
     """
     try:
         memex_db = _load_memex_module(plugin_root, "db")
@@ -162,40 +248,32 @@ def _scripts_db_shim(plugin_root: Path):
         yield None
         return
 
-    # Load paths and registry now (before any injection) so the nested
-    # _scripts_db_shim calls they trigger leave sys.modules clean.
-    # Missing submodules (stripped test fixtures) are silently skipped —
-    # any genuine dependency on them surfaces at the module's own import site.
-    memex_paths: ModuleType | None = None
-    memex_registry: ModuleType | None = None
-    with contextlib.suppress(ImportError):
-        memex_paths = _load_memex_module(plugin_root, "paths")
-    with contextlib.suppress(ImportError):
-        memex_registry = _load_memex_module(plugin_root, "registry")
+    # INVARIANT (eager-load fragility surface): every `_SHIM_BOOTSTRAP`
+    # module is exec'd here on the shim's FIRST activation per plugin
+    # root, so a module-level failure in ANY of the six breaks every
+    # shim use. This is deliberate and bounded:
+    #   - ImportError (file absent — stripped test fixtures) is the only
+    #     suppressed failure: the module is simply not exposed, and a
+    #     genuine dependency on it surfaces at the dependent module's
+    #     own import site. Do NOT broaden this suppression.
+    #   - Any OTHER exception propagates loudly. A bootstrap module that
+    #     cannot exec under its declared deps cannot exec under Memex's
+    #     own runtime either — silently exposing a partial `scripts.*`
+    #     surface would just move the crash into Memex code mid-write.
+    #   - The cost is paid once: `_load_memex_module` is
+    #     `functools.cache`d, so subsequent activations are dict ops.
+    # The exec-cleanliness invariant is pinned per Memex release by the
+    # regression suites (shim-recursion + v210-write-path), which exec
+    # all six shapes against fixture trees mirroring memex/2.11.0.
+    mods: dict[str, ModuleType] = {"db": memex_db}
+    for name in _SHIM_BOOTSTRAP:
+        if name == "db":
+            continue
+        with contextlib.suppress(ImportError):
+            mods[name] = _load_memex_module(plugin_root, name)
 
-    # Snapshot current sys.modules state for every key we are about to inject,
-    # then inject.  Keys with None values (module failed to load) are skipped.
-    _shims: dict[str, ModuleType] = {}
-    if memex_db is not None:
-        _shims["scripts.db"] = memex_db
-    if memex_paths is not None:
-        _shims["scripts.paths"] = memex_paths
-    if memex_registry is not None:
-        _shims["scripts.registry"] = memex_registry
-
-    _saved: dict[str, tuple[bool, object]] = {
-        key: (key in sys.modules, sys.modules.get(key)) for key in _shims
-    }
-    for key, mod in _shims.items():
-        sys.modules[key] = mod
-    try:
+    with _expose_scripts_modules(mods):
         yield memex_db
-    finally:
-        for key, (was_present, prior) in _saved.items():
-            if was_present:
-                sys.modules[key] = prior  # type: ignore[assignment]
-            else:
-                sys.modules.pop(key, None)
 
 
 @functools.cache
@@ -211,21 +289,26 @@ def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
     paying the spec/exec cost more than once per process.
 
     For every Memex module EXCEPT those in `_SHIM_BOOTSTRAP` (`db`,
-    `paths`, `registry`), the loader wraps `exec_module` in
-    `_scripts_db_shim` so source-level
-    `from scripts.db import get_connection` statements (present in
-    `roles.py`, `agents/__init__.py`, `stores.py`, `meetings.py`, …)
-    resolve against Memex's bundled `scripts/db.py`. The shim is
-    scoped to the exec call and the prior `sys.modules` state is
-    restored on exit — no permanent global pollution. The three
-    `_SHIM_BOOTSTRAP` modules are special-cased so the shim can
-    bootstrap itself without re-entering `_scripts_db_shim` (which
-    would recurse forever, since the shim itself eagerly loads exactly
-    those three modules). `db` and `paths` are stdlib-only; `registry`
-    needs `scripts.db` exposed in `sys.modules` for its top-level
-    `from scripts.db import memex_home`, so the bootstrap branch
-    snapshots `sys.modules['scripts.db']`, injects the Memex `db`
-    module for the registry exec, and restores on exit.
+    `paths`, `registry`, `stores`, `agents`, `embeddings`), the loader
+    wraps `exec_module` in `_scripts_db_shim` so source-level
+    `from scripts.db import get_connection` statements — and, on Memex
+    >= 2.10, `from scripts import stores` / `agents` / `embeddings`
+    (librarian.py:42-43, reference_librarian.py:38) — resolve against
+    Memex's bundled modules. The shim is scoped to the exec call and the
+    prior `sys.modules` + `scripts`-package-attribute state is restored
+    on exit — no permanent global pollution. The `_SHIM_BOOTSTRAP`
+    modules are special-cased so the shim can bootstrap itself without
+    re-entering `_scripts_db_shim` (which would recurse forever, since
+    the shim itself eagerly loads exactly those modules). Each bootstrap
+    module instead execs under `_expose_scripts_modules` with only its
+    DECLARED dependencies injected — `_SHIM_BOOTSTRAP[dotted]`, an
+    acyclic strictly-earlier-tier list, so the recursion terminates.
+    Example: `registry` declares `("db",)` for its top-level
+    `from scripts.db import memex_home` (verified against
+    memex/2.11.0/scripts/registry.py line 13); `stores` declares all
+    three tier-0/1 names for stores.py:8-10. Revisit the map if a Memex
+    release grows additional top-level `scripts.*` imports in any
+    bootstrap module.
 
     Tests that want to inject a stub module should call
     `_load_memex_module.cache_clear()` and then either pre-populate the
@@ -250,29 +333,22 @@ def _load_memex_module(plugin_root: Path, dotted: str) -> ModuleType:
             # `scripts.<name>` entries.
             sys.modules[mod_name] = module
             if dotted in _SHIM_BOOTSTRAP:
-                # Bootstrap path for the three modules the shim itself
-                # injects (db, paths, registry). Must NOT re-enter
-                # `_scripts_db_shim` — that path is the recursion sink.
-                # db and paths are stdlib-only; registry only needs
-                # `scripts.db` in sys.modules for its top-level
-                # `from scripts.db import memex_home` to bind.
-                # Verified against memex/2.5.1/scripts/registry.py line 13;
-                # revisit if Memex registry.py grows additional `scripts.*` imports.
-                if dotted == "registry":
-                    memex_db = _load_memex_module(plugin_root, "db")
-                    _saved_db = (
-                        "scripts.db" in sys.modules,
-                        sys.modules.get("scripts.db"),
-                    )
-                    sys.modules["scripts.db"] = memex_db
-                    try:
-                        spec.loader.exec_module(module)
-                    finally:
-                        if _saved_db[0]:
-                            sys.modules["scripts.db"] = _saved_db[1]  # type: ignore[assignment]
-                        else:
-                            sys.modules.pop("scripts.db", None)
-                else:
+                # Bootstrap path for the modules the shim itself injects
+                # (db, paths, registry, stores, agents, embeddings). Must
+                # NOT re-enter `_scripts_db_shim` — that path is the
+                # recursion sink. Each module execs with only its declared
+                # `_SHIM_BOOTSTRAP[dotted]` dependencies exposed; the deps
+                # are themselves bootstrap modules from strictly earlier
+                # tiers, so this recursion terminates (db/paths are
+                # stdlib-only and exec with no injection at all). Missing
+                # dep files (stripped test fixtures) are skipped — a
+                # genuine dependency on them surfaces at the module's own
+                # import site.
+                deps: dict[str, ModuleType] = {}
+                for dep in _SHIM_BOOTSTRAP[dotted]:
+                    with contextlib.suppress(ImportError):
+                        deps[dep] = _load_memex_module(plugin_root, dep)
+                with _expose_scripts_modules(deps):
                     spec.loader.exec_module(module)
             else:
                 with _scripts_db_shim(plugin_root):
@@ -286,6 +362,84 @@ def _memex_module(dotted: str) -> ModuleType:
     `_load_memex_module` so every call site stays one line.
     """
     return _load_memex_module(_memex_plugin_root(), dotted)
+
+
+def _plugin_root_of_module(module: ModuleType) -> Path | None:
+    """Best-effort plugin-root recovery for a module loaded by
+    `_load_memex_module`: walk up from the module's `__file__` to the
+    nearest `scripts/` directory and return its parent.
+
+    The UNRESOLVED path is walked first, deliberately: `__file__` is the
+    exact string `_load_memex_module` built from its `plugin_root`
+    argument (`plugin_root / "scripts" / ...`), so the unresolved walk
+    reproduces that `plugin_root` value verbatim — equal as a Path, equal
+    as a `functools.cache` key. Resolving first would break that
+    coherence whenever the configured plugin root contains a symlink
+    (resolve() canonicalizes it) and silently load a second copy of the
+    shim modules under the canonical key. The resolve()d walk runs only
+    as a FALLBACK for exotic layouts where the unresolved chain has no
+    `scripts/` segment (e.g. a module reached through a symlinked file
+    inside the tree); a distinct-but-correct cache entry is acceptable
+    there.
+
+    Returns None when the module has no usable `__file__` — which is
+    precisely the test-harness case (stub namespaces patched in via
+    `_memex_module` monkeypatching). A stub performs no deferred
+    `scripts.*` imports, so callers treat None as "nothing to shim".
+    """
+    file = getattr(module, "__file__", None)
+    if not file:
+        return None
+    path = Path(file)
+    for candidate in (path, path.resolve()):
+        for parent in candidate.parents:
+            if parent.name == "scripts":
+                return parent.parent
+    return None
+
+
+@contextlib.contextmanager
+def _memex_call_shim(module: ModuleType):
+    """Run a CALL into an already-loaded Memex module with the
+    `scripts.*` shim active, so DEFERRED (call-time) imports inside
+    Memex code resolve against Memex's own modules.
+
+    `_load_memex_module` scopes `_scripts_db_shim` to `exec_module`, so
+    module-level imports are covered — but Memex >= 2.10 also performs
+    `from scripts.X import ...` INSIDE function bodies, long after that
+    exec-scope shim has exited (verified against memex/2.11.0):
+
+      - `embeddings._append_skip_log` → `from scripts.db import
+        memex_home` (embeddings.py:82; trigger path: `_try_embed` →
+        `EmbeddingUnavailable` → `_memex_log_embedding_skip` →
+        `embeddings.log_skip`).
+      - `embeddings._record_model_info` → `from scripts import registry`
+        (embeddings.py:326; hit on every SUCCESSFUL `encode`).
+      - `db.require_bootstrap`'s not-bootstrapped branch →
+        `from scripts.paths import PLUGIN_ROOT` (db.py:104; called by
+        every `stores` CRUD helper, stores.py:84+).
+
+    Without this wrapper those imports resolve against Atelier's own
+    `scripts` package and raise `ModuleNotFoundError: No module named
+    'scripts.db'` (et al.). Every Tier-1/Tier-2 wrapper in this file
+    that calls INTO a loaded Memex module routes its call through here.
+
+    The plugin root is derived from the module's own `__file__` (not
+    `_memex_plugin_root()`) for two reasons: `_plugin_root_of_module`'s
+    unresolved-first walk reconstructs the exact `plugin_root` the
+    loader was called with (cache-key coherent — see its docstring for
+    the symlink caveat handled there), and test harnesses that stub
+    `_memex_module` with synthetic namespaces — no `__file__`, no
+    config.json on disk — degrade to a no-op instead of failing on
+    plugin-root resolution. A stub executes no deferred `scripts.*`
+    imports, so there is genuinely nothing to shim.
+    """
+    plugin_root = _plugin_root_of_module(module)
+    if plugin_root is None:
+        yield
+        return
+    with _scripts_db_shim(plugin_root):
+        yield
 
 
 def require_memex_bootstrap() -> None:
@@ -308,7 +462,11 @@ def require_memex_bootstrap() -> None:
         db_mod = _memex_module("db")
         require = getattr(db_mod, "require_bootstrap", None)
         if require is not None:
-            require()
+            # Call shim: require_bootstrap's error path defers
+            # `from scripts.paths import PLUGIN_ROOT` (memex/2.11.0
+            # db.py:104) to call time.
+            with _memex_call_shim(db_mod):
+                require()
             return
         # Fallback for pre-v2.5.0 Memex: probe the registry file directly.
         registry = Path.home() / ".memex" / "registry.json"
@@ -325,9 +483,12 @@ def require_memex_bootstrap() -> None:
 
 
 def _memex_validate_output(librarian_output: dict) -> dict:
-    """Delegate to Memex's librarian.validate_output."""
+    """Delegate to Memex's librarian.validate_output. Runs under
+    `_memex_call_shim` so deferred call-time `scripts.*` imports inside
+    Memex (>= 2.10) resolve against Memex's modules."""
     librarian = _memex_module("agents.librarian")
-    return librarian.validate_output(librarian_output)
+    with _memex_call_shim(librarian):
+        return librarian.validate_output(librarian_output)
 
 
 def _memex_write_entry(
@@ -339,37 +500,50 @@ def _memex_write_entry(
     caller_agent_id: str,
     embedding: bytes | None,
 ) -> dict:
-    """Delegate to Memex's librarian.write_entry."""
+    """Delegate to Memex's librarian.write_entry. Runs under
+    `_memex_call_shim` — write_entry calls into `stores` / `db`, whose
+    call paths defer `scripts.*` imports on Memex >= 2.10."""
     librarian = _memex_module("agents.librarian")
-    return librarian.write_entry(
-        payload=payload,
-        librarian_output=librarian_output,
-        target_store=target_store,
-        target_table=target_table,
-        caller_agent_id=caller_agent_id,
-        embedding=embedding,
-    )
+    with _memex_call_shim(librarian):
+        return librarian.write_entry(
+            payload=payload,
+            librarian_output=librarian_output,
+            target_store=target_store,
+            target_table=target_table,
+            caller_agent_id=caller_agent_id,
+            embedding=embedding,
+        )
 
 
 def _memex_embed(text: str) -> bytes | None:
     """Direct wrapper around Memex's embeddings.encode. Raises
     embeddings.EmbeddingUnavailable on provider miss — caller handles
-    audit logging."""
+    audit logging. Runs under `_memex_call_shim`: a SUCCESSFUL encode
+    records model info via a deferred `from scripts import registry`
+    (memex/2.11.0 embeddings.py:326, `_record_model_info`)."""
     embeddings = _memex_module("embeddings")
-    return embeddings.encode(text)
+    with _memex_call_shim(embeddings):
+        return embeddings.encode(text)
 
 
 def _memex_log_embedding_skip(
     exc, *, caller_agent_id: str, index_id: str, input_chars: int
 ) -> None:
-    """Forward to Memex's structured audit log per v2.4.1 contract."""
+    """Forward to Memex's structured audit log per v2.4.1 contract.
+
+    Runs under `_memex_call_shim`: `log_skip` → `_append_skip_log` does
+    `from scripts.db import memex_home` at CALL time (memex/2.11.0
+    embeddings.py:82) — without the shim this is the
+    `ModuleNotFoundError: No module named 'scripts.db'` crash that
+    killed every Memex-mode write whose embed was skipped."""
     embeddings = _memex_module("embeddings")
-    embeddings.log_skip(
-        exc,
-        caller_agent_id=caller_agent_id,
-        index_id=index_id,
-        input_chars=input_chars,
-    )
+    with _memex_call_shim(embeddings):
+        embeddings.log_skip(
+            exc,
+            caller_agent_id=caller_agent_id,
+            index_id=index_id,
+            input_chars=input_chars,
+        )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -439,11 +613,12 @@ def _next_seq(
     prefix. Runs a `key LIKE prefix%` scan over `index.documents`."""
     memex_stores = _memex_module("stores")
     prefix = f"{workspace_slug}/{project_slug}/{domain}/{date_str}-{title_slug}-"
-    existing = memex_stores.query(
-        "index",
-        "SELECT key FROM documents WHERE key LIKE ?",
-        (prefix + "%",),
-    )
+    with _memex_call_shim(memex_stores):
+        existing = memex_stores.query(
+            "index",
+            "SELECT key FROM documents WHERE key LIKE ?",
+            (prefix + "%",),
+        )
     used: set[int] = set()
     for row in existing:
         suffix = row["key"][len(prefix) :]
@@ -573,11 +748,12 @@ def _resolve_project_slug(project_id: int | None) -> str | None:
         return None
     try:
         memex_stores = _memex_module("stores")
-        rows = memex_stores.query(
-            "atelier",
-            "SELECT slug FROM projects WHERE id = ?",
-            (project_id,),
-        )
+        with _memex_call_shim(memex_stores):
+            rows = memex_stores.query(
+                "atelier",
+                "SELECT slug FROM projects WHERE id = ?",
+                (project_id,),
+            )
     except Exception:
         return None
     return rows[0]["slug"] if rows and rows[0].get("slug") else None
@@ -606,21 +782,22 @@ def _auto_relations(metadata: dict, explicit: list[dict]) -> list[dict]:
         workspace_id = (metadata or {}).get("workspace_id")
         try:
             memex_stores = _memex_module("stores")
-            if workspace_id is not None:
-                rows = memex_stores.query(
-                    "index",
-                    "SELECT index_id FROM documents WHERE domain = ? "
-                    "AND json_extract(metadata, '$.project_id') = ? "
-                    "AND json_extract(metadata, '$.workspace_id') = ?",
-                    ("project", project_id, workspace_id),
-                )
-            else:
-                rows = memex_stores.query(
-                    "index",
-                    "SELECT index_id FROM documents WHERE domain = ? "
-                    "AND json_extract(metadata, '$.project_id') = ?",
-                    ("project", project_id),
-                )
+            with _memex_call_shim(memex_stores):
+                if workspace_id is not None:
+                    rows = memex_stores.query(
+                        "index",
+                        "SELECT index_id FROM documents WHERE domain = ? "
+                        "AND json_extract(metadata, '$.project_id') = ? "
+                        "AND json_extract(metadata, '$.workspace_id') = ?",
+                        ("project", project_id, workspace_id),
+                    )
+                else:
+                    rows = memex_stores.query(
+                        "index",
+                        "SELECT index_id FROM documents WHERE domain = ? "
+                        "AND json_extract(metadata, '$.project_id') = ?",
+                        ("project", project_id),
+                    )
         except Exception:
             rows = []
         seen = {(r.get("rel_type"), r.get("to_index_id")) for r in relations}
@@ -1094,13 +1271,19 @@ def write_project(
 # benefit from `safe_identifier` validation and don't reintroduce
 # SQL-injection risk. `insert` returns the inserted row; `update` returns
 # the updated row; `query` is SELECT-only (no commit).
+#
+# Every CRUD helper runs its stores call under `_memex_call_shim`: each
+# stores function calls `db.require_bootstrap()` first (memex/2.11.0
+# stores.py:84+), whose not-bootstrapped branch defers
+# `from scripts.paths import PLUGIN_ROOT` to call time (db.py:104).
 
 
 def _memex_core_insert(*, store: str, table: str, row: dict) -> dict:
     """Insert `row` into `<store>.<table>` via Memex Core; returns the
     inserted row dict (including server-assigned id / timestamps)."""
     memex_stores = _memex_module("stores")
-    return memex_stores.insert(store, table, row)
+    with _memex_call_shim(memex_stores):
+        return memex_stores.insert(store, table, row)
 
 
 def _memex_core_update(*, store: str, table: str, row_id: int, changes: dict) -> dict:
@@ -1108,14 +1291,16 @@ def _memex_core_update(*, store: str, table: str, row_id: int, changes: dict) ->
     via Memex Core; returns the updated row dict (or `{}` if Core
     returned None, which means the row vanished mid-update)."""
     memex_stores = _memex_module("stores")
-    updated = memex_stores.update(store, table, row_id, changes)
+    with _memex_call_shim(memex_stores):
+        updated = memex_stores.update(store, table, row_id, changes)
     return updated or {}
 
 
 def _memex_core_delete(*, store: str, table: str, row_id: int) -> None:
     """Mode-aware delete primitive — sibling of _memex_core_update."""
     memex_stores = _memex_module("stores")
-    memex_stores.delete(store, table, row_id)
+    with _memex_call_shim(memex_stores):
+        memex_stores.delete(store, table, row_id)
 
 
 def _memex_core_query(*, store: str, table: str, where: dict | None = None) -> list[dict]:
@@ -1125,12 +1310,39 @@ def _memex_core_query(*, store: str, table: str, where: dict | None = None) -> l
     `memex_stores.safe_identifier` so a stray bad identifier surfaces as
     a clean ValueError rather than an interpolated-SQL surprise."""
     memex_stores = _memex_module("stores")
-    safe_table = memex_stores.safe_identifier(table)
-    if where:
-        clauses = " AND ".join(f"{k} = ?" for k in where)
-        sql = f"SELECT * FROM {safe_table} WHERE {clauses}"  # nosec B608
-        return memex_stores.query(store, sql, tuple(where.values()))
-    return memex_stores.query(store, f"SELECT * FROM {safe_table}", ())  # nosec B608
+    with _memex_call_shim(memex_stores):
+        safe_table = memex_stores.safe_identifier(table)
+        if where:
+            clauses = " AND ".join(f"{k} = ?" for k in where)
+            sql = f"SELECT * FROM {safe_table} WHERE {clauses}"  # nosec B608
+            return memex_stores.query(store, sql, tuple(where.values()))
+        return memex_stores.query(store, f"SELECT * FROM {safe_table}", ())  # nosec B608
+
+
+def _memex_core_raw_query(*, store: str, sql: str, params: tuple = ()) -> list[dict]:
+    """SELECT-only raw-SQL read primitive — read-side sibling of
+    `_memex_core_execute`, for SQL shapes the equality-only `where=`
+    dict of `_memex_core_query` cannot express (ORDER BY, LIKE, …).
+
+    Exists so Atelier modules OUTSIDE this file (scripts/roles.py,
+    scripts/workflow.py) never call `memex_stores.query` directly: every
+    call INTO Memex code must run under `_memex_call_shim` (deferred
+    call-time imports — see the CRUD-helper block comment above; the
+    canonical example is `stores.query` → `db.require_bootstrap()`,
+    whose not-bootstrapped branch defers `from scripts.paths import
+    PLUGIN_ROOT`). Keeping the shim INSIDE the backend_memex facade
+    means external call sites cannot forget it — the boundary is pinned
+    by the regression tests in
+    `tests/test_regression_backend_memex_v210_write_path_imports.py`.
+
+    `memex_stores.query` is SELECT-only (no commit), so this surface
+    cannot mutate. The SQL string is wholly Atelier source — no
+    user-controlled identifiers reach here (values ride `params`).
+    Rows are copied to plain dicts so callers never hold row proxies.
+    """
+    memex_stores = _memex_module("stores")
+    with _memex_call_shim(memex_stores):
+        return [dict(r) for r in memex_stores.query(store, sql, params)]
 
 
 # ── Workspace-id resolution helpers ────────────────────────────────────────
@@ -1521,7 +1733,8 @@ def _memex_search(
     }
     if domain:
         plan["filters"]["domain"] = domain
-    raw = memex_ref.execute_query_plan(plan, with_embedding=False)
+    with _memex_call_shim(memex_ref):
+        raw = memex_ref.execute_query_plan(plan, with_embedding=False)
     if not needs_post_filter:
         return raw
 
@@ -1644,11 +1857,13 @@ def lookup_index_id_by_source_ref(*, source_ref: str) -> str | None:
     Source refs are stable strings like `"atelier:tasks:42"`.
     """
     memex_stores = _memex_module("stores")
-    rows = memex_stores.query(
-        "index",
-        "SELECT index_id FROM documents WHERE json_extract(metadata, '$.source_ref') = ? LIMIT 1",
-        (source_ref,),
-    )
+    with _memex_call_shim(memex_stores):
+        rows = memex_stores.query(
+            "index",
+            "SELECT index_id FROM documents "
+            "WHERE json_extract(metadata, '$.source_ref') = ? LIMIT 1",
+            (source_ref,),
+        )
     return rows[0]["index_id"] if rows else None
 
 
@@ -1660,7 +1875,8 @@ def _agents_db_path() -> str:
     reserved store name seeded by Memex bootstrap.
     """
     memex_registry = _memex_module("registry")
-    rec = memex_registry.get_store("agents")
+    with _memex_call_shim(memex_registry):
+        rec = memex_registry.get_store("agents")
     if rec is None:
         raise RuntimeError(
             "Memex has no 'agents' store registered. Run `memex:run` once "
@@ -1678,10 +1894,11 @@ def find_or_create_role(*, name: str, description: str) -> dict:
     """
     memex_roles = _memex_module("roles")
     db_path = _agents_db_path()
-    for r in memex_roles.list_roles(db_path):
-        if r["name"] == name:
-            return r
-    return memex_roles.create_role(db_path, name=name, description=description)
+    with _memex_call_shim(memex_roles):
+        for r in memex_roles.list_roles(db_path):
+            if r["name"] == name:
+                return r
+        return memex_roles.create_role(db_path, name=name, description=description)
 
 
 def find_or_create_agent(*, agent_id: str, name: str, role_id: int, profile: str) -> dict:
@@ -1694,10 +1911,11 @@ def find_or_create_agent(*, agent_id: str, name: str, role_id: int, profile: str
     """
     agents_pkg = _memex_module("agents")
     db_path = _agents_db_path()
-    existing = agents_pkg.get_agent(db_path, agent_id)
-    if existing is not None:
-        return existing
-    return agents_pkg.create_agent(db_path, agent_id, name, role_id, profile)
+    with _memex_call_shim(agents_pkg):
+        existing = agents_pkg.get_agent(db_path, agent_id)
+        if existing is not None:
+            return existing
+        return agents_pkg.create_agent(db_path, agent_id, name, role_id, profile)
 
 
 def _memex_core_execute(*, store: str, sql: str, params: tuple = ()) -> int:
@@ -1718,13 +1936,14 @@ def _memex_core_execute(*, store: str, sql: str, params: tuple = ()) -> int:
     """
     memex_registry = _memex_module("registry")
     memex_db = _memex_module("db")
-    rec = memex_registry.get_store(store)
-    if rec is None:
-        raise ValueError(f"Unknown store: {store}")
-    conn = memex_db.get_connection(rec["path"])
-    try:
-        cur = conn.execute(sql, params)
-        conn.commit()
-        return cur.rowcount
-    finally:
-        conn.close()
+    with _memex_call_shim(memex_registry):
+        rec = memex_registry.get_store(store)
+        if rec is None:
+            raise ValueError(f"Unknown store: {store}")
+        conn = memex_db.get_connection(rec["path"])
+        try:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()

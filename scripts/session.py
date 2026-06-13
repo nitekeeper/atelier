@@ -320,7 +320,6 @@ def prune_sessions(db_path: str, project_id: int, keep: int) -> int:
     if _is_memex_mode():
         from scripts import backend_memex
 
-        memex_stores = backend_memex._memex_module("stores")
         rows = backend_memex._memex_core_query(
             store="atelier", table="sessions", where={"project_id": project_id}
         )
@@ -329,7 +328,14 @@ def prune_sessions(db_path: str, project_id: int, keep: int) -> int:
         deleted = 0
         for r in rows:
             if r["id"] not in keep_ids:
-                memex_stores.delete(name="atelier", table="sessions", row_id=r["id"])
+                # Route through the backend_memex facade (NOT
+                # memex_stores.delete directly) so the delete runs under
+                # the Memex call shim — stores.delete calls
+                # db.require_bootstrap(), whose error path defers a
+                # `scripts.paths` import that only resolves inside the
+                # shim. See backend_memex._memex_core_raw_query's
+                # boundary note.
+                backend_memex._memex_core_delete(store="atelier", table="sessions", row_id=r["id"])
                 deleted += 1
         return deleted
     from scripts import backend_local

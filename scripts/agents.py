@@ -7,8 +7,12 @@ either `backend_local` (workspace-local `agents` table at
 `~/.memex/agents.db`). Reads + non-create mutations (`get`, `update`,
 `delete`, `list`, `search`) reach the appropriate backend directly
 because the facade does not expose narrow-surface helpers for them —
-`_memex_module(...)` on the Memex side, `backend_local._conn()` on
-the Local side.
+the Memex agents package (via `_memex_module("agents")`, every call
+wrapped in `backend_memex._memex_call_shim` so deferred call-time
+`scripts.*` imports resolve) and the `backend_memex._memex_core_*`
+primitives on the Memex side, `backend_local._conn()` on the Local
+side. Never call `memex_stores.*` directly — see
+`backend_memex._memex_core_raw_query`'s boundary note.
 
 Public function signatures are preserved from pre-retrofit. The
 `db_path` argument is retained for back-compat — Local mode discovers
@@ -44,12 +48,6 @@ def _memex_agents_pkg():
     return backend_memex._memex_module("agents")
 
 
-def _memex_stores():
-    from scripts import backend_memex
-
-    return backend_memex._memex_module("stores")
-
-
 def _memex_db_path() -> str:
     from scripts import backend_memex
 
@@ -80,8 +78,11 @@ def create_agent(db_path: str, id: str, name: str, role_id: int, profile: str) -
 
 def get_agent(db_path: str, agent_id: str) -> dict | None:
     if mode_detector.detect_mode() == "memex":
+        from scripts import backend_memex
+
         pkg = _memex_agents_pkg()
-        return pkg.get_agent(_memex_db_path(), agent_id)
+        with backend_memex._memex_call_shim(pkg):
+            return pkg.get_agent(_memex_db_path(), agent_id)
     from scripts import backend_local
 
     c = backend_local._conn()
@@ -98,8 +99,11 @@ def update_agent(db_path: str, agent_id: str, **kwargs) -> dict | None:
     allowed = {"name", "role_id", "profile"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if mode_detector.detect_mode() == "memex":
+        from scripts import backend_memex
+
         pkg = _memex_agents_pkg()
-        return pkg.update_agent(_memex_db_path(), agent_id, **fields)
+        with backend_memex._memex_call_shim(pkg):
+            return pkg.update_agent(_memex_db_path(), agent_id, **fields)
     from scripts import backend_local
 
     now = _now()
@@ -130,11 +134,25 @@ def update_agent(db_path: str, agent_id: str, **kwargs) -> dict | None:
 
 def delete_agent(db_path: str, agent_id: str) -> bool:
     if mode_detector.detect_mode() == "memex":
+        from scripts import backend_memex
+
         pkg = _memex_agents_pkg()
         if hasattr(pkg, "delete_agent"):
-            return pkg.delete_agent(_memex_db_path(), agent_id)
-        # Fallback for older Memex versions: drop straight to stores.
-        return bool(_memex_stores().delete(name="agents", table="agents", row_id=agent_id))
+            with backend_memex._memex_call_shim(pkg):
+                return pkg.delete_agent(_memex_db_path(), agent_id)
+        # Fallback for older Memex versions: drop to stores — through the
+        # backend_memex facade so the delete runs under the Memex call
+        # shim (deferred call-time imports; see
+        # backend_memex._memex_core_raw_query's boundary note).
+        # `_memex_core_delete` has no rowcount surface, so probe
+        # existence first to preserve this function's bool contract.
+        rows = backend_memex._memex_core_query(
+            store="agents", table="agents", where={"id": agent_id}
+        )
+        if not rows:
+            return False
+        backend_memex._memex_core_delete(store="agents", table="agents", row_id=agent_id)
+        return True
     from scripts import backend_local
 
     c = backend_local._conn()
@@ -150,10 +168,13 @@ def list_agents(db_path: str, role_id: int | None = None) -> list[dict]:
     """List agents, optionally filtered by `role_id`. When `role_id` is
     None, returns all. Signature preserved from pre-retrofit."""
     if mode_detector.detect_mode() == "memex":
+        from scripts import backend_memex
+
         pkg = _memex_agents_pkg()
-        if role_id is not None and hasattr(pkg, "list_by_role"):
-            return pkg.list_by_role(_memex_db_path(), role_id)
-        all_agents = pkg.list_agents(_memex_db_path())
+        with backend_memex._memex_call_shim(pkg):
+            if role_id is not None and hasattr(pkg, "list_by_role"):
+                return pkg.list_by_role(_memex_db_path(), role_id)
+            all_agents = pkg.list_agents(_memex_db_path())
         if role_id is None:
             return all_agents
         return [a for a in all_agents if a.get("role_id") == role_id]
@@ -175,22 +196,25 @@ def list_agents(db_path: str, role_id: int | None = None) -> list[dict]:
 
 def search_agents(db_path: str, query: str, role_id: int | None = None) -> list[dict]:
     """Substring search on `name` + `profile`, optionally filtered by
-    `role_id`. Memex mode reaches through `stores.query` because LIKE
-    is not expressible via the equality-only `stores.query` where-dict."""
+    `role_id`. Memex mode reaches through
+    `backend_memex._memex_core_raw_query` (SELECT-only, runs under the
+    Memex call shim) because LIKE is not expressible via the
+    equality-only where-dict."""
     pattern = f"%{query}%"
     if mode_detector.detect_mode() == "memex":
-        stores = _memex_stores()
+        from scripts import backend_memex
+
         if role_id is not None:
-            return stores.query(
-                "agents",
-                "SELECT * FROM agents WHERE role_id = ? "
+            return backend_memex._memex_core_raw_query(
+                store="agents",
+                sql="SELECT * FROM agents WHERE role_id = ? "
                 "AND (name LIKE ? OR profile LIKE ?) ORDER BY name",
-                (role_id, pattern, pattern),
+                params=(role_id, pattern, pattern),
             )
-        return stores.query(
-            "agents",
-            "SELECT * FROM agents WHERE name LIKE ? OR profile LIKE ? ORDER BY name",
-            (pattern, pattern),
+        return backend_memex._memex_core_raw_query(
+            store="agents",
+            sql="SELECT * FROM agents WHERE name LIKE ? OR profile LIKE ? ORDER BY name",
+            params=(pattern, pattern),
         )
     from scripts import backend_local
 

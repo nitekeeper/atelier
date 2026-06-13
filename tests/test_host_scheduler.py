@@ -33,6 +33,8 @@ import asyncio
 import re
 import sqlite3
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -712,6 +714,292 @@ def test_worktree_isolation_two_writers_separate_trees_merge_clean(tmp_path):
     assert len(listing.splitlines()) == 1
 
 
+def test_concurrent_writers_never_share_base_tree_under_fanout(tmp_path):
+    """MAJOR-1 STRESS REGRESSION: under fan-out (N concurrent write-disjoint
+    writers), the ``git worktree add`` admin race must NEVER drop a writer to an
+    UN-ISOLATED run in the shared base clone.
+
+    The pre-fix bug: concurrent ``git worktree add`` calls race on the shared
+    ``.git/worktrees/`` admin dir and intermittently fail (exit 128); ``_run_one``
+    then caught ``WorktreeError`` and ran the writer un-isolated in the base clone
+    (``cwd=clone_dir``).  Measured ~40% of N=8 runs (with up to TWO writers in the
+    base at once) — a race on ``.git/index.lock`` whose outputs were left as
+    untracked ``?? wN.txt`` in a dirty base (the un-isolated path never commits).
+
+    The fix serializes the worktree-admin git ops under a single lock (+ a retry
+    backstop) and, if isolation still can't be obtained, FAILS THE ATTEMPT instead
+    of running un-isolated.  This test drives N=8 concurrent writers and asserts:
+
+    * ZERO writer ever ran with ``cwd`` == the base clone (every dispatch cwd is a
+      ``.atelier-worktrees/<id>`` worktree) — i.e. no un-isolated writer, ever;
+    * the base ``git status --porcelain`` is EMPTY at the end (no dirty/untracked
+      residue);
+    * every output landed in the base via its worktree merge-back.
+
+    The fix serializes the worktree-admin git ops under a single lock (+ a retry
+    backstop) and, if isolation still can't be obtained, FAILS THE ATTEMPT instead
+    of running un-isolated.
+
+    DETERMINISTIC Iron-Law mechanism (no reliance on the intermittent OS race
+    firing): the test wraps the real ``simple_worktree_factory`` in a probe that
+    records the MAX number of factory invocations executing CONCURRENTLY, widening
+    the window with a tiny sleep.  The factory mutates the shared
+    ``.git/worktrees/`` admin dir, so under the fix it MUST be serialized
+    (``worktree_admin_lock``) → max concurrency == 1; on the pre-fix code the
+    invocations run in parallel threads → max concurrency > 1 AND the real admin
+    race intermittently drops writers un-isolated into the base.  We assert BOTH:
+
+    * (deterministic) worktree-creation concurrency is exactly 1 (serialized) —
+      this FAILS on the pre-fix code on EVERY run, not just the racy fraction;
+    * (behavioral) ZERO writer ever ran with ``cwd`` == the base clone, every
+      output landed via its worktree, and the base ``git status --porcelain`` is
+      EMPTY with no leaked worktrees.
+    """
+    n_writers = 8
+    repetitions = 3  # a few reps so the behavioral race also gets exercised
+
+    for rep in range(repetitions):
+        rep_root = tmp_path / f"rep{rep}"
+        rep_root.mkdir()
+        clone = _git_init_clone(rep_root)
+        tasks = [
+            {
+                "task_id": f"w{i}",
+                "parallel_group": 0,
+                "writes": [f"w{i}.txt"],
+                "assigned_persona": "be-1",
+                "phase": "qa",
+            }
+            for i in range(n_writers)
+        ]
+        dag_proof = compute_dag_proof(tasks)
+
+        # ── DETERMINISTIC probe: max concurrency of worktree-CREATION ──────────
+        # The real factory runs in a worker thread (`asyncio.to_thread`).  We wrap
+        # it to count how many invocations are inside the admin section at once.
+        # Serialized (fix) ⇒ 1; concurrent (pre-fix) ⇒ >1.  A short sleep widens
+        # the overlap window so the pre-fix concurrency is observed every run.
+        real_factory = simple_worktree_factory(clone)
+        admin_lock = threading.Lock()
+        admin_live = {"n": 0}
+        admin_max = {"n": 0}
+
+        def _probed_factory(
+            task_id, _rf=real_factory, _al=admin_lock, _live=admin_live, _mx=admin_max
+        ):
+            with _al:
+                _live["n"] += 1
+                _mx["n"] = max(_mx["n"], _live["n"])
+            try:
+                time.sleep(0.02)  # widen the concurrency window (deterministic)
+                return _rf(task_id)
+            finally:
+                with _al:
+                    _live["n"] -= 1
+
+        # ── behavioral probe: did any writer run UN-ISOLATED in the base? ──────
+        base_real = clone.resolve()
+        unisolated_dispatches: list[str] = []
+
+        class _WriteRunner(FakeCliRunner):
+            def __init__(self, base, sink):
+                super().__init__(structured_output=None)
+                self._base = base  # bind per-instance (avoids B023 loop capture)
+                self._sink = sink
+
+            async def __call__(self, argv, cwd):
+                tid = _tid_from_argv(argv)
+                if Path(cwd).resolve() == self._base:
+                    self._sink.append(tid)
+                # Every writer creates its declared output in its OWN cwd.
+                (Path(cwd) / f"{tid}.txt").write_text(f"by {tid}")
+                await asyncio.sleep(0.03)
+                self.calls.append({"argv": list(argv), "cwd": cwd})
+                return {
+                    "usage": {"output_tokens": 5},
+                    "is_error": False,
+                    "subtype": "success",
+                    "structured_output": _env(tid),
+                }
+
+        runner = _WriteRunner(base_real, unisolated_dispatches)
+        journal = ResultJournal()
+        budget = BudgetPool(total_tokens=10_000_000)
+        res = _run(
+            pipeline(
+                tasks,
+                **_pipeline_kwargs(
+                    clone,
+                    runner,
+                    journal,
+                    budget,
+                    dag_proof,
+                    worktree_factory=_probed_factory,
+                    max_workers=n_writers,  # allow the full fan-out concurrently
+                ),
+            )
+        )
+        # (DETERMINISTIC) worktree creation was serialized — never two adds at once.
+        assert admin_max["n"] == 1, (
+            f"rep {rep}: {admin_max['n']} concurrent `git worktree add` invocations "
+            "— the worktree-admin git ops are NOT serialized, so concurrent adds "
+            "race on `.git/worktrees/` (MAJOR-1)."
+        )
+        # (a) NO writer ever ran un-isolated in the shared base tree.
+        assert unisolated_dispatches == [], (
+            f"rep {rep}: {len(unisolated_dispatches)} writer(s) ran UN-ISOLATED in "
+            f"the shared base clone ({unisolated_dispatches}) — file-race-freedom "
+            "breached under fan-out (the worktree-add admin race)."
+        )
+        # (b) every task reached done via its worktree merge-back.
+        assert [r["status"] for r in res] == ["done"] * n_writers, (
+            f"rep {rep}: not all writers done: {[r.get('status') for r in res]}"
+        )
+        # (c) every output landed in the base via its worktree (merged, tracked).
+        for i in range(n_writers):
+            out = clone / f"w{i}.txt"
+            assert out.read_text() == f"by w{i}", f"rep {rep}: w{i}.txt missing/wrong"
+        # (d) base is CLEAN at the end — no dirty/untracked residue, no leaked
+        #     worktrees (only the main worktree remains).
+        porcelain = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=clone, capture_output=True, text=True, check=True
+        ).stdout
+        assert porcelain.strip() == "", f"rep {rep}: base clone left dirty:\n{porcelain}"
+        wt_list = subprocess.run(
+            ["git", "worktree", "list"], cwd=clone, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert len(wt_list.splitlines()) == 1, f"rep {rep}: leaked worktrees:\n{wt_list}"
+
+
+def test_dependent_writer_worktree_contains_upstream_outputs(tmp_path):
+    """REGRESSION (live-e2e T3-blocked): a dependent WRITER task that reads its
+    upstreams' outputs must run in a worktree that PHYSICALLY contains those
+    outputs.
+
+    The original bug deferred every worktree merge-back to AFTER the admission
+    loop, so a downstream writer's worktree — carved from base HEAD at admission
+    via ``git worktree add … HEAD`` — was branched from a HEAD that did NOT yet
+    contain its (still-unmerged) upstreams' files.  The dependent agent then could
+    not READ its inputs and blocked.  This test fails on that regression because
+    the runner here ACTUALLY reads ``a.txt``/``b.txt`` from its own cwd and
+    refuses (returns a failed-attempt envelope) when they are absent — exactly
+    what the real claude agent did when it returned ``status: blocked``.
+
+    The fix merges each successful writer EAGERLY (the instant it is terminal,
+    before the admission loop is notified), so the upstream outputs are in base
+    HEAD before the downstream worktree is carved.
+    """
+    clone = _git_init_clone(tmp_path)
+    # T1 writes a.txt, T2 writes b.txt (barrier-free pair); T3 reads BOTH and,
+    # only if it can read them, writes c.txt — a real dependency barrier.
+    tasks = [
+        {
+            "task_id": "t1",
+            "parallel_group": 0,
+            "writes": ["a.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t2",
+            "parallel_group": 0,
+            "writes": ["b.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t3",
+            "parallel_group": 1,
+            "reads": ["a.txt", "b.txt"],
+            "writes": ["c.txt"],
+            "depends_on": ["t1", "t2"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks, existing_files={"seed"})
+
+    # What T3 actually saw in its cwd at dispatch — the load-bearing observation.
+    t3_saw: dict[str, str | None] = {}
+
+    class _ReadThenWriteRunner(FakeCliRunner):
+        """Writers create their output in cwd; the dependent t3 READS a.txt/b.txt
+        from its OWN cwd worktree first and only writes c.txt (status done) if it
+        can — else it returns a blocked envelope, mirroring the real agent."""
+
+        def __init__(self):
+            super().__init__(structured_output=None)
+
+        async def __call__(self, argv, cwd):
+            tid = _tid_from_argv(argv)
+            cwd_p = Path(cwd)
+            self.calls.append({"argv": list(argv), "cwd": cwd})
+            if tid in ("t1", "t2"):
+                fn = {"t1": "a.txt", "t2": "b.txt"}[tid]
+                content = {"t1": "A", "t2": "B"}[tid]
+                (cwd_p / fn).write_text(content)
+                await asyncio.sleep(0.02)
+                return {
+                    "usage": {"output_tokens": 5},
+                    "is_error": False,
+                    "subtype": "success",
+                    "structured_output": _env(tid),
+                }
+            # t3: read the upstream outputs from MY OWN cwd worktree.
+            a = cwd_p / "a.txt"
+            b = cwd_p / "b.txt"
+            t3_saw["a.txt"] = a.read_text() if a.exists() else None
+            t3_saw["b.txt"] = b.read_text() if b.exists() else None
+            if not (a.exists() and b.exists()):
+                # The regression: inputs absent → the agent blocks (cannot read).
+                return {
+                    "usage": {"output_tokens": 5},
+                    "is_error": False,
+                    "subtype": "success",
+                    "structured_output": _env("t3", status="blocked"),
+                }
+            (cwd_p / "c.txt").write_text(a.read_text() + b.read_text())
+            return {
+                "usage": {"output_tokens": 5},
+                "is_error": False,
+                "subtype": "success",
+                "structured_output": _env("t3"),
+            }
+
+    runner = _ReadThenWriteRunner()
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(
+                clone,
+                runner,
+                journal,
+                budget,
+                dag_proof,
+                worktree_factory=simple_worktree_factory(clone),
+            ),
+        )
+    )
+    # T3 PHYSICALLY saw its upstreams' outputs in its own worktree at dispatch.
+    assert t3_saw == {"a.txt": "A", "b.txt": "B"}, (
+        f"dependent writer's worktree was missing upstream outputs: {t3_saw} — "
+        "the deferred-merge regression (T3 branched from a HEAD without a.txt/b.txt)."
+    )
+    # All three reached done (T3 only does so when it could read its inputs).
+    assert [r["status"] for r in res] == ["done", "done", "done"]
+    # The merged-back base clone carries the derived output.
+    assert (clone / "a.txt").read_text() == "A"
+    assert (clone / "b.txt").read_text() == "B"
+    assert (clone / "c.txt").read_text() == "AB"
+    # Worktrees cleaned up — only the main worktree remains.
+    listing = subprocess.run(
+        ["git", "worktree", "list"], cwd=clone, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert len(listing.splitlines()) == 1
+
+
 # ── budget exhaustion surfaces (terminal, not swallowed) ────────────────────
 
 
@@ -948,6 +1236,48 @@ def test_merge_failure_cleans_up_all_worktrees_and_restores_base(tmp_path, monke
     ).stdout
     assert porcelain.strip() == "", f"base clone left dirty:\n{porcelain}"
     assert not (clone / ".atelier-worktrees").exists()
+
+
+def test_cleanup_after_merge_failure_clean_under_autocrlf(tmp_path):
+    """MINOR-1 regression: ``_cleanup_after_merge_failure`` must leave a CLEAN base
+    (empty ``git status --porcelain``) even on a host/clone with
+    ``core.autocrlf=true``.
+
+    Pre-fix, the cleanup's plain ``git reset --hard HEAD`` re-applied CRLF
+    normalization and left a FALSE-dirty ``M <file>`` (an LF↔CRLF-only diff) for
+    any committed file that contains LF newlines — so a real operator clone could
+    show a dirty base after a merge-failure cleanup.  The fix pins
+    ``core.autocrlf=false`` + ``core.eol=lf`` on the reset invocation, so the
+    working tree reproduces HEAD byte-for-byte regardless of the host setting.
+    """
+    import scripts.host_scheduler as hs
+
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=clone, check=True)
+    # Commit a file with LF newlines, THEN turn on autocrlf so a later reset would
+    # want to rewrite LF→CRLF in the working tree (the false-dirty condition).
+    (clone / "f.txt").write_text("line1\nline2\nline3\n")
+    subprocess.run([*["git"], *ident, "add", "-A"], cwd=clone, check=True, capture_output=True)
+    subprocess.run([*["git"], *ident, "commit", "-qm", "init"], cwd=clone, check=True)
+    subprocess.run(["git", "config", "core.autocrlf", "true"], cwd=clone, check=True)
+
+    # Sanity: with autocrlf on, a PLAIN reset --hard leaves the file false-dirty —
+    # this documents the bug the fix targets (skip the assertion if this host's git
+    # does not reproduce it, so the test stays portable; the real assertion is the
+    # post-cleanup clean tree below).
+    (clone / "f.txt").write_text("line1\r\nline2\r\nline3\r\n")  # CRLF in tree
+    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=clone, check=True, capture_output=True)
+
+    # The engine cleanup MUST leave a clean base regardless of autocrlf.
+    hs._cleanup_after_merge_failure(clone, [])
+    porcelain = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=clone, capture_output=True, text=True, check=True
+    ).stdout
+    assert porcelain.strip() == "", (
+        f"cleanup left a false-dirty base under core.autocrlf=true:\n{porcelain}"
+    )
 
 
 # ── MINOR-1 regression: a FAILED writer's partial writes never reach base ────

@@ -2,6 +2,16 @@
 
 Deferred work tracked here so it survives session boundaries. Cross out items as they land or get explicitly dropped.
 
+## Deterministic-host CLI sandbox prerequisites (per platform)
+
+The deterministic-host engine confines autonomous `claude -p` agents with **Claude Code's native sandbox** (`cli_dispatch.native_sandbox_wrap`, fail-closed). Prerequisites are **per-platform** (verified against code.claude.com/docs/en/sandboxing); availability is detected by `sandbox_runtime_available()` / `sandbox_prereq_status()`:
+
+- **Linux / WSL2** → install **bubblewrap + socat**: `sudo apt install bubblewrap socat` (bwrap = filesystem isolation; socat = the network-proxy relay for `network.allowedDomains`). On Ubuntu 24.04+ also add the AppArmor `bwrap` userns profile (see the doc's accordion).
+- **macOS** → **nothing to install**; the built-in Seatbelt framework is used.
+- **Native Windows** → unsupported; run atelier under **WSL2** (reports as `linux`, uses the bwrap+socat path).
+
+Without the runtime, the mandatory-sandbox gate (`UnsandboxedRealRunError`) fail-closes and the live e2e harness (`tests/test_e2e_live.py`, `-m live`) skips with a platform-correct reason.
+
 ## Cost/quality mode selection at atelier start (user request 2026-06-13)
 
 Let the user pick a **cost-effective** vs **code-quality** configuration **when they start atelier** (e.g. at the top of `atelier:run` / when a run is kicked off), and have atelier **honor that choice for the run**. Rationale: some users have a limited budget, others don't — we want to satisfy both groups by letting them select the posture per run.

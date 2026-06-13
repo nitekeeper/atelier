@@ -32,6 +32,13 @@ def clone_repo(remote_url: str, dest: Path) -> None:
     )
     _git(["config", "user.email", "self-improve@atelier.local"], dest)
     _git(["config", "user.name", "Atelier Self-Improve"], dest)
+    # MINOR-1: pin autocrlf OFF on the engine-owned throwaway clone so line-ending
+    # normalization never makes the base tree FALSE-dirty (an LF↔CRLF-only `M
+    # <file>`) after a `reset --hard` during worktree merge-failure cleanup. The
+    # engine owns these clones, so this is safe and keeps `git status` clean on a
+    # host whose global `core.autocrlf=true`.
+    _git(["config", "core.autocrlf", "false"], dest)
+    _git(["config", "core.eol", "lf"], dest)
 
 
 def create_branch(clone_dir: Path, cycle_n: int) -> str:

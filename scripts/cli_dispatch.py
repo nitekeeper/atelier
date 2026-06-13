@@ -57,13 +57,19 @@ captured in this module's tests):
   an autonomous agent. Subscription auth rides ``$HOME/.claude/.credentials.json``.
 * **Sandbox seam (``sandbox_wrap``).** Injectable ``argv -> argv``. The default
   identity wrap fires a ONE-TIME loud "UNSANDBOXED" warning AND (with a real
-  runner) trips the mandatory-sandbox gate above. :func:`bwrap_sandbox_wrap`
-  enables Claude's native bubblewrap sandbox with ``filesystem.allowWrite=[clone]``
-  + ``failIfUnavailable=true`` — fail-closed: the CLI REFUSES TO START when
-  bubblewrap is absent (verified live), so an unconfined agent never runs.
-  **M7 (defaulting CLI transport ON) is BLOCKED until a real OS-level sandbox is
-  wired into this seam** (bwrap installed, or an external container/namespace
-  wrapper).
+  runner) trips the mandatory-sandbox gate above. :func:`native_sandbox_wrap`
+  (alias :func:`bwrap_sandbox_wrap`) enables **Claude Code's native sandbox** with
+  ``filesystem.allowWrite=[clone]`` + ``network.allowedDomains=[]`` +
+  ``failIfUnavailable=true`` — fail-closed: the CLI REFUSES TO START when the
+  platform sandbox can't initialize (verified live), so an unconfined agent never
+  runs. The injected ``--settings`` JSON is **cross-platform**: Claude implements
+  the sandbox with **bubblewrap (``bwrap``) + ``socat`` on Linux/WSL2** and the
+  **built-in Seatbelt framework on macOS** (zero installs). Availability detection
+  is via :func:`sandbox_runtime_available` / :func:`sandbox_prereq_status` (Linux
+  needs ``bwrap`` AND ``socat``; macOS is always available). **M7 (defaulting CLI
+  transport ON) is BLOCKED until a real OS-level sandbox is wired into this seam**
+  (on Linux: ``bubblewrap`` + ``socat`` installed; macOS: built-in; or an external
+  container/namespace wrapper).
 * The subprocess is launched with ``create_subprocess_exec`` + an argv LIST (no
   ``shell``) — discrete argv items, never a shell string (no metacharacter
   interpretation). See ``# nosec B603``.
@@ -77,6 +83,8 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -163,8 +171,9 @@ class UnsandboxedBypassError(RuntimeError):
 
     ``bypassPermissions`` disables every permission gate — a live probe proved an
     agent then writes anywhere on the host. It is therefore only safe inside a
-    real OS-level sandbox (bubblewrap/container/restricted-user). With no sandbox,
-    the host REFUSES it and falls back to (or demands) ``acceptEdits``.
+    real OS-level sandbox (Claude-native bubblewrap/Seatbelt, or an external
+    container/restricted-user). With no sandbox, the host REFUSES it and falls back
+    to (or demands) ``acceptEdits``.
     """
 
     def __init__(self) -> None:
@@ -172,7 +181,7 @@ class UnsandboxedBypassError(RuntimeError):
             "permission_mode='bypassPermissions' refused: it disables all "
             "permission gates and a live probe proved it lets the agent write "
             "outside the clone. It is permitted ONLY when a sandbox is wired via "
-            "the sandbox_wrap seam (e.g. bwrap_sandbox_wrap). Use the default "
+            "the sandbox_wrap seam (e.g. native_sandbox_wrap). Use the default "
             "'acceptEdits' instead, or wire a real OS-level sandbox."
         )
 
@@ -185,8 +194,9 @@ class UnsandboxedRealRunError(RuntimeError):
     mode wrote OUTSIDE the clone with ``permission_denials: []``. The CLI
     permission layer is therefore NOT a containment boundary. So the host REFUSES
     to spawn a real, write-capable agent unless a real OS-level sandbox is wired
-    via ``sandbox_wrap`` (e.g. :func:`bwrap_sandbox_wrap`, which fails closed when
-    bubblewrap is absent).
+    via ``sandbox_wrap`` (e.g. :func:`native_sandbox_wrap`, which fails closed when
+    the platform sandbox can't initialize — on Linux that means ``bwrap``/``socat``
+    absent; on macOS Seatbelt is built-in).
 
     The ONLY way past this without wiring a sandbox is the explicit operator
     opt-out :data:`UNSANDBOXED_OPT_OUT_ENV` (``ATELIER_CLI_ALLOW_UNSANDBOXED=1``),
@@ -203,8 +213,9 @@ class UnsandboxedRealRunError(RuntimeError):
             "permission layer (acceptEdits/bypassPermissions) does NOT confine "
             "writes (proven live — an agent wrote outside the clone with empty "
             "permission_denials). Wire a real sandbox via sandbox_wrap "
-            "(e.g. bwrap_sandbox_wrap(clone_dir)); or, ONLY if the whole host is "
+            "(e.g. native_sandbox_wrap(clone_dir)); or, ONLY if the whole host is "
             f"already OS-confined, set {UNSANDBOXED_OPT_OUT_ENV}=1 to opt out. "
+            f"{_sandbox_install_hint()} "
             "M7 (defaulting CLI transport ON) stays BLOCKED until the sandbox "
             "seam carries a real OS sandbox."
         )
@@ -214,6 +225,138 @@ class UnsandboxedRealRunError(RuntimeError):
 #: entire host is already OS-confined (throwaway container/VM) so the in-process
 #: sandbox is redundant. OFF by default — the gate is fail-closed.
 UNSANDBOXED_OPT_OUT_ENV = "ATELIER_CLI_ALLOW_UNSANDBOXED"
+
+
+# ── Platform-aware sandbox-runtime detection ───────────────────────────────
+#
+# Claude Code's native sandbox (the one we inject via `--settings` in
+# `native_sandbox_wrap`) is implemented per-platform — the SAME settings schema
+# drives BOTH (verified against code.claude.com/docs/en/sandboxing):
+#
+#   * macOS  → built-in **Seatbelt** framework. ZERO installs; `sandbox-exec`
+#              ships with macOS. So the runtime is ALWAYS available on darwin.
+#   * Linux/ → **bubblewrap (`bwrap`)** for filesystem isolation PLUS **`socat`**
+#     WSL2     for the network proxy relay (docs: "the relay used to route network
+#              traffic through the sandbox proxy"). We configure BOTH a filesystem
+#              confinement (`filesystem.allowWrite`) AND a network policy
+#              (`network.allowedDomains: []`), so BOTH packages are genuine
+#              prerequisites — `socat` is NOT optional for our config (it is one of
+#              the two packages the docs require, and `/sandbox`'s Dependencies tab
+#              checks for it alongside `bwrap`).
+#   * other  → native Windows is unsupported; anything else is unknown. Be
+#              CONSERVATIVE → report unavailable (the gate then fail-closes).
+#
+# This is DETECTION + MESSAGING only. It does NOT relax the fail-closed
+# mandatory-sandbox gate — `native_sandbox_wrap` still sets `failIfUnavailable`,
+# so even a false "available" here cannot let an unconfined agent run (claude
+# refuses to start if its sandbox can't init).
+
+
+def sandbox_prereq_status() -> tuple[bool, str]:
+    """Return ``(available, human_reason)`` for the native sandbox on THIS host.
+
+    Platform-aware (see the module's platform table):
+
+    * ``darwin`` → ``(True, …Seatbelt is built-in…)`` — no installs needed.
+    * ``linux`` (incl. WSL2 — WSL2 reports as ``linux``) → available iff BOTH
+      ``bwrap`` (bubblewrap, filesystem isolation) AND ``socat`` (the network-proxy
+      relay) are on PATH; the reason names whichever is missing.
+    * ``win32`` (native Windows) → ``(False, …run under WSL2…)`` — Claude Code's
+      native sandbox does not support native Windows; the message points the
+      operator at WSL2 (which reports as ``linux`` and uses the bwrap+socat path).
+    * anything else (unknown) → ``(False, …unsupported…)`` — conservative: an
+      unknown platform is treated as having no sandbox runtime.
+
+    The boolean drives test skips + message composition; it does NOT relax the
+    fail-closed gate (``native_sandbox_wrap`` always sets ``failIfUnavailable``).
+    """
+    platform = sys.platform
+    if platform == "darwin":
+        return (
+            True,
+            "macOS: native sandbox uses the built-in Seatbelt framework "
+            "(sandbox-exec) — zero installs required; the runtime is always "
+            "available.",
+        )
+    if platform == "win32":
+        return (
+            False,
+            "Native Windows has no OS sandbox for autonomous agents — Claude "
+            "Code's native sandbox supports only macOS, Linux, and WSL2. Run "
+            "atelier under WSL2 (Windows Subsystem for Linux), where it reports as "
+            "`linux` and uses bubblewrap + socat for confinement.",
+        )
+    if platform.startswith("linux"):
+        has_bwrap = shutil.which("bwrap") is not None
+        has_socat = shutil.which("socat") is not None
+        if has_bwrap and has_socat:
+            return (
+                True,
+                "Linux/WSL2: bubblewrap (bwrap) and socat are both present — the "
+                "native sandbox runtime is available.",
+            )
+        missing = [
+            name
+            for name, present in (("bubblewrap (bwrap)", has_bwrap), ("socat", has_socat))
+            if not present
+        ]
+        return (
+            False,
+            "Linux/WSL2: native sandbox unavailable — missing "
+            + " and ".join(missing)
+            + ". Install both with e.g. `sudo apt install bubblewrap socat` "
+            "(bwrap enforces filesystem isolation; socat relays the network "
+            "proxy used by network.allowedDomains).",
+        )
+    return (
+        False,
+        f"platform {platform!r}: native sandbox runtime is unavailable/unknown "
+        "(native Windows is unsupported — run inside WSL2; any other platform is "
+        "treated conservatively as having no sandbox).",
+    )
+
+
+def sandbox_runtime_available() -> bool:
+    """True iff the native sandbox runtime is available on THIS platform.
+
+    Thin boolean wrapper over :func:`sandbox_prereq_status`. ``darwin`` → always
+    True (Seatbelt built-in); ``linux`` → True iff ``bwrap`` AND ``socat`` are on
+    PATH; any other platform → False (conservative). Used by the live e2e harness
+    skipif so a Mac with zero installs RUNS the test while a Linux host lacking
+    ``bwrap``/``socat`` SKIPS with a platform-correct reason.
+    """
+    available, _reason = sandbox_prereq_status()
+    return available
+
+
+def _sandbox_install_hint() -> str:
+    """Platform-aware remediation hint for the unsandboxed error/warning text.
+
+    On Linux: name the two packages to install. On macOS: Seatbelt is built-in, so
+    a missing sandbox means it failed to INITIALIZE (not a missing install). On an
+    unknown platform: state it conservatively. Composed from
+    :func:`sandbox_prereq_status` so the wording stays single-sourced.
+    """
+    platform = sys.platform
+    if platform == "darwin":
+        return (
+            "On macOS the Seatbelt sandbox is built-in (zero installs) — if the "
+            "sandbox is reported unavailable, it FAILED TO INITIALIZE rather than "
+            "being absent; check the claude sandbox diagnostics (`/sandbox`)."
+        )
+    if platform.startswith("linux"):
+        return (
+            "On Linux/WSL2 install bubblewrap + socat, e.g. "
+            "`sudo apt install bubblewrap socat` (bwrap = filesystem isolation, "
+            "socat = the network-proxy relay)."
+        )
+    if platform == "win32":
+        return (
+            "Native Windows has no OS sandbox — run atelier under WSL2 (Windows "
+            "Subsystem for Linux), where it uses bubblewrap + socat."
+        )
+    # Unknown platform — surface the conservative status verbatim.
+    return sandbox_prereq_status()[1]
 
 
 # ── Security posture constants (M3 review hardening) ───────────────────────
@@ -288,8 +431,10 @@ def build_subprocess_env(
 #
 # `sandbox_wrap(argv) -> argv` transforms the claude argv to run under an
 # OS-level sandbox. Default is identity (UNSANDBOXED — a loud one-time warning
-# fires). `bwrap_sandbox_wrap(clone_dir)` returns a wrapper that enables Claude's
-# native bubblewrap sandbox confining writes to the clone, fail-closed.
+# fires). `native_sandbox_wrap(clone_dir)` (back-compat alias `bwrap_sandbox_wrap`)
+# returns a wrapper that enables Claude Code's native sandbox confining writes to
+# the clone, fail-closed. The injected `--settings` JSON is cross-platform: claude
+# implements it with bubblewrap+socat on Linux/WSL2 and built-in Seatbelt on macOS.
 
 SandboxWrap = Callable[[Sequence[str]], list[str]]
 
@@ -315,26 +460,39 @@ def identity_sandbox_wrap(argv: Sequence[str]) -> list[str]:
             "confinement is NOT enforced. The clone path-guard + acceptEdits + "
             "tool deny-list are defense-in-depth only; a live probe proved an "
             "agent can still write outside the clone without an OS sandbox. Wire a "
-            "real sandbox via the sandbox_wrap seam (e.g. bwrap_sandbox_wrap) "
-            "before relying on confinement. M7 (defaulting CLI transport ON) is "
-            "BLOCKED until this seam carries a real sandbox."
+            "real sandbox via the sandbox_wrap seam (e.g. native_sandbox_wrap) "
+            "before relying on confinement. %s M7 (defaulting CLI transport ON) is "
+            "BLOCKED until this seam carries a real sandbox.",
+            _sandbox_install_hint(),
         )
     return list(argv)
 
 
-def bwrap_sandbox_wrap(clone_dir: str | os.PathLike[str]) -> SandboxWrap:
-    """Return a ``sandbox_wrap`` that enables Claude's native bubblewrap sandbox.
+def native_sandbox_wrap(clone_dir: str | os.PathLike[str]) -> SandboxWrap:
+    """Return a ``sandbox_wrap`` that enables **Claude Code's native sandbox**.
 
     Injects ``--settings`` with a sandbox config that confines filesystem WRITES
-    to ``clone_dir`` and sets ``failIfUnavailable=true`` — so on a host WITHOUT
-    bubblewrap (``bwrap``) the ``claude`` CLI REFUSES TO START (verified live:
-    "sandbox required but unavailable … refusing to start"), which is fail-closed
-    (no uncontained agent ever runs). On a host WITH bwrap, writes outside the
-    clone are blocked at the OS level.
+    to ``clone_dir``, denies all network egress (``network.allowedDomains: []``),
+    and sets ``failIfUnavailable=true`` — so on a host where the platform sandbox
+    can't initialize the ``claude`` CLI REFUSES TO START (verified live: "sandbox
+    required but unavailable … refusing to start"), which is fail-closed (no
+    uncontained agent ever runs). On a host with a working sandbox, writes outside
+    the clone are blocked at the OS level.
 
-    NOTE: this is the *Claude-native* sandbox. A future host may instead wrap argv
-    with an external ``bwrap …``/container command; the seam accepts any
-    ``argv -> argv`` transform. This wrapper is the batteries-included option.
+    **Cross-platform** — the SAME ``--settings`` JSON drives both platforms; only
+    the OS primitive differs (verified against code.claude.com/docs/en/sandboxing):
+
+    * **Linux/WSL2** — Claude uses **bubblewrap (``bwrap``)** for filesystem
+      isolation + **``socat``** for the network-proxy relay. BOTH packages are
+      prerequisites (``sudo apt install bubblewrap socat``); availability is
+      detected by :func:`sandbox_runtime_available`.
+    * **macOS** — Claude uses the **built-in Seatbelt** framework; ZERO installs.
+
+    So ``wrap()`` itself is platform-agnostic (it only appends ``--settings``);
+    platform-awareness lives in the DETECTION helpers + the error/warning text.
+    A future host may instead wrap argv with an external ``bwrap …``/container
+    command; the seam accepts any ``argv -> argv`` transform. This wrapper is the
+    batteries-included option.
     """
     clone_str = str(Path(clone_dir).resolve())
 
@@ -353,6 +511,14 @@ def bwrap_sandbox_wrap(clone_dir: str | os.PathLike[str]) -> SandboxWrap:
         return [*argv, "--settings", settings]
 
     return wrap
+
+
+#: Back-compat alias. The wrapper was historically named ``bwrap_sandbox_wrap``
+#: (Linux-only framing); it is now :func:`native_sandbox_wrap` to reflect the
+#: cross-platform reality (bubblewrap+socat on Linux, Seatbelt on macOS — same
+#: ``--settings`` JSON). The old name remains a callable alias so existing callers
+#: (and any external code) keep working unchanged.
+bwrap_sandbox_wrap = native_sandbox_wrap
 
 
 # ── Runner seam ────────────────────────────────────────────────────────────
@@ -622,7 +788,7 @@ async def run_attempt(
     * ``disallowed_tools`` — ``("Bash", "WebFetch", "WebSearch")`` by default.
     * ``allowed_tools`` — optional explicit allowlist (e.g. Read/Edit/Write/Grep).
     * ``sandbox_wrap`` — ``argv -> argv`` OS-sandbox transform (default identity +
-      one-time unsandboxed warning; see :func:`bwrap_sandbox_wrap`).
+      one-time unsandboxed warning; see :func:`native_sandbox_wrap`).
     """
     # INVARIANT: the adapter's per-attempt wall clock must not exceed the engine's
     # deadline, else a future lower engine WALL_CLOCK_S would be silently gated
@@ -1057,10 +1223,13 @@ __all__ = [
     "build_cli_poll_fn",
     "build_cli_spawn_fn",
     "build_subprocess_env",
-    "bwrap_sandbox_wrap",
+    "bwrap_sandbox_wrap",  # back-compat alias for native_sandbox_wrap
     "direct_upstream_hashes",
     "identity_sandbox_wrap",
     "is_failed_attempt",
+    "native_sandbox_wrap",
     "real_cli_runner",
     "run_attempt",
+    "sandbox_prereq_status",
+    "sandbox_runtime_available",
 ]

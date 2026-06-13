@@ -60,7 +60,9 @@ admission decision.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -73,6 +75,7 @@ from scripts.cli_dispatch import (
     DEFAULT_PERMISSION_MODE as _DEFAULT_PERMISSION_MODE,
 )
 from scripts.cli_dispatch import (
+    FAILED_ATTEMPT,
     CliDispatchTools,
     Runner,
     SandboxWrap,
@@ -250,6 +253,18 @@ class _Worktree:
         self.base_clone = base_clone
 
 
+#: How many times to retry a ``git worktree add`` that fails on the transient
+#: ``.git/worktrees/`` admin race (exit 128) before giving up.  The race is
+#: caused by concurrent worktree-admin git ops touching the shared admin
+#: directory; the scheduler serializes those ops with ``worktree_admin_lock``, so
+#: in practice the retry almost never fires — it is belt-and-suspenders against a
+#: residual filesystem-level race (e.g. NFS / WSL2 metadata lag).  *(MAJOR-1)*
+_WORKTREE_ADD_RETRIES = 4
+#: Tiny backoff between worktree-add retries (seconds).  Deterministic-enough: it
+#: only affects WALL-CLOCK on the rare retry path, never a scheduling decision.
+_WORKTREE_ADD_RETRY_BACKOFF_S = 0.05
+
+
 def simple_worktree_factory(base_clone: str | Path) -> Callable[[str], _Worktree]:
     """Return a ``factory(task_id) -> _Worktree`` that carves a fresh git
     worktree + branch off *base_clone* for one writer task.
@@ -257,8 +272,25 @@ def simple_worktree_factory(base_clone: str | Path) -> Callable[[str], _Worktree
     Each worktree lives at ``<base_clone>/.atelier-worktrees/<task_id>`` on a
     branch ``atelier/wt/<task_id>``.  Deterministic naming (task-id derived, no
     clock/RNG) so a replay reproduces the same layout.  Raises
-    :class:`WorktreeError` on any git failure → the scheduler falls back to the
-    barrier for that writer.
+    :class:`WorktreeError` on a persistent git failure.
+
+    **MAJOR-1 concurrency safety.** ``git worktree add`` mutates the shared
+    ``.git/worktrees/`` admin directory; concurrent adds (and adds racing a
+    concurrent ``git merge`` removing a sibling worktree) intermittently fail with
+    ``fatal: failed to read .git/worktrees/… (exit 128)``.  Two defenses combine:
+
+    1. The scheduler serializes EVERY worktree-admin git op (add / merge / remove
+       / prune) under a single ``worktree_admin_lock`` — only the FAST git-admin
+       step is serialized; the slow agent run inside the worktree stays
+       concurrent.  See :func:`pipeline`.
+    2. This factory ALSO retries the transient exit-128 admin race a few times
+       (:data:`_WORKTREE_ADD_RETRIES`) as a residual backstop, cleaning any
+       partial worktree dir between attempts so the retry is a fresh add.
+
+    With (1)+(2) a worktree-add failure is essentially impossible; if one DOES
+    persist, this raises :class:`WorktreeError` and the scheduler FAILS THE
+    ATTEMPT (it never runs the writer un-isolated in the shared base — see
+    :func:`pipeline`).
     """
     base = Path(base_clone).resolve()
 
@@ -268,17 +300,29 @@ def simple_worktree_factory(base_clone: str | Path) -> Callable[[str], _Worktree
         wt_path = wt_root / safe
         branch = f"atelier/wt/{safe}"
         wt_root.mkdir(parents=True, exist_ok=True)
-        # Add a detached-then-branched worktree off the current HEAD.
-        res = _git(
-            ["worktree", "add", "-b", branch, str(wt_path), "HEAD"],
-            base,
-            check=False,
-        )
-        if res.returncode != 0:
-            raise WorktreeError(
-                f"git worktree add failed for {task_id!r}: {res.stderr.strip()[:300]}"
+        last_err = ""
+        for attempt_i in range(_WORKTREE_ADD_RETRIES):
+            # Add a detached-then-branched worktree off the current HEAD.
+            res = _git(
+                ["worktree", "add", "-b", branch, str(wt_path), "HEAD"],
+                base,
+                check=False,
             )
-        return _Worktree(path=wt_path, branch=branch, base_clone=base)
+            if res.returncode == 0:
+                return _Worktree(path=wt_path, branch=branch, base_clone=base)
+            last_err = res.stderr.strip()[:300]
+            # Transient admin race → clean any half-created residue and retry so
+            # the next add starts fresh (a stale `wt_path` dir or a dangling admin
+            # entry would otherwise make the retry fail with "already exists").
+            _git(["worktree", "remove", str(wt_path), "--force"], base, check=False)
+            _git(["worktree", "prune"], base, check=False)
+            _git(["branch", "-D", branch], base, check=False)
+            if attempt_i < _WORKTREE_ADD_RETRIES - 1:
+                time.sleep(_WORKTREE_ADD_RETRY_BACKOFF_S)
+        raise WorktreeError(
+            f"git worktree add failed for {task_id!r} after "
+            f"{_WORKTREE_ADD_RETRIES} attempts: {last_err}"
+        )
 
     return factory
 
@@ -327,6 +371,31 @@ def _merge_worktree(wt: _Worktree) -> None:
     _remove_worktree(wt)
 
 
+def _list_linked_worktrees(base: Path) -> list[Path]:
+    """Return the paths of every LINKED worktree of the base clone (excluding the
+    main working tree itself).
+
+    Parses ``git worktree list --porcelain`` (the stable, scriptable form: one
+    ``worktree <path>`` line per tree, the first being the main repo).  Used by
+    :func:`_cleanup_after_merge_failure` so that under eager concurrent merge-back
+    — where the caller's named-leftover snapshot can miss a just-finished worktree
+    — cleanup removes EVERY linked worktree, not only the ones it was handed.
+    Best-effort + non-raising (``check=False``)."""
+    res = _git(["worktree", "list", "--porcelain"], base, check=False)
+    if res.returncode != 0:
+        return []
+    paths: list[Path] = []
+    main_seen = False
+    for line in res.stdout.splitlines():
+        if line.startswith("worktree "):
+            p = Path(line[len("worktree ") :].strip())
+            if not main_seen:
+                main_seen = True  # the first entry is the main working tree
+                continue
+            paths.append(p)
+    return paths
+
+
 def _remove_worktree(wt: _Worktree) -> None:
     """Best-effort: remove *wt*'s worktree directory + delete its branch.
 
@@ -373,14 +442,36 @@ def _cleanup_after_merge_failure(
     base = Path(clone_dir).resolve()
     # 1. Abort any in-progress merge left behind by a non-conflict git failure.
     _git(["merge", "--abort"], base, check=False)
-    # 2. Remove every un-merged worktree (and prune stale admin entries).
+    # 2. Remove every un-merged worktree (and prune stale admin entries).  Under
+    #    eager (per-completion, concurrent) merge-back the caller's `leftover`
+    #    snapshot may miss a worktree that finished but had not yet merged, so we
+    #    also remove EVERY remaining linked worktree git knows about — not just
+    #    the named leftovers — to be exhaustive.
     for wt in leftover:
         _remove_worktree(wt)
+    for wt_path in _list_linked_worktrees(base):
+        _git(["worktree", "remove", str(wt_path), "--force"], base, check=False)
     # 3. Restore the base working tree to a clean HEAD.  reset --hard drops any
     #    partially-merged tracked changes; clean removes the worktrees dir +
     #    any other untracked residue so `git status --porcelain` is empty.
-    _git(["reset", "--hard", "HEAD"], base, check=False)
+    #
+    #    MINOR-1 (autocrlf): on a host with `core.autocrlf=true`, a plain
+    #    `reset --hard` re-applies CRLF normalization and can leave a FALSE-dirty
+    #    `M <file>` (an LF↔CRLF-only diff, not a real change), so the cleanup would
+    #    report a dirty base even though nothing changed.  We pin
+    #    `core.autocrlf=false` + `core.eol=lf` for THIS invocation (no config write)
+    #    so the reset reproduces HEAD byte-for-byte regardless of the host's
+    #    autocrlf setting — the cleanup is clean on any host.
+    _git(
+        ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "reset", "--hard", "HEAD"],
+        base,
+        check=False,
+    )
     _git(["clean", "-ffdx", ".atelier-worktrees"], base, check=False)
+    # 4. A final prune reaps any worktree whose DIRECTORY was removed by `clean`
+    #    above but whose admin entry git still lists as "prunable" — otherwise
+    #    `git worktree list` would report a stale (prunable) leak.
+    _git(["worktree", "prune"], base, check=False)
 
 
 # ── (2) parallel() — the EXPLICIT BARRIER (reuse WaveDispatcher) ─────────────
@@ -504,7 +595,6 @@ async def pipeline(
     Returns the validated envelope (or failed-attempt sentinel) per task, in the
     deterministic ``(parallel_group, task_id)`` order.
     """
-    by_id: dict[str, Mapping[str, Any]] = {_task_id(t): t for t in tasks}
     ordered = sorted(tasks, key=_sort_key)
     key_tracker = JournalKeyTracker(journal)
 
@@ -522,13 +612,28 @@ async def pipeline(
     terminal: set[str] = set()  # task_ids whose attempt resolved (done/failed)
     results: dict[str, Any] = {}
     in_flight: dict[str, Mapping[str, Any]] = {}
-    # Worktree per in-flight writer (None when not isolated).
+    # Worktree per in-flight writer (None when not isolated).  Each successful
+    # writer's worktree is merged back into the base clone EAGERLY (the instant
+    # it is terminal) and popped from this map — see the eager-merge step in
+    # `_run_one`.  Whatever remains here on an error path is leftover to clean up.
     writer_worktrees: dict[str, _Worktree] = {}
-    # Completed writer worktrees awaiting deterministic merge-back.
-    pending_merges: list[_Worktree] = []
 
     lock = asyncio.Lock()
     progress = asyncio.Condition(lock)
+    # Serializes EVERY worktree-admin git op that mutates the shared
+    # `.git/worktrees/` admin dir or the base index/refs: worktree CREATE (`git
+    # worktree add`), MERGE-back (which also removes the worktree), DISCARD, and
+    # the error-path cleanup sweep.  *(MAJOR-1)* `git worktree add` races against
+    # a concurrent add/merge on `.git/worktrees/` and intermittently fails
+    # (exit 128) — which previously dropped the writer to an UN-ISOLATED run in
+    # the shared base, defeating file-race-freedom under fan-out.  Serializing
+    # only the FAST git-admin step (the slow agent run inside the worktree stays
+    # concurrent) closes that race.  Distinct from `progress` so a (blocking,
+    # thread-offloaded) git op never holds the admission lock.  Deadlock-free: a
+    # task acquires it for `add` at the START of its run and (separately, never
+    # nested) for `merge`/`discard` at the END — the two are sequential within a
+    # task and never held across `progress.wait()`.
+    worktree_admin_lock = asyncio.Lock()
 
     def _ready(task: Mapping[str, Any], live: dict[str, Mapping[str, Any]]) -> bool:
         """Pure readiness predicate (no clock, no RNG).  See module docstring.
@@ -577,17 +682,30 @@ async def pipeline(
                 run_cwd: str | Path = clone_dir
                 run_add_dir: str | Path = clone_dir
                 if worktree_factory is not None and _is_writer(task):
+                    # MAJOR-1: carve the worktree under the worktree-admin lock so
+                    # the `.git/worktrees/` admin mutation is serialized against
+                    # every other writer's add/merge/remove (the slow agent run
+                    # below stays concurrent — only this fast git step is locked).
                     try:
-                        wt = await asyncio.to_thread(worktree_factory, tid)
-                        run_cwd = wt.path
-                        run_add_dir = wt.path
+                        async with worktree_admin_lock:
+                            wt = await asyncio.to_thread(worktree_factory, tid)
                     except WorktreeError:
-                        # Fail-closed: isolation infeasible → this writer must not
-                        # share the base clone with another concurrent writer.
-                        # The readiness gate already proved write-disjointness, so
-                        # the base clone is a safe fallback; it runs un-isolated.
-                        wt = None
-                if wt is not None:
+                        # SAFE-BY-CONSTRUCTION (MAJOR-1): isolation is mandatory for
+                        # a writer under fan-out.  The old code fell back to running
+                        # UN-ISOLATED in the shared base — but that put TWO writers
+                        # in the same working tree concurrently (a race on
+                        # `.git/index.lock`, outputs left uncommitted/untracked),
+                        # defeating file-race-freedom.  Instead we FAIL THIS ATTEMPT:
+                        # return the failed-attempt sentinel (no worktree ⇒ no merge
+                        # ⇒ nothing lands in the base) so the engine re-queues /
+                        # abandons it, and the pipeline NEVER runs two writers in the
+                        # base tree.  `success` stays False ⇒ the `finally` marks it
+                        # terminal as a failed attempt and notifies; downstreams of a
+                        # failed writer simply never see it succeed.
+                        result = FAILED_ATTEMPT
+                        return
+                    run_cwd = wt.path
+                    run_add_dir = wt.path
                     async with lock:
                         writer_worktrees[tid] = wt
 
@@ -628,32 +746,80 @@ async def pipeline(
             # itself still propagates out of the coroutine (gathered after the
             # loop) — terminal state is bookkeeping, not suppression.
             succeeded = success and not is_failed_attempt(result)
-            discard_wt: _Worktree | None = None
+            # Pull this task's worktree out of the in-flight map (under the lock)
+            # WITHOUT yet marking the task terminal — the merge must land in base
+            # HEAD *before* the terminal transition (see the ordering note below).
             async with progress:
-                results[tid] = result
-                terminal.add(tid)
-                in_flight.pop(tid, None)
-                if succeeded and jkey is not None:
-                    key_tracker.record(tid, jkey)
                 done_wt = writer_worktrees.pop(tid, None)
+
+            # BUGFIX (dependent-writer reads-its-inputs): a successful writer's
+            # worktree is merged into the base clone EAGERLY — the instant it
+            # completes — instead of deferring all merges to after the admission
+            # loop.  A downstream task carves its OWN worktree from base HEAD at
+            # admission (`git worktree add … HEAD`), and that only fires once every
+            # `depends_on` upstream is TERMINAL.  So the invariant a downstream
+            # relies on is: TERMINAL ⟹ ALREADY MERGED INTO HEAD.  We therefore do
+            # the (blocking, thread-offloaded) git merge/discard HERE — OUTSIDE the
+            # `progress` lock (so the admission lock is never held across git) and
+            # serialized by `worktree_admin_lock` (so two concurrent completions —
+            # or a completion racing another writer's `git worktree add` — never
+            # mutate the base index/refs or `.git/worktrees/` at once) — and ONLY
+            # THEN, below, mark the task
+            # terminal + notify.  The old code deferred the merge to after the loop,
+            # leaving a downstream's worktree branched from a HEAD that did NOT yet
+            # contain its upstreams' outputs, so the dependent agent could not READ
+            # its inputs (a.txt/b.txt) and blocked.  Invariants preserved: writers
+            # are still each isolated WHILE in-flight (the merge runs only after a
+            # writer completes, no longer racing), writes stay confined to the
+            # clone, and the merge stays conflict-free by the disjointness gate.
+            #
+            # CRITICAL: the merge can RAISE (a conflict = breached-disjointness
+            # invariant, or any git failure).  We wrap it in its own try/finally so
+            # that — pass or fail — this task is STILL marked terminal + notified
+            # below.  Otherwise a raised merge would strand the admission loop on
+            # `progress.wait()` forever (the coroutine never signalling completion).
+            # The exception is re-raised after the terminal transition so the
+            # post-loop drain surfaces it (and runs the clean-up + re-raise path).
+            try:
                 if done_wt is not None:
-                    if succeeded:
-                        # Queue for deterministic merge-back (writers only).
-                        pending_merges.append(done_wt)
-                    else:
-                        # MINOR-1: a FAILED writer's partial writes must NOT land
-                        # in the base — DISCARD its worktree (remove, don't merge)
-                        # outside the lock so the git calls don't hold `progress`.
-                        discard_wt = done_wt
-                progress.notify_all()
-            if discard_wt is not None:
-                await asyncio.to_thread(_discard_worktree, discard_wt)
+                    # Both merge and discard mutate the shared worktree admin dir /
+                    # refs, so both run under `worktree_admin_lock` — serialized
+                    # against every other writer's add/merge/discard (MAJOR-1).
+                    async with worktree_admin_lock:
+                        if succeeded:
+                            await asyncio.to_thread(_merge_worktree, done_wt)
+                        else:
+                            # MINOR-1 (writer-failure): a FAILED writer's partial
+                            # writes must NOT land in the base — DISCARD its worktree
+                            # (remove, don't merge).
+                            await asyncio.to_thread(_discard_worktree, done_wt)
+            finally:
+                # NOW mark terminal + notify — AFTER the merge has landed in HEAD
+                # (on success), so a downstream admitted by this notify (its last
+                # dep now terminal) carves its worktree from a HEAD that already
+                # carries this writer's output.  This runs even if the merge raised,
+                # so the admission loop is never stranded; the exception (if any)
+                # still propagates out of the coroutine to the post-loop drain.
+                async with progress:
+                    results[tid] = result
+                    terminal.add(tid)
+                    in_flight.pop(tid, None)
+                    if succeeded and jkey is not None:
+                        key_tracker.record(tid, jkey)
+                    progress.notify_all()
 
     # ── the admission loop ──────────────────────────────────────────────────
     spawned: set[str] = set()
     # Strong refs to the running coroutines so they are not GC'd mid-flight
-    # (asyncio holds only a weak ref to a bare ensure_future task).
+    # (asyncio holds only a weak ref to a bare ensure_future task).  `running` is
+    # the LIVE in-flight set (drained by the done-callback); `all_workers` is a
+    # PERSISTENT list of every worker ever spawned, so the post-loop drain can
+    # await ALL of them and read their results/exceptions directly from the
+    # gather return — a worker that RAISES from inside `_run_one` (an eager-merge
+    # CONFLICT, BudgetExceeded, CloneEscapeError) is therefore never lost even
+    # after the done-callback has discarded it from `running`.
     running: set[asyncio.Task[None]] = set()
+    all_workers: list[asyncio.Task[None]] = []
     try:
         while len(terminal) < len(ordered):
             async with progress:
@@ -680,6 +846,7 @@ async def pipeline(
                     for task in admitted_this_pass:
                         coro_task = asyncio.ensure_future(_run_one(task))
                         running.add(coro_task)
+                        all_workers.append(coro_task)
                         coro_task.add_done_callback(running.discard)
                 elif in_flight:
                     # Nothing newly admittable but work is in flight — wait for a
@@ -695,38 +862,44 @@ async def pipeline(
                         f"{[_task_id(t) for t in remaining]} are not terminal — "
                         "malformed DAG (should have failed validate_dag)."
                     )
-    finally:
-        # Surface any exception raised inside a worker coroutine (BudgetExceeded,
-        # CloneEscapeError, …) instead of swallowing it.  A finished worker has
-        # already recorded its result; a still-running one is drained here.
-        if running:
-            await asyncio.gather(*running, return_exceptions=False)
-
-    # ── deterministic worktree merge-back (dependency order) ────────────────
-    # Merge in (parallel_group, task_id) order — a topological-consistent,
-    # deterministic order: an upstream writer's wave precedes its downstream's.
-    #
-    # MAJOR-2: the merge loop is NON-ATOMIC across worktrees.  If _merge_worktree
-    # raises mid-loop (a conflict = breached-disjointness invariant, or any git
-    # failure), the already-merged worktrees stay merged, but the remaining ones
-    # must NOT be left on disk and the base working tree must NOT be left dirty —
-    # else a caller catching WorktreeError to fall back inherits a polluted
-    # clone.  So on ANY error we clean up ALL remaining worktrees and restore the
-    # base to a clean tree, THEN re-raise (the loud INVARIANT VIOLATION is
-    # preserved — never auto-resolved).
-    ordered_merges = sorted(pending_merges, key=lambda w: _merge_sort_key(w, by_id))
-    merged_count = 0
-    try:
-        for wt in ordered_merges:
-            await asyncio.to_thread(_merge_worktree, wt)
-            merged_count += 1
     except BaseException:
-        # Clean up every worktree we did NOT successfully merge, and restore the
-        # base working tree so the caller's fallback sees a CLEAN clone.
-        leftover = ordered_merges[merged_count:]
-        await asyncio.to_thread(_cleanup_after_merge_failure, clone_dir, leftover)
+        # The admission loop itself raised (e.g. the deadlock guard).  Drain any
+        # in-flight workers (best-effort, never masking the loop's exception),
+        # restore a clean base + remove leftover worktrees, then re-raise.
+        with contextlib.suppress(BaseException):
+            if all_workers:
+                await asyncio.gather(*all_workers, return_exceptions=True)
+        with contextlib.suppress(BaseException):
+            await asyncio.to_thread(
+                _cleanup_after_merge_failure, clone_dir, list(writer_worktrees.values())
+            )
         raise
+    else:
+        # Loop completed normally (every task terminal).  Await EVERY worker and
+        # read their results DIRECTLY from the gather return (not via the
+        # done-callback, whose `call_soon` scheduling may not have fired yet), then
+        # surface the FIRST exception any worker raised — a merge CONFLICT
+        # (breached-disjointness invariant), BudgetExceeded, or CloneEscapeError.
+        if all_workers:
+            outcomes = await asyncio.gather(*all_workers, return_exceptions=True)
+            first_exc = next((o for o in outcomes if isinstance(o, BaseException)), None)
+            if first_exc is not None:
+                # MAJOR-2 (eager-merge variant): merges land eagerly into the base,
+                # so a mid-flight failure can leave the base half-merged/dirty AND
+                # leave still-in-flight writers' worktrees on disk.  Restore a CLEAN
+                # base + remove every leftover worktree so a caller catching the
+                # error to fall back never inherits a polluted clone, THEN re-raise
+                # the original exception (the loud INVARIANT VIOLATION is preserved,
+                # never auto-resolved).
+                await asyncio.to_thread(
+                    _cleanup_after_merge_failure, clone_dir, list(writer_worktrees.values())
+                )
+                raise first_exc
 
+    # All successful writers were merged back EAGERLY (in completion order) as
+    # each became terminal — see the eager-merge step in `_run_one`.  By the time
+    # we get here the base clone already carries every merged writer's output and
+    # `writer_worktrees` is drained, so there is no deferred merge pass.
     return [results[_task_id(t)] for t in ordered]
 
 
@@ -751,15 +924,3 @@ def _seed_per_agent(
         return 1
     ests = [est_for(model_for(t, _attempt_for(t))) for t in tasks]
     return max(1, max(ests))
-
-
-def _merge_sort_key(wt: _Worktree, by_id: dict[str, Mapping[str, Any]]) -> tuple[int, str]:
-    """Deterministic merge order keyed on the originating task's
-    (parallel_group, task_id) — upstream waves merge before downstream."""
-    # Branch is `atelier/wt/<safe_task_id>`; recover the task for its group.
-    safe = wt.branch.rsplit("/", 1)[-1]
-    for tid, task in by_id.items():
-        cand = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in tid)
-        if cand == safe:
-            return _sort_key(task)
-    return (0, safe)

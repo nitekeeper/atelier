@@ -2,6 +2,19 @@
 
 Deferred work tracked here so it survives session boundaries. Cross out items as they land or get explicitly dropped.
 
+## Cost/quality mode selection at atelier start (user request 2026-06-13)
+
+Let the user pick a **cost-effective** vs **code-quality** configuration **when they start atelier** (e.g. at the top of `atelier:run` / when a run is kicked off), and have atelier **honor that choice for the run**. Rationale: some users have a limited budget, others don't — we want to satisfy both groups by letting them select the posture per run.
+
+- [ ] **Add an at-start mode prompt to `atelier:run`** offering `cost-effective` | `code-quality`, with the selection stored in run/project state and read by the dispatch + model-selection path. Distinct from today's `settings-recommendation` offer, which fires **once per plugin version** on upgrade and writes global `~/.claude/settings.json` — this new one is a **per-run** choice.
+- [ ] **Wire the chosen mode through the model + budget posture** (not just the orchestrator model):
+  - orchestrator/host model: `cost-effective → sonnet`, `code-quality → opus` (mirrors the existing `recommended_settings.PROFILES`).
+  - per-task `model_tier` posture: cost → lean toward haiku/sonnet; quality → opus-heavier (the mode parameterizes the `PHASE_TIER`/`ROLE_FLOOR`/`DIFFICULTY_TIER` tables).
+  - in the deterministic-host engine (restructure in progress): the mode sets the `BudgetPool` ceiling/headroom + `static_fleet_width` posture (cost → tighter token budget + narrower fan-out; quality → looser/no cap).
+- [ ] **Unify with the existing `settings-recommendation` profiles — do NOT create a conflicting second mechanism.** The saved global profile (`cost-effective`|`code-quality` in `scripts/recommended_settings.PROFILES`) becomes the **default**; the at-start prompt offers "use your saved profile (X)" or switch **for this run only**.
+- [ ] **Avoid prompt fatigue:** remember the last choice and offer it as the Enter-default; provide a non-interactive override (env var or setting) so CI / scripted runs don't block; skippable.
+- [ ] **Folds into the deterministic-host restructure at ~M6** (`model_tier` + `BudgetPool` wiring) — see `docs/plans/2026-06-13-atelier-v2-migration.md` (R-MODE). Can also ship standalone against the current engine; the restructure just makes the budget half real.
+
 ## Wave 0 Task 5 follow-ups (migrations split audit)
 
 Findings from the reviewer + QA audit on commit `47f5b27` (now rebased / amended) that intentionally don't ship with the split itself.

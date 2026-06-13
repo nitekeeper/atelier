@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.8.0 — 2026-06-12
 
 **Loom agent-chat comms mandatory when available.** Loom inter-agent chat is
 upgraded from default-when-available to **MANDATORY when Loom is available**,
@@ -45,6 +45,28 @@ is unavailable (or opted out) behavior is byte-identical to bridge-only.
 - Operational rule **A9** (mandatory loom-agent-chat comms) added to
   `CLAUDE.md`; `## Inter-agent communication transport` and the README's
   inter-agent chat section updated to the mandatory-when-available posture.
+
+### Fixed
+- **Memex >= 2.10 broke every Memex-mode write** (`ImportError: cannot
+  import name 'stores' from 'scripts'` /
+  `ModuleNotFoundError: No module named 'scripts.db'`). Memex's
+  `agents/librarian.py` and `reference_librarian.py` gained module-level
+  `from scripts import stores / agents / embeddings` not covered by
+  `_scripts_db_shim`, and Memex defers some `scripts.*` imports into
+  function bodies that run after the exec-scoped shim exits
+  (`embeddings.log_skip`, `embeddings._record_model_info`,
+  `db.require_bootstrap`). `_SHIM_BOOTSTRAP` is now a tiered dependency
+  map over all six Memex modules; the new `_expose_scripts_modules`
+  injects them under both `sys.modules` AND the `scripts` package
+  attributes (so `from scripts import agents` can no longer silently bind
+  Atelier's own `scripts/agents.py`); the new `_memex_call_shim`
+  re-activates the shim around every call into loaded Memex modules so
+  deferred imports resolve. All Memex-boundary call sites outside
+  `backend_memex.py` (`roles`, `workflow`, `session`, `agents`,
+  `meetings`) now route through facade helpers, including the new
+  SELECT-only `_memex_core_raw_query`; `meetings`' legacy
+  `_ensure_memex_importable` pattern was dead-on-arrival in Memex mode
+  and is fixed. 15 regression tests pin every diagnosed mechanism.
 
 ## v1.7.0 — 2026-06-08
 

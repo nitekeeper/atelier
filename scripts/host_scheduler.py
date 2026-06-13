@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -183,6 +184,28 @@ def _writes(task: Mapping[str, Any]) -> frozenset[str]:
 
 def _is_writer(task: Mapping[str, Any]) -> bool:
     return bool(_writes(task))
+
+
+def _missing_declared_writes(task: Mapping[str, Any], write_dir: str | Path) -> list[str]:
+    """Return the declared ``writes`` (repo-relative) that DO NOT EXIST under
+    *write_dir* — the dir the agent actually wrote into (the task's worktree when
+    isolated, else the clone).
+
+    The declared ``writes`` are repo-relative paths (the same vocabulary the DAG
+    write-disjointness gate uses); each is resolved against *write_dir* with
+    ``Path(write_dir, w)``.  EXISTENCE is the contract — a declared output that is
+    absent means the agent did not produce it.  Content is deliberately NOT
+    over-constrained (a legitimately-empty declared output should not be rejected),
+    so the check is plain ``.exists()``: any present path (file, dir, symlink)
+    satisfies it.  Returns the missing entries in declaration-stable (sorted)
+    order; an empty list means every declared write is present.
+    """
+    base = Path(write_dir)
+    missing: list[str] = []
+    for w in sorted(_writes(task)):
+        if not Path(base, w).exists():
+            missing.append(w)
+    return missing
 
 
 def _sort_key(task: Mapping[str, Any]) -> tuple[int, str]:
@@ -738,6 +761,42 @@ async def pipeline(
                     allowed_tools=allowed_tools,
                     sandbox_wrap=sandbox_wrap,
                 )
+                # FALSE-`done` GUARD (engine-level): a worker can return a terminal
+                # `done` envelope while having written NONE of its declared outputs
+                # (observed live — a model returns status="done" but wrote nothing;
+                # previously mitigated ONLY by briefing wording, which is fragile).
+                # Trusting that `done` would silently corrupt downstream tasks (they
+                # proceed on missing/stale inputs).  So BEFORE the eager merge +
+                # terminal transition, VERIFY every declared write actually exists in
+                # the dir the agent wrote into (`run_cwd` — the worktree when
+                # isolated, else the clone).  If ANY is absent, CONVERT the result to
+                # FAILED_ATTEMPT so the engine routes it through its normal
+                # re-queue/abandon path (retried up to budget, then abandoned — never
+                # silently accepted as done).  The downstream `finally` then sees a
+                # failed attempt (`succeeded` False) and DISCARDS the worktree (its
+                # partial/garbage state never lands in the base), exactly like any
+                # other failed writer.  Read-only / review tasks (no declared
+                # `writes`) are EXEMPT.  Only `done` is checked — a `blocked` /
+                # `abandoned` / `needs-input` / already-FAILED_ATTEMPT result is
+                # untouched.
+                if (
+                    not is_failed_attempt(result)
+                    and isinstance(result, Mapping)
+                    and result.get("status") == "done"
+                    and _is_writer(task)
+                ):
+                    missing = _missing_declared_writes(task, run_cwd)
+                    if missing:
+                        logging.getLogger(__name__).warning(
+                            "false `done` REJECTED for task %s: declared write(s) %s "
+                            "absent in %s — converting to FAILED_ATTEMPT (worktree "
+                            "discarded, not merged); the engine will re-queue/abandon "
+                            "per budget.",
+                            tid,
+                            missing,
+                            run_cwd,
+                        )
+                        result = FAILED_ATTEMPT
                 success = True
         finally:
             # ALWAYS mark terminal + notify, even on a raised exception

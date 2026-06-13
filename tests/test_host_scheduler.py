@@ -82,6 +82,14 @@ def _tid_from_argv(argv) -> str:
     return m.group(1)
 
 
+def _writes_map(tasks) -> dict[str, list[str]]:
+    """Build ``{str(task_id): [declared writes]}`` from a task list — so a
+    ``_TimedRunner`` can CREATE each task's declared outputs and thus be an honest
+    `done` writer that satisfies the engine's false-`done` guard.  A task with no
+    ``writes`` (read-only) maps to an empty list (nothing created)."""
+    return {str(t["task_id"]): [str(w) for w in (t.get("writes") or [])] for t in tasks}
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -93,9 +101,19 @@ class _TimedRunner(FakeCliRunner):
     Inherits the FAIL-CLOSED fake markers from FakeCliRunner — no real process,
     so the sandbox gate stays exempt."""
 
-    def __init__(self, sleeps: dict[str, float] | None = None):
+    def __init__(
+        self,
+        sleeps: dict[str, float] | None = None,
+        writes: dict[str, list[str]] | None = None,
+    ):
         super().__init__(structured_output=None)
         self.sleeps = sleeps or {}
+        # Declared outputs each task should actually CREATE in its cwd so an
+        # HONEST `done` writer satisfies the engine's false-`done` guard (a `done`
+        # writer that produced none of its declared `writes` is rejected).  Keyed
+        # by task_id → list of repo-relative paths; default {} (no files created,
+        # for read-only tasks).  Built from the tasks' `writes` via `_writes_map`.
+        self.writes = writes or {}
         self.started_at: dict[str, float] = {}
         self.ended_at: dict[str, float] = {}
         self._concurrency = 0
@@ -114,6 +132,12 @@ class _TimedRunner(FakeCliRunner):
             for other in self._live:
                 self.overlap_pairs.add(frozenset({tid, other}))
             self._live.add(tid)
+        # Honest writer: create each declared output in this task's cwd worktree
+        # so the false-`done` guard is satisfied (existence is the contract).
+        for rel in self.writes.get(tid, []):
+            p = Path(cwd) / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"by {tid}")
         await asyncio.sleep(self.sleeps.get(tid, 0.0))
         async with self._lock:
             self._concurrency -= 1
@@ -231,7 +255,7 @@ def test_pipeline_threads_upstream_hash_into_downstream_key(tmp_path):
         },
     ]
     dag_proof = compute_dag_proof(tasks)
-    runner = _TimedRunner()
+    runner = _TimedRunner(writes=_writes_map(tasks))
     journal = ResultJournal()
     budget = BudgetPool(total_tokens=1_000_000)
     res = _run(pipeline(tasks, **_pipeline_kwargs(clone, runner, journal, budget, dag_proof)))
@@ -267,7 +291,7 @@ def test_pipeline_advances_independent_task_while_peer_in_flight(tmp_path):
     ]
     dag_proof = compute_dag_proof(tasks)
     assert dag_proof.independent("fast", "slow")
-    runner = _TimedRunner(sleeps={"fast": 0.0, "slow": 0.3})
+    runner = _TimedRunner(sleeps={"fast": 0.0, "slow": 0.3}, writes=_writes_map(tasks))
     journal = ResultJournal()
     budget = BudgetPool(total_tokens=1_000_000)
     res = _run(pipeline(tasks, **_pipeline_kwargs(clone, runner, journal, budget, dag_proof)))
@@ -309,7 +333,7 @@ def test_pipeline_dependent_waits_for_upstream_terminal(tmp_path):
         },
     ]
     dag_proof = compute_dag_proof(tasks)
-    runner = _TimedRunner(sleeps={"t1": 0.1, "t2": 0.2, "t3": 0.0})
+    runner = _TimedRunner(sleeps={"t1": 0.1, "t2": 0.2, "t3": 0.0}, writes=_writes_map(tasks))
     journal = ResultJournal()
     budget = BudgetPool(total_tokens=1_000_000)
     res = _run(pipeline(tasks, **_pipeline_kwargs(clone, runner, journal, budget, dag_proof)))
@@ -360,7 +384,7 @@ def test_safety_write_overlap_never_concurrent_even_with_lying_proof(tmp_path):
     tasks = _overlap_tasks()
     liar = _lying_proof()
     assert liar.independent("t1", "t2") is True  # the proof lies
-    runner = _TimedRunner(sleeps={"t1": 0.2, "t2": 0.2})
+    runner = _TimedRunner(sleeps={"t1": 0.2, "t2": 0.2}, writes=_writes_map(tasks))
     journal = ResultJournal()
     budget = BudgetPool(total_tokens=1_000_000)
     res = _run(pipeline(tasks, **_pipeline_kwargs(clone, runner, journal, budget, liar)))
@@ -425,7 +449,7 @@ def test_pipeline_no_proof_means_barrier_no_silent_overlap(tmp_path):
     ]
     empty_proof = DagProof(_independent_pairs=frozenset(), _reads_from_items=frozenset())
     assert empty_proof.independent("t1", "t2") is False
-    runner = _TimedRunner(sleeps={"t1": 0.15, "t2": 0.15})
+    runner = _TimedRunner(sleeps={"t1": 0.15, "t2": 0.15}, writes=_writes_map(tasks))
     journal = ResultJournal()
     budget = BudgetPool(total_tokens=1_000_000)
     res = _run(pipeline(tasks, **_pipeline_kwargs(clone, runner, journal, budget, empty_proof)))
@@ -630,7 +654,7 @@ def test_pipeline_fleet_narrows_concurrency_to_budget(tmp_path):
     assert dag_proof.independent("t1", "t2")
     # Budget affords only ~1 sonnet agent (est 6_000): ceiling 7_000 // 6_000 = 1.
     budget = BudgetPool(total_tokens=10_000)
-    runner = _TimedRunner(sleeps={"t1": 0.15, "t2": 0.15})
+    runner = _TimedRunner(sleeps={"t1": 0.15, "t2": 0.15}, writes=_writes_map(tasks))
     journal = ResultJournal()
     res = _run(pipeline(tasks, **_pipeline_kwargs(clone, runner, journal, budget, dag_proof)))
     assert [r["status"] for r in res] == ["done", "done"]
@@ -1051,7 +1075,7 @@ def test_pipeline_journal_replay_costs_nothing_on_rerun(tmp_path):
     journal = ResultJournal()
     budget = BudgetPool(total_tokens=1_000_000)
 
-    runner1 = _TimedRunner()
+    runner1 = _TimedRunner(writes=_writes_map(tasks))
     _run(pipeline(tasks, **_pipeline_kwargs(clone, runner1, journal, budget, dag_proof)))
     assert runner1.call_count == 2
     spent_after_run1 = budget.spent()
@@ -1176,12 +1200,18 @@ def test_merge_failure_cleans_up_all_worktrees_and_restores_base(tmp_path, monke
     ]
     dag_proof = compute_dag_proof(tasks)
 
+    declared = _writes_map(tasks)
+
     class _WriteRunner(FakeCliRunner):
         def __init__(self):
             super().__init__(structured_output=None)
 
         async def __call__(self, argv, cwd):
             tid = _tid_from_argv(argv)
+            # Create the DECLARED output (so the honest `done` clears the
+            # false-`done` guard) plus a sidecar for the merge-back assertion.
+            for rel in declared.get(tid, []):
+                (Path(cwd) / rel).write_text(f"by {tid}")
             (Path(cwd) / f"{tid}-out.txt").write_text(f"by {tid}")
             await asyncio.sleep(0.02)
             self.calls.append({"argv": list(argv), "cwd": cwd})
@@ -1318,12 +1348,16 @@ def test_failed_writer_partial_writes_discarded_not_merged(tmp_path):
             self.calls.append({"argv": list(argv), "cwd": cwd})
             if tid == "bad":
                 # Failed attempt: is_error=True → run_attempt returns FAILED_ATTEMPT.
+                # (Never reaches the false-`done` guard — already a failed attempt.)
                 return {
                     "usage": {"output_tokens": 1},
                     "is_error": True,
                     "subtype": "error",
                     "structured_output": None,
                 }
+            # The honest writer ALSO creates its declared output (`ok.txt`) so its
+            # `done` clears the false-`done` guard and is merged.
+            (Path(cwd) / "ok.txt").write_text(f"by {tid}")
             return {
                 "usage": {"output_tokens": 5},
                 "is_error": False,
@@ -1365,3 +1399,275 @@ def test_failed_writer_partial_writes_discarded_not_merged(tmp_path):
         ["git", "worktree", "list"], cwd=clone, capture_output=True, text=True, check=True
     ).stdout.strip()
     assert len(listing.splitlines()) == 1, f"leaked worktrees:\n{listing}"
+
+
+# ── FALSE-`done` GUARD: a `done` envelope with a MISSING declared write is rejected ─
+
+
+class _DeclaredWriteRunner(FakeCliRunner):
+    """A FakeCliRunner that returns a configurable envelope per task and OPTIONALLY
+    creates each task's declared output file in its own cwd worktree.
+
+    *writes_files* maps ``task_id -> bool``: True ⇒ the runner CREATES the task's
+    declared output (an honest writer); False ⇒ it returns the envelope WITHOUT
+    creating the file (the false-`done` a real model produced live).  *statuses*
+    maps ``task_id -> status`` (default ``"done"``)."""
+
+    def __init__(self, *, declared, writes_files, statuses=None):
+        super().__init__(structured_output=None)
+        self._declared = declared  # task_id -> list[relpath]
+        self._writes_files = writes_files
+        self._statuses = statuses or {}
+
+    async def __call__(self, argv, cwd):
+        tid = _tid_from_argv(argv)
+        self.calls.append({"argv": list(argv), "cwd": cwd})
+        if self._writes_files.get(tid, True):
+            for rel in self._declared.get(tid, []):
+                p = Path(cwd) / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(f"by {tid}")
+        await asyncio.sleep(0.01)
+        status = self._statuses.get(tid, "done")
+        env = _env(tid, status=status)
+        # A non-`done` terminal status must be a VALID envelope so it reaches the
+        # guard (validate_envelope is the gate BEFORE the guard).  `abandoned`
+        # requires notes_md line 1 to match the abandon grammar; `blocked` /
+        # `needs-input` may carry an empty artifacts list.
+        if status == "abandoned":
+            env["notes_md"] = "ABANDON: blocked:declared output could not be produced"
+        elif status in ("blocked", "needs-input"):
+            env["artifacts"] = []
+        return {
+            "usage": {"output_tokens": 5},
+            "is_error": False,
+            "subtype": "success",
+            "structured_output": env,
+        }
+
+
+def _run_guard_pipeline(clone, tasks, runner, *, dag_proof, isolated=True, budget_tokens=1_000_000):
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=budget_tokens)
+    over = {}
+    if isolated:
+        over["worktree_factory"] = simple_worktree_factory(clone)
+    return _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(clone, runner, journal, budget, dag_proof, **over),
+        )
+    )
+
+
+def test_false_done_missing_write_converted_to_failed_attempt(tmp_path):
+    """IRON-LAW: a writer that returns a terminal `done` envelope but does NOT
+    create its declared `writes` file is REJECTED — the engine converts it to a
+    FAILED_ATTEMPT (NOT accepted as done), its worktree is DISCARDED, and nothing
+    lands in the base clone.
+
+    This FAILS on the pre-guard code (a false `done` is wrongly accepted, merged,
+    and reported done) and PASSES with the guard — see the companion mutation
+    test below that stashes the guard and asserts the false `done` is wrongly
+    accepted, proving this assertion is not vacuous."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "liar",
+            "parallel_group": 0,
+            "writes": ["out.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _DeclaredWriteRunner(
+        declared={"liar": ["out.txt"]},
+        writes_files={"liar": False},  # returns `done` but writes NOTHING
+    )
+    res = _run_guard_pipeline(clone, tasks, runner, dag_proof=dag_proof)
+    # The false `done` was REJECTED → routed as a failed attempt (NOT accepted).
+    assert is_failed_attempt(res[0]), (
+        f"false `done` (no declared write) was wrongly accepted: {res[0]!r}"
+    )
+    # Its declared output never landed in the base clone (worktree discarded).
+    assert not (clone / "out.txt").exists()
+    # The base clone is clean and the worktree was cleaned up.
+    porcelain = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=clone, capture_output=True, text=True, check=True
+    ).stdout
+    assert porcelain.strip() == "", f"base left dirty:\n{porcelain}"
+    listing = subprocess.run(
+        ["git", "worktree", "list"], cwd=clone, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert len(listing.splitlines()) == 1, f"leaked worktrees:\n{listing}"
+
+
+def test_false_done_guard_mutation_check_is_load_bearing(tmp_path, monkeypatch):
+    """MUTATION CHECK (Iron-Law companion): STASH the guard (make
+    ``_missing_declared_writes`` report nothing ever missing) and assert the same
+    false-`done` writer is then WRONGLY ACCEPTED as done and merged into the base.
+
+    A green guard test above + this red mutation here proves the guard is the
+    thing rejecting the false `done` — exactly the pre-guard behavior, reproduced
+    deterministically without depending on the historical un-guarded code."""
+    import scripts.host_scheduler as hs
+
+    # Neutralize the guard: nothing is ever reported missing → the false `done`
+    # sails through (the pre-guard behavior).
+    monkeypatch.setattr(hs, "_missing_declared_writes", lambda task, write_dir: [])
+
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "liar",
+            "parallel_group": 0,
+            "writes": ["out.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _DeclaredWriteRunner(
+        declared={"liar": ["out.txt"]},
+        writes_files={"liar": False},
+    )
+    res = _run_guard_pipeline(clone, tasks, runner, dag_proof=dag_proof)
+    # With the guard stashed, the false `done` is WRONGLY accepted as done.
+    assert not is_failed_attempt(res[0])
+    assert res[0]["status"] == "done"
+
+
+def test_honest_done_writer_accepted_and_merged(tmp_path):
+    """NO-REGRESSION: a writer that returns `done` AND actually creates its
+    declared `writes` file passes the guard cleanly — accepted, merged into the
+    base, worktree cleaned up."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "honest",
+            "parallel_group": 0,
+            "writes": ["out.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _DeclaredWriteRunner(
+        declared={"honest": ["out.txt"]},
+        writes_files={"honest": True},  # honest: actually writes its declared output
+    )
+    res = _run_guard_pipeline(clone, tasks, runner, dag_proof=dag_proof)
+    assert not is_failed_attempt(res[0])
+    assert res[0]["status"] == "done"
+    # The declared output merged back into the base clone.
+    assert (clone / "out.txt").read_text() == "by honest"
+    listing = subprocess.run(
+        ["git", "worktree", "list"], cwd=clone, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert len(listing.splitlines()) == 1, f"leaked worktrees:\n{listing}"
+
+
+def test_readonly_done_task_exempt_from_guard(tmp_path):
+    """EXEMPTION: a read-only / review task (NO declared `writes`) that returns
+    `done` is accepted — the guard does not fire (no false-positive).  It writes
+    nothing by design, so there is nothing to verify."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "review",
+            "parallel_group": 0,
+            # NO "writes" key → read-only / review task → exempt from the guard.
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _DeclaredWriteRunner(
+        declared={"review": []},
+        writes_files={"review": False},  # writes nothing — but it declares nothing.
+    )
+    # Read-only task ⇒ not a writer ⇒ no worktree even with a factory wired.
+    res = _run_guard_pipeline(clone, tasks, runner, dag_proof=dag_proof)
+    assert not is_failed_attempt(res[0])
+    assert res[0]["status"] == "done"
+
+
+def test_blocked_and_abandoned_envelopes_untouched_by_guard(tmp_path):
+    """GUARD ONLY FIRES ON `done`: a writer that declares `writes` but returns a
+    `blocked` (or `abandoned`) envelope — having written nothing — is UNCHANGED by
+    the guard.  The guard checks ONLY `done`; a non-`done` terminal status is the
+    worker's own honest signal and must pass through verbatim."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "blk",
+            "parallel_group": 0,
+            "writes": ["b.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "abd",
+            "parallel_group": 0,
+            "writes": ["a.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _DeclaredWriteRunner(
+        declared={"blk": ["b.txt"], "abd": ["a.txt"]},
+        writes_files={"blk": False, "abd": False},  # neither writes its declared file
+        statuses={"blk": "blocked", "abd": "abandoned"},
+    )
+    res = _run_guard_pipeline(clone, tasks, runner, dag_proof=dag_proof)
+    by_status = {r["status"] for r in res if not is_failed_attempt(r)}
+    # Both terminal envelopes pass through verbatim — the guard did NOT convert
+    # them to failed attempts even though their declared files are absent.
+    assert by_status == {"blocked", "abandoned"}
+    assert all(not is_failed_attempt(r) for r in res)
+
+
+def test_false_done_guard_unisolated_writer_checks_clone(tmp_path):
+    """PATH-RESOLUTION (un-isolated): with NO worktree_factory a writer runs in
+    the clone itself (``run_cwd == clone_dir``); the guard must resolve the
+    declared `writes` against the CLONE.  A `done` writer that did not create its
+    declared file in the clone is rejected; one that did is accepted."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "u",
+            "parallel_group": 0,
+            "writes": ["u.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    # Missing declared write, un-isolated → rejected (guard resolves vs the clone).
+    runner_missing = _DeclaredWriteRunner(declared={"u": ["u.txt"]}, writes_files={"u": False})
+    res_missing = _run_guard_pipeline(
+        clone, tasks, runner_missing, dag_proof=dag_proof, isolated=False
+    )
+    assert is_failed_attempt(res_missing[0])
+    assert not (clone / "u.txt").exists()
+
+
+def test_missing_declared_writes_helper_resolves_repo_relative(tmp_path):
+    """UNIT: ``_missing_declared_writes`` resolves the repo-relative declared
+    `writes` against the worktree dir (not CWD), reports the absent ones, and
+    treats a present (even empty) path as satisfied — existence is the contract,
+    content is not over-constrained."""
+    import scripts.host_scheduler as hs
+
+    wt = tmp_path / "wt"
+    (wt / "pkg").mkdir(parents=True)
+    (wt / "present.txt").write_text("x")
+    (wt / "empty.txt").write_text("")  # present-but-empty ⇒ satisfied (not missing)
+    (wt / "pkg" / "nested.py").write_text("y")
+    task = {"task_id": "t", "writes": ["present.txt", "empty.txt", "pkg/nested.py", "absent.txt"]}
+    missing = hs._missing_declared_writes(task, wt)
+    assert missing == ["absent.txt"]
+    # A task that declares no writes is trivially satisfied.
+    assert hs._missing_declared_writes({"task_id": "t"}, wt) == []

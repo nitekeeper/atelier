@@ -255,25 +255,56 @@ Atelier now **AUTO-SELECTS the model tier per task** — it no longer defaults e
 ### First-session settings recommendation on version upgrade
 
 When atelier's plugin version is bumped, the **FIRST session on the new version
-OFFERS** (consent-gated, default **No**) to apply the cost-optimized recommended
-settings `{model: sonnet, effortLevel: high, autoCompactEnabled: true}` to the
-user's global `~/.claude/settings.json`. `scripts/recommended_settings.py`'s
-`RECOMMENDED` constant is the **single source of truth** for these values (the
-family alias `sonnet`, version-resilient — not a pinned `claude-sonnet-*` id).
+OFFERS** (consent-gated) a choice between **two named settings PROFILES** — or
+skip — for the user's global `~/.claude/settings.json`. **Pressing Enter / an
+empty answer APPLIES the recommended `cost-effective` default** (the menu states
+this explicitly, so it is informed consent — not a silent guess); an explicit
+skip writes nothing.
+`scripts/recommended_settings.py`'s `PROFILES` registry (+ `DEFAULT_PROFILE`) is
+the **single source of truth** for these postures (all model / subagent-model
+values are version-resilient family aliases — `sonnet`/`opus`/`haiku` — not
+pinned `claude-*` ids):
+
+- **`cost-effective`** — the DEFAULT / *recommended* profile, applied when the
+  user presses Enter. Orchestrator `model: sonnet` at `effortLevel: high`;
+  subagents via `env.CLAUDE_CODE_SUBAGENT_MODEL: haiku`; `autoCompactEnabled: true`.
+- **`code-quality`** — optional. Orchestrator `model: opus` with
+  `ultracode: true` (the CLI resolves `ultracode` ⇒ xhigh orchestrator effort;
+  it is a SEPARATE top-level boolean, NOT an `effortLevel` value); subagents via
+  `env.CLAUDE_CODE_SUBAGENT_MODEL: sonnet`; `autoCompactEnabled: true`.
+
+The two profiles' `effortLevel` / `ultracode` keys are **mutually exclusive**, so
+the writer RECONCILES them: applying `cost-effective` clears a stale `ultracode`;
+applying `code-quality` clears a stale `effortLevel`.
+
+**Subagent control is MODEL-ONLY.** The harness controls the subagent model via
+the top-level `env.CLAUDE_CODE_SUBAGENT_MODEL` var (an alias / id / `inherit`).
+There is **no per-subagent effort knob** anywhere in the harness — **subagent
+effort is not independently controllable**, so neither profile sets it. Only the
+orchestrator session's effort is set (`effortLevel: high` for cost-effective;
+`ultracode: true` ⇒ xhigh for code-quality).
 
 Properties:
 
-- **Consent-gated (default No).** The y/N prompt lives in
-  `internal/settings-recommendation/SKILL.md`; Python (`recommended_settings`)
-  only writes on the explicit `apply_recommended()` call. `eligibility()` /
+- **Consent-gated; Enter applies the recommended default.** The menu prompt lives
+  in `internal/settings-recommendation/SKILL.md`; **pressing Enter / an empty
+  answer APPLIES the recommended `cost-effective` profile** (the menu states this,
+  so it is informed consent). An **explicit skip (`s`/`skip`/`n`) writes
+  nothing**; a genuinely unrecognized non-empty typo **re-asks once** rather than
+  writing (no accidental write). Python (`recommended_settings`) only writes on
+  the explicit `apply_profile(<id>)` call the SKILL makes; `eligibility()` /
   `maybe_offer()` / `compute_changes()` are strictly read-only.
-- **Opt-in, once per version (idempotent).** Recording the version (applied OR
-  declined) via `write_state` means the same version never re-prompts; an
-  already-applied posture is a silent no-op; a NEW version re-offers. Delete
-  `~/.atelier/settings_rec_state.json` to re-trigger or disable for the current
-  version.
-- **Merge-safe + atomic.** Only those 3 keys are set; every existing top-level
-  key (`env`, `enabledPlugins`, `permissions`, `statusLine`, `hooks`, …) is
+- **Opt-in, once per version (idempotent).** Recording the version (a profile id
+  OR `declined`) via `write_state` means the same version never re-prompts; a
+  posture where every profile is already applied is a silent no-op; a NEW version
+  re-offers. Delete `~/.atelier/settings_rec_state.json` to re-trigger or disable
+  for the current version.
+- **Merge-safe + atomic + reconciling.** Only the managed top-level keys
+  (`model`, `effortLevel`, `ultracode`, `autoCompactEnabled`) and the managed env
+  key (`CLAUDE_CODE_SUBAGENT_MODEL`) are touched; the stale mutually-exclusive key
+  is cleared on a profile switch; the `env` block is nested-merged so unmanaged
+  env keys (e.g. `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`) survive; every other
+  top-level key (`enabledPlugins`, `permissions`, `statusLine`, `hooks`, …) is
   preserved; the write is a temp-file + `os.replace`.
 - **Distinct from the per-task `model_tier` policy.** This sets the session
   DEFAULT in `~/.claude/settings.json`; the per-task tier policy applies on top,
@@ -287,20 +318,23 @@ read-only `settings_rec_offer` on both `proceed-local` and `proceed-memex`) and
 referenced from every user-facing entry skill.
 
 **Enforcement model (advisory presentation over code-enforced safety).** The
-*presentation* of the y/N offer is **advisory**: like every Atelier agent
+*presentation* of the profile menu is **advisory**: like every Atelier agent
 procedure (see `## Skills and procedures`), it depends on the agent reading
 `internal/settings-recommendation/SKILL.md` and following it — there is no code
-path that forces the prompt to appear, so an agent that skips the step simply
+path that forces the menu to appear, so an agent that skips the step simply
 leaves the offer un-surfaced (a no-op, never a wrong write). The gap is
 minimized by referencing the procedure from ALL FIVE entry skills (`run`,
 `load`, `save`, `ingest`, `migrate`) so every command path carries the pointer,
 which the skill-contract test pins. What IS code-enforced — and never advisory —
 is the **safety**: `recommended_settings`'s compute/eligibility paths are
-strictly read-only, the only writer is the explicit `apply_recommended()` call
-the procedure makes on a `y`, the write is merge-safe + atomic, and
-`managed-settings.json` is never touched. So a skipped offer costs only the
-convenience of being asked; it can never clobber settings, write without
-consent, or re-prompt a handled version.
+strictly read-only, the only writer is the explicit `apply_profile(<id>)` call
+the procedure makes (on Enter it applies the recommended `cost-effective`
+default with informed consent; an explicit skip writes nothing; an unrecognized
+non-empty typo re-asks once rather than writing), the write is merge-safe +
+atomic + reconciling, and `managed-settings.json` is never touched. So a *skipped*
+offer (an agent that never surfaces the menu, or a user who explicitly skips)
+costs only the convenience of the default; it can never clobber settings, write
+without an explicit consented call, or re-prompt a handled version.
 
 ### Per-skill / role table — the DEFAULT/fallback when the policy has no signal
 

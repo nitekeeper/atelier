@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+**Settings recommendation is now a two-profile choice.** The first-session,
+once-per-version settings offer is upgraded from a binary `y/N` to a
+NAMED-PROFILE menu — `cost-effective` (the recommended default) vs
+`code-quality` — plus an explicit skip. Each profile now also recommends a
+**subagent model** via the `CLAUDE_CODE_SUBAGENT_MODEL` env key. **Pressing Enter
+(an empty answer) APPLIES the recommended `cost-effective` profile** (informed
+consent — the menu states that Enter writes the posture to
+`~/.claude/settings.json`); an explicit skip (`s`/`skip`/`n`) writes nothing, and
+an unrecognized non-empty typo re-asks once rather than writing.
+
+### Added
+- **Two named settings profiles** in `scripts/recommended_settings.py`:
+  `cost-effective` (orchestrator `model: sonnet` @ `effortLevel: high`, subagents
+  `haiku`, `autoCompactEnabled`) and `code-quality` (orchestrator `model: opus`
+  with `ultracode: true` ⇒ xhigh effort, subagents `sonnet`, `autoCompactEnabled`).
+  Exposed as `PROFILES` / `DEFAULT_PROFILE`; all values are version-resilient
+  family aliases.
+- **Subagent-model recommendation** via the top-level
+  `env.CLAUDE_CODE_SUBAGENT_MODEL` key (`scripts/recommended_settings.py`). The
+  writer nested-merges `env`, preserving unmanaged env keys (e.g.
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`).
+- **Managed-key reconciliation** (`scripts/recommended_settings.py`):
+  `apply_profile(profile_id)` sets the chosen profile's managed keys and CLEARS
+  the stale mutually-exclusive key (applying `cost-effective` removes a stale
+  `ultracode`; applying `code-quality` removes a stale `effortLevel`).
+
+### Changed
+- **`internal/settings-recommendation/SKILL.md`** — the binary `[y/N]` block is
+  replaced by a profile MENU (cost-effective marked recommended, code-quality,
+  explicit skip). **Enter / empty ⇒ apply `cost-effective`** (the reversed
+  consent default, with informed-consent wording); explicit skip ⇒ write nothing;
+  unrecognized non-empty input ⇒ re-ask once. `apply_profile(<id>)` +
+  `write_state(version, <id>|'declined')` wiring.
+- **`scripts/recommended_settings.py`** — `compute_changes(current, profile)` now
+  returns a per-profile diff (`set`/`env_set`/`remove`/`empty`); `maybe_offer()`
+  carries `default_profile` + a per-profile `profiles` map; `write_state` accepts
+  the profile ids ∪ `declined` (and tolerates OLD-format state files on read).
+  `apply_recommended()` is kept as a thin back-compat wrapper for the default
+  profile.
+- **`CLAUDE.md`** (`## Model recommendations`) — documents the two profiles, the
+  `CLAUDE_CODE_SUBAGENT_MODEL` mechanism, and that **subagent EFFORT is not
+  independently controllable** by the harness (subagent control is MODEL-ONLY).
+
 ## v1.8.0 — 2026-06-12
 
 **Loom agent-chat comms mandatory when available.** Loom inter-agent chat is

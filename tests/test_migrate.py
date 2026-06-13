@@ -104,6 +104,8 @@ def test_apply_shared_then_local_creates_all_tables(tmp_path):
         "bridge_requests",
         # shared/ tables (011 — content-addressed out-of-band payload store)
         "bridge_payloads",
+        # shared/ tables (012 — deterministic host engine result journal)
+        "journal_attempts",
         # local-only/ tables
         "roles",
         "agents",

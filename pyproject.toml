@@ -43,6 +43,13 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # Opt-in live tests that invoke the real `claude` CLI (subscription auth).
+    # Deselected by default; run with `pytest -m live`. See tests/test_cli_live_smoke.py.
+    "live: hits the real claude CLI / network — deselected by default",
+]
+# Keep the live smoke out of the default gate; `-m live` re-selects it.
+addopts = "-m 'not live'"
 
 [tool.bandit]
 exclude_dirs = ["tests", ".github", "__pycache__", ".claude"]

@@ -189,6 +189,67 @@ _CONTEXT_BUDGET_RULE = (
     "return; do not just keep going."
 )
 
+# ── ATELIER_TRANSPORT — bridge (default) | cli (M3 deterministic host) ──────
+#
+# The transport selector for the deterministic-host migration (M3). `bridge`
+# (the default) is the production SQLite-bridge path — UNCHANGED. `cli` is the
+# M3 `CliDispatchTools` path: each attempt is one metered `claude -p
+# --json-schema` subprocess whose terminal `structured_output` IS the reply
+# envelope (no bridge wire, no `bridge_send.py`). This env read changes NO
+# default behavior — it only re-points `compose_briefing`'s CHANNELS /
+# REPLY-CONTRACT guidance when the operator explicitly opts into `cli`.
+TRANSPORT_ENV_VAR = "ATELIER_TRANSPORT"
+TRANSPORT_BRIDGE = "bridge"
+TRANSPORT_CLI = "cli"
+VALID_TRANSPORTS: frozenset[str] = frozenset({TRANSPORT_BRIDGE, TRANSPORT_CLI})
+
+
+def resolve_transport(env: Mapping[str, str] = os.environ) -> str:
+    """Resolve the dispatch transport: ``ATELIER_TRANSPORT`` env → ``bridge``.
+
+    Returns ``"bridge"`` (the production default) unless ``ATELIER_TRANSPORT`` is
+    explicitly set to ``"cli"``. An UNKNOWN value raises
+    :class:`UnknownTransportError` (fail-loud — a typo must not silently select a
+    transport the operator did not mean). Empty / unset → ``bridge``.
+    """
+    raw = (env.get(TRANSPORT_ENV_VAR) or "").strip()
+    if not raw:
+        return TRANSPORT_BRIDGE
+    if raw not in VALID_TRANSPORTS:
+        raise UnknownTransportError(raw)
+    return raw
+
+
+# ── CLI-mode CHANNELS / REPLY-CONTRACT addendum (M3) ───────────────────────
+#
+# In `cli` transport the worker is a one-shot `claude -p --json-schema` call:
+# there is NO bridge, NO `bridge_send.py`, NO peer wire. Its terminal
+# `structured_output` (matching ENVELOPE_SCHEMA) IS its reply. This addendum
+# re-points the bridge CHANNELS/REPLY-CONTRACT guidance accordingly. It is
+# APPENDED to the rendered briefing (same discipline as `_TERSE_OUTPUT_RULE` /
+# `_CONTEXT_BUDGET_RULE`: opens with "\n\n", its own heading, OUTSIDE the
+# template's untrusted TASK fence) ONLY when `compose_briefing` is called in
+# `cli` transport. The bridge path appends nothing — its briefing is byte-stable
+# (the template's bridge CHANNELS block stands as the single source of truth).
+_CLI_TRANSPORT_RULE = (
+    "\n\n# TRANSPORT OVERRIDE — CLI MODE (read last; SUPERSEDES the CHANNELS + "
+    "REPLY CONTRACT sections above)\n\n"
+    "You are a one-shot, ephemeral agent. There is NO bridge, NO `bridge_send.py` "
+    "/ `bridge_read.py`, and NO live peers to message — IGNORE every "
+    "`bridge_send.py` / `bridge_read.py` / heartbeat command in the CHANNELS "
+    "section above; those commands do not exist in this run. Do NOT attempt "
+    "inter-agent messaging.\n\n"
+    "RETURN YOUR RESULT as the structured final message matching the provided "
+    "json-schema (the TM-006 `task_result` envelope: `type` / `task_id` / "
+    "`attempt` / `status` / `artifacts` / `notes_md`). That structured output IS "
+    "your reply to the team-lead — the deterministic host reads it directly as "
+    "the return value of your invocation; you do not send it anywhere. Emit it "
+    "exactly once, as your terminal message. The abandon grammar, the four "
+    "closure tokens, and the artifacts contract are UNCHANGED — only the delivery "
+    "channel changes (structured return value, not a bridge send)."
+)
+
+
 # Control-char sweep — C0 minus TAB (\x09), LF (\x0a), CR (\x0d). Bridge
 # payloads MUST be stripped of these before they reach the template per the
 # comment block at the top of internal/team-mode-templates/_base.j2.
@@ -252,6 +313,24 @@ class DispatchError(RuntimeError):
     """Base class for explicit dispatch failures. Subclasses carry actionable
     messages so the operator (or the calling skill) can fix at source rather
     than chase a generic stack trace."""
+
+
+class UnknownTransportError(DispatchError):
+    """Raised by :func:`resolve_transport` when ``ATELIER_TRANSPORT`` carries a
+    value outside :data:`VALID_TRANSPORTS`.
+
+    A :class:`DispatchError` subclass (operator-facing fail-loud), mirroring
+    :class:`UnknownDispatchModeError`: a bad transport is a configuration error
+    to fix at source, not a worker outcome to absorb. A typo must fail loud, it
+    must not silently select the default.
+    """
+
+    def __init__(self, transport: Any) -> None:
+        self.transport = transport
+        super().__init__(
+            f"unknown transport {transport!r}; expected one of "
+            f"{sorted(VALID_TRANSPORTS)} (env var {TRANSPORT_ENV_VAR})."
+        )
 
 
 class MissingRenderVarsError(ValueError):
@@ -402,6 +481,7 @@ def compose_briefing(
     idempotency_seed: str | None = None,
     from_agent_self: str | None = None,
     template_env: Environment | None = None,
+    transport: str | None = None,
 ) -> str:
     """Assemble + render a worker's inaugural spawn prompt.
 
@@ -439,8 +519,21 @@ def compose_briefing(
     UNAFFECTED in either case — Loom never carries the control-plane
     (``task_result`` / TM-006 always rides the bridge).
 
+    ``transport`` selects the dispatch transport (M3). ``None`` (the default)
+    resolves ``ATELIER_TRANSPORT`` from the environment via
+    :func:`resolve_transport` (→ ``"bridge"`` unless explicitly ``"cli"``). The
+    bridge path is BYTE-STABLE — nothing is appended, the template's bridge
+    CHANNELS block stands. In ``"cli"`` transport a CLI CHANNELS/REPLY-CONTRACT
+    addendum (:data:`_CLI_TRANSPORT_RULE`) is appended AFTER the terse +
+    context-budget rules, re-pointing "use bridge_send.py" → "return your result
+    as the structured final message matching the json-schema". The
+    ``team_chat`` / loom wiring is independent of this and untouched.
+
     Returns the fully-rendered briefing string.
     """
+    transport = resolve_transport() if transport is None else transport
+    if transport not in VALID_TRANSPORTS:
+        raise UnknownTransportError(transport)
     if template_env is None:
         template_env = make_template_env()
 
@@ -513,7 +606,15 @@ def compose_briefing(
     # This is the single load-bearing channel that reaches a one-shot worker — the
     # PostToolUse/PreCompact hooks fire only in the orchestrator session, never in
     # a spawned worker (see `_CONTEXT_BUDGET_RULE`).
-    return rendered.rstrip() + _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
+    #
+    # CLI-transport addendum (M3) — appended LAST, ONLY in `cli` transport, so
+    # the bridge briefing is byte-identical to before (bridge appends nothing
+    # here). It re-points the CHANNELS/REPLY-CONTRACT guidance to "return the
+    # structured final message" (see `_CLI_TRANSPORT_RULE`).
+    body = rendered.rstrip() + _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
+    if transport == TRANSPORT_CLI:
+        body += _CLI_TRANSPORT_RULE
+    return body
 
 
 # ── Wave tracking + heartbeat monitoring ──────────────────────────────────

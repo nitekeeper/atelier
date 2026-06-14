@@ -1,9 +1,10 @@
 """Tests for ATELIER_TRANSPORT resolution + the CLI CHANNELS/REPLY-CONTRACT
 re-point in compose_briefing (M3 deliverable #2).
 
-The default transport is `bridge` and the bridge briefing is BYTE-STABLE — the
-CLI addendum is appended ONLY in `cli` transport, leaving the bridge path
-untouched.
+Since M7 the default transport is `cli` (the deterministic-host pipeline);
+`ATELIER_TRANSPORT=bridge` is the explicit escape hatch. The bridge briefing is
+BYTE-STABLE when bridge is selected (explicitly or via the escape hatch) — the
+CLI addendum is appended in `cli` transport, leaving the bridge path untouched.
 """
 
 from __future__ import annotations
@@ -19,10 +20,18 @@ from scripts.dispatch import (
 )
 
 
-def test_resolve_transport_defaults_to_bridge():
-    assert resolve_transport(env={}) == TRANSPORT_BRIDGE
-    assert resolve_transport(env={"ATELIER_TRANSPORT": ""}) == TRANSPORT_BRIDGE
-    assert resolve_transport(env={"ATELIER_TRANSPORT": "  "}) == TRANSPORT_BRIDGE
+def test_resolve_transport_defaults_to_cli():
+    """M7 flip: an unset / empty / whitespace ATELIER_TRANSPORT now resolves to
+    cli (the host pipeline default)."""
+    assert resolve_transport(env={}) == TRANSPORT_CLI
+    assert resolve_transport(env={"ATELIER_TRANSPORT": ""}) == TRANSPORT_CLI
+    assert resolve_transport(env={"ATELIER_TRANSPORT": "  "}) == TRANSPORT_CLI
+
+
+def test_resolve_transport_bridge_escape_hatch():
+    """ATELIER_TRANSPORT=bridge is the explicit escape hatch back to the legacy
+    bridge path (highest-precedence env override, survives the M7 default flip)."""
+    assert resolve_transport(env={"ATELIER_TRANSPORT": "bridge"}) == TRANSPORT_BRIDGE
 
 
 def test_resolve_transport_cli_opt_in():
@@ -70,11 +79,30 @@ def test_cli_briefing_appends_repoint_addendum():
     assert "IGNORE every" in b
 
 
-def test_bridge_is_the_default_when_transport_unset(monkeypatch):
-    """compose_briefing(transport=None) resolves the env → bridge by default, so
-    an existing caller (no transport arg, no env) gets the byte-stable bridge
-    briefing with NO CLI addendum."""
+def test_cli_is_the_default_when_transport_unset(monkeypatch):
+    """M7 flip: compose_briefing(transport=None) resolves the env → cli by
+    default, so an existing caller (no transport arg, no env) now gets the CLI
+    addendum (the host pipeline is the default transport)."""
     monkeypatch.delenv("ATELIER_TRANSPORT", raising=False)
+    b = compose_briefing(
+        role_id="be-1",
+        task_id="t-1",
+        persona_profile_text="P",
+        phase_procedure_text="PH",
+        task_brief="x",
+        team_id="t",
+        team_lead_name="l",
+        wave_id="w",
+        wave_phase="tdd:green",
+        deadline_iso="2026-06-13T00:00:00Z",
+    )
+    assert "TRANSPORT OVERRIDE — CLI MODE" in b
+
+
+def test_bridge_escape_hatch_briefing_is_byte_stable(monkeypatch):
+    """ATELIER_TRANSPORT=bridge (the escape hatch) yields the byte-stable bridge
+    briefing with NO CLI addendum, even after the M7 default flip."""
+    monkeypatch.setenv("ATELIER_TRANSPORT", "bridge")
     b = compose_briefing(
         role_id="be-1",
         task_id="t-1",

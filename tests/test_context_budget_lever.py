@@ -29,7 +29,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from scripts.dispatch import _CONTEXT_BUDGET_RULE, _TERSE_OUTPUT_RULE, compose_briefing
+from scripts.dispatch import (
+    _CLI_TRANSPORT_RULE,
+    _CONTEXT_BUDGET_RULE,
+    _TERSE_OUTPUT_RULE,
+    TRANSPORT_BRIDGE,
+    TRANSPORT_CLI,
+    compose_briefing,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,7 +48,15 @@ _DEV_SUBAGENT_PROMPTS = (
 
 
 def _compose_kwargs(**overrides):
-    """Minimal valid kwarg set for compose_briefing (real on-disk sources)."""
+    """Minimal valid kwarg set for compose_briefing (real on-disk sources).
+
+    Pins ``transport=TRANSPORT_BRIDGE`` so the AI-1 budget-rule ORDER invariants
+    (the budget rule is the briefing TAIL) hold deterministically. Since the M7
+    flip the env default transport is ``cli``, which appends ``_CLI_TRANSPORT_RULE``
+    AFTER the budget rule; this context-budget lever's order contract is defined
+    against the byte-stable bridge briefing, so the fixture pins bridge explicitly
+    (a test that needs the cli addendum overrides ``transport``).
+    """
     rules = (REPO_ROOT / "internal" / "team-mode-rules" / "SKILL.md").read_text(encoding="utf-8")
     base = {
         "role_id": "backend-engineer-1",
@@ -54,6 +69,7 @@ def _compose_kwargs(**overrides):
         "wave_id": "wave-1",
         "wave_phase": "implement",
         "deadline_iso": "2026-06-07T22:00:00Z",
+        "transport": TRANSPORT_BRIDGE,
     }
     assert rules, "rules SKILL.md is empty — fixture broken"
     base.update(overrides)
@@ -106,6 +122,46 @@ def test_ai1_context_budget_rule_present_in_composed_briefing():
     assert _CONTEXT_BUDGET_RULE in body
     # It is the briefing's FINAL guidance section (appended after the terse rule).
     assert body.rstrip().endswith(_CONTEXT_BUDGET_RULE.rstrip())
+
+
+def test_ai1_context_budget_rule_present_in_cli_default_briefing():
+    """LIVE proof on the CLI/host transport — the M7 PRODUCTION DEFAULT. The
+    bridge-pinned liveness test above cannot catch a cli-only drop of the budget
+    rule (the cli branch appends `_CLI_TRANSPORT_RULE` after the budget rule, so
+    the budget rule is no longer the literal tail). This asserts the rule survives
+    on the cli path and its position is the STABLE
+    terse → context-budget → cli-transport order. NEUTER: dropping the
+    `+ _CONTEXT_BUDGET_RULE` append on the cli branch makes this RED."""
+    # _compose_kwargs(transport=TRANSPORT_CLI) sets transport in the kwargs (the
+    # base pins bridge; this override flips it to cli for this test).
+    body = compose_briefing(**_compose_kwargs(transport=TRANSPORT_CLI))
+    # (a) the budget rule reaches the cli-default briefing.
+    assert _CONTEXT_BUDGET_RULE in body
+    # (b) stable order: terse < context-budget < cli-transport addendum (the cli
+    #     addendum is the tail on this path, so the budget rule is NOT the tail —
+    #     hence the bridge-pinned `endswith` test above does not cover this).
+    terse_at = body.find(_TERSE_OUTPUT_RULE)
+    budget_at = body.find(_CONTEXT_BUDGET_RULE)
+    cli_at = body.find(_CLI_TRANSPORT_RULE)
+    assert terse_at != -1 and budget_at != -1 and cli_at != -1
+    assert terse_at < budget_at < cli_at, (
+        "cli briefing order must be terse → context-budget → cli-transport addendum"
+    )
+
+
+def test_ai1_context_budget_rule_present_under_cli_env_default(monkeypatch):
+    """The literal env-default path: with ATELIER_TRANSPORT unset, compose_briefing
+    resolves the M7 default (cli) and STILL carries the budget rule (the lever is
+    not env-default-flaky on the production default)."""
+    monkeypatch.delenv("ATELIER_TRANSPORT", raising=False)
+    # No transport arg → compose_briefing resolves the env default (cli since M7).
+    kwargs = _compose_kwargs()
+    kwargs.pop("transport")
+    body = compose_briefing(**kwargs)
+    assert _CONTEXT_BUDGET_RULE in body
+    # The cli addendum is present (proving the env default resolved to cli, not a
+    # stale bridge default).
+    assert _CLI_TRANSPORT_RULE in body
 
 
 def test_ai1_budget_rule_after_untrusted_fence_and_after_terse_rule():

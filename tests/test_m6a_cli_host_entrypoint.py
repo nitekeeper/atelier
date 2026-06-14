@@ -470,24 +470,30 @@ def test_loom_structural_backstop_can_fail_on_a_leaked_loom_briefing(tmp_path):
     )
 
 
-# ── Default-transport guard: unset/default still selects BRIDGE ──────────────
+# ── Default-transport guard: unset/default selects CLI (host) since M7 ────────
 
 
-def test_default_transport_is_bridge_no_host_routing():
-    """ATELIER_TRANSPORT unset / empty / whitespace resolves to bridge, and
-    is_host_transport is False — the default path is NOT routed through the host
-    pipeline (no behavior change to the default)."""
-    assert resolve_transport(env={}) == TRANSPORT_BRIDGE
-    assert resolve_transport(env={"ATELIER_TRANSPORT": ""}) == TRANSPORT_BRIDGE
-    assert resolve_transport(env={"ATELIER_TRANSPORT": "  "}) == TRANSPORT_BRIDGE
-    assert is_host_transport(env={}) is False
-    assert is_host_transport(env={"ATELIER_TRANSPORT": ""}) is False
+def test_default_transport_is_cli_routes_to_host():
+    """M7 flip: ATELIER_TRANSPORT unset / empty / whitespace resolves to cli, and
+    is_host_transport is True — the default path IS routed through the host
+    pipeline. ATELIER_TRANSPORT=bridge is the explicit escape hatch."""
+    assert resolve_transport(env={}) == TRANSPORT_CLI
+    assert resolve_transport(env={"ATELIER_TRANSPORT": ""}) == TRANSPORT_CLI
+    assert resolve_transport(env={"ATELIER_TRANSPORT": "  "}) == TRANSPORT_CLI
+    assert is_host_transport(env={}) is True
+    assert is_host_transport(env={"ATELIER_TRANSPORT": ""}) is True
+    # Escape hatch: an explicit bridge override still selects the legacy path.
+    assert resolve_transport(env={"ATELIER_TRANSPORT": "bridge"}) == TRANSPORT_BRIDGE
+    assert is_host_transport(env={"ATELIER_TRANSPORT": "bridge"}) is False
 
 
 def test_cli_transport_routes_to_host():
-    """ATELIER_TRANSPORT=cli selects the host path (is_host_transport True)."""
+    """ATELIER_TRANSPORT=cli selects the host path (is_host_transport True). The
+    M7 default (env unset) ALSO selects the host path; only an explicit
+    ATELIER_TRANSPORT=bridge override falls back to the bridge."""
     assert resolve_transport(env={"ATELIER_TRANSPORT": "cli"}) == TRANSPORT_CLI
     assert is_host_transport(env={"ATELIER_TRANSPORT": "cli"}) is True
+    assert is_host_transport(env={"ATELIER_TRANSPORT": "bridge"}) is False
 
 
 def test_dispatch_host_pipeline_routes_through_real_pipeline(tmp_path):
@@ -497,11 +503,13 @@ def test_dispatch_host_pipeline_routes_through_real_pipeline(tmp_path):
     return EQUAL envelopes. (Gutting dispatch_host_pipeline to `return []` must
     make this RED — it does not just forward, it must actually dispatch.)
 
-    Also asserts the default (env={}) does NOT select this path (is_host_transport
-    False) — the bridge/SKILL never reaches dispatch_host_pipeline."""
-    # Routing predicate: cli → host path; default → NOT this path.
+    Also asserts the M7 default (env={}) SELECTS this host path
+    (is_host_transport True) and only an explicit bridge override does not — the
+    SKILL routes the default through dispatch_host_pipeline."""
+    # Routing predicate: cli AND the M7 default → host path; explicit bridge → not.
     assert is_host_transport(env={"ATELIER_TRANSPORT": "cli"}) is True
-    assert is_host_transport(env={}) is False
+    assert is_host_transport(env={}) is True
+    assert is_host_transport(env={"ATELIER_TRANSPORT": "bridge"}) is False
 
     from scripts.result_journal import ResultJournal
 
@@ -542,6 +550,146 @@ def test_dispatch_host_pipeline_routes_through_real_pipeline(tmp_path):
     assert routed, "dispatch_host_pipeline returned nothing — it did not dispatch"
     assert {r["task_id"] for r in routed} == {"DOC", "SEC"}
     assert {r["task_id"]: r for r in routed} == {r["task_id"]: r for r in ref}
+
+
+# ── The host-drive SKILL's load-bearing data contract: the escalate_fn COLLECTOR
+#    closure (Report-4 fire-and-forget trap) + the flat-list abandon taxonomy ──
+
+
+def _abandon_or_done_envelope(abandon_ids, category="scope"):
+    """structured_output that echoes a worker-authored ``abandoned`` envelope
+    (TM-006 ``ABANDON:`` line-1) for any task in ``abandon_ids`` and a ``done``
+    envelope otherwise. The dispatched task_id/attempt are echoed from the -p
+    prompt so validate_envelope (anti-spoof) accepts the reply for any task."""
+
+    def _structured_output(argv, cwd):
+        prompt = _val(argv, "-p")
+        m = _PROMPT_RE.search(prompt)
+        task_id, attempt = m.group(1), int(m.group(2))
+        if task_id in abandon_ids:
+            return {
+                "type": "task_result",
+                "task_id": task_id,
+                "attempt": attempt,
+                "status": "abandoned",
+                # A worker `abandoned` envelope must carry a NON-empty artifacts
+                # list (validate_envelope allows empty only for blocked/failed/
+                # needs-input) so it validates as a genuine worker self-abandon —
+                # an empty list would be rejected → a _FailedAttempt sentinel
+                # (which is a DIFFERENT taxonomy branch).
+                "artifacts": [{"path": "partial.py", "sha": "s"}],
+                "notes_md": f"ABANDON: {category}: out of declared scope",
+            }
+        return {
+            "type": "task_result",
+            "task_id": task_id,
+            "attempt": attempt,
+            "status": "done",
+            "artifacts": [{"path": "f.py", "sha": "s"}],
+            "notes_md": "ok",
+        }
+
+    return _structured_output
+
+
+def test_host_drive_escalate_fn_collector_captures_and_taxonomy(tmp_path):
+    """The host-drive SKILL section's load-bearing data contract (Report 4): the
+    host path's ``escalate_fn`` is GUARANTEED-emitting FIRE-AND-FORGET — there is
+    NO post-return escalation accumulator. So the recipe MUST inject an
+    ``escalate_fn`` CLOSURE that appends each escalation to a captured list BEFORE
+    the await, then read that list AFTER. This test proves that exact pattern over
+    the PRODUCTION seam ``dispatch_host_pipeline`` (what the SKILL awaits), over a
+    DAG with an abandoned upstream + a cascade-blocked dependent:
+
+      * the injected collector closure captured BOTH escalations (the worker
+        self-abandon AND the cascade), proving escalations are NOT dropped;
+      * the returned FLAT list distinguishes the engine-abandon (cascade
+        ``_engine_abandon`` / category 'blocked' / upstream_task_id) from the
+        worker self-abandon envelope (a validated ``type=='task_result'`` with no
+        ``_engine_abandon``).
+
+    A recipe that expected a bridge-style ``dispatcher.escalations`` accumulator
+    would SILENTLY DROP these — there is none on the host path."""
+    # up (abandons) <- down (depends_on up, cascades blocked). No `writes` on
+    # either, so no worktree/clone needed (the SKILL's no-write case).
+    tasks = [
+        {
+            "task_id": "up",
+            "parallel_group": 0,
+            "assigned_persona": "backend-engineer-1",
+            "phase": "qa",
+            "description": "do the upstream work",
+        },
+        {
+            "task_id": "down",
+            "parallel_group": 1,
+            "assigned_persona": "backend-engineer-1",
+            "phase": "qa",
+            "depends_on": ["up"],
+            "description": "consume the upstream output",
+        },
+    ]
+
+    # The collector pattern the host-drive SKILL section mandates: a captured list
+    # + a closure appended BEFORE the await, read AFTER.
+    escalations: list[dict] = []
+
+    def _collect(escalation):
+        escalations.append(dict(escalation))
+
+    from scripts.result_journal import ResultJournal
+
+    clone = tmp_path / "experiment" / "o-r"
+    clone.mkdir(parents=True, exist_ok=True)
+    runner = FakeCliRunner(structured_output=_abandon_or_done_envelope({"up"}))
+
+    envelopes = asyncio.run(
+        dispatch_host_pipeline(
+            tasks,
+            clone_dir=str(clone),
+            budget=BudgetPool(total_tokens=10_000_000),
+            journal=ResultJournal(),
+            runner=runner,
+            env={},
+            escalate_fn=_collect,
+        )
+    )
+
+    # (1) The collector captured escalations — NOT dropped (the Report-4 trap).
+    #     Both the worker self-abandon (up) and the cascade (down) escalate.
+    by_task = {e["task_id"]: e for e in escalations}
+    assert "up" in by_task, f"worker self-abandon must escalate, got {escalations}"
+    assert "down" in by_task, f"cascade-blocked dependent must escalate, got {escalations}"
+    # The worker self-abandon escalates under the PARSED notes_md category, not
+    # the literal 'abandoned'.
+    assert by_task["up"]["category"] == "scope"
+    # The cascade escalates 'blocked' naming the upstream.
+    assert by_task["down"]["category"] == "blocked"
+    assert by_task["down"]["upstream_task_id"] == "up"
+
+    # (2) The returned FLAT list distinguishes the abandon kinds (the post-await
+    #     surfacing the SKILL renders from).
+    by_id = {e.get("task_id"): e for e in envelopes if isinstance(e, dict)}
+    # down = ENGINE abandon: carries _engine_abandon, no worker `type`.
+    down = by_id["down"]
+    assert down.get("status") == "abandoned"
+    assert down.get("_engine_abandon") is True
+    assert down.get("type") is None
+    assert down.get("category") == "blocked"
+    assert down.get("upstream_task_id") == "up"
+    # up = WORKER self-abandon: a validated envelope (type=='task_result'), NOT an
+    # engine-abandon dict.
+    up = by_id["up"]
+    assert up.get("status") == "abandoned"
+    assert up.get("type") == "task_result"
+    assert "_engine_abandon" not in up
+    # The downstream was NEVER spawned (cascade gate held it) — un-fakeable proof.
+    down_dispatched = [
+        c
+        for c in runner.calls
+        if (m := _PROMPT_RE.search(_val(c["argv"], "-p"))) and m.group(1) == "down"
+    ]
+    assert down_dispatched == [], "down must NOT be spawned — its upstream abandoned"
 
 
 def test_unknown_transport_fails_loud():

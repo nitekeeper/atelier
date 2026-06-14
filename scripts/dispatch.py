@@ -205,16 +205,20 @@ VALID_TRANSPORTS: frozenset[str] = frozenset({TRANSPORT_BRIDGE, TRANSPORT_CLI})
 
 
 def resolve_transport(env: Mapping[str, str] = os.environ) -> str:
-    """Resolve the dispatch transport: ``ATELIER_TRANSPORT`` env → ``bridge``.
+    """Resolve the dispatch transport: ``ATELIER_TRANSPORT`` env → ``cli``.
 
-    Returns ``"bridge"`` (the production default) unless ``ATELIER_TRANSPORT`` is
-    explicitly set to ``"cli"``. An UNKNOWN value raises
-    :class:`UnknownTransportError` (fail-loud — a typo must not silently select a
-    transport the operator did not mean). Empty / unset → ``bridge``.
+    Returns ``"cli"`` (the production default since M7 — the deterministic-host
+    pipeline) unless ``ATELIER_TRANSPORT`` is explicitly set. The env override is
+    consulted FIRST (highest precedence) and is preserved untouched:
+    ``ATELIER_TRANSPORT=bridge`` is the explicit ESCAPE HATCH back to the legacy
+    SQLite-bridge WaveDispatcher path (kept live during the M7 soak; deleted in
+    PR-B). An UNKNOWN value raises :class:`UnknownTransportError` (fail-loud — a
+    typo must not silently select a transport the operator did not mean). Empty /
+    unset → ``cli``.
     """
     raw = (env.get(TRANSPORT_ENV_VAR) or "").strip()
     if not raw:
-        return TRANSPORT_BRIDGE
+        return TRANSPORT_CLI
     if raw not in VALID_TRANSPORTS:
         raise UnknownTransportError(raw)
     return raw
@@ -257,9 +261,10 @@ def is_host_transport(env: Mapping[str, str] = os.environ) -> bool:
     """True iff the resolved transport is the M5/M6 deterministic-host (CLI) path.
 
     A tiny, side-effect-free predicate the orchestrator recipe (and tests) use to
-    branch dispatch construction: ``bridge`` (the default) → the WaveDispatcher
-    factory; ``cli`` → :func:`scripts.host_scheduler.run_host_pipeline_for_project`.
-    Fail-loud on an unknown transport (delegates to :func:`resolve_transport`).
+    branch dispatch construction: ``cli`` (the M7 default) →
+    :func:`scripts.host_scheduler.run_host_pipeline_for_project`; ``bridge`` (the
+    explicit escape hatch) → the legacy WaveDispatcher factory. Fail-loud on an
+    unknown transport (delegates to :func:`resolve_transport`).
     """
     return resolve_transport(env) == TRANSPORT_CLI
 

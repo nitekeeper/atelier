@@ -15,13 +15,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.dispatch import _TERSE_OUTPUT_RULE, compose_briefing
+from scripts.dispatch import _TERSE_OUTPUT_RULE, TRANSPORT_BRIDGE, compose_briefing
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _compose_kwargs(**overrides):
-    """Minimal valid kwarg set for compose_briefing (real on-disk sources)."""
+    """Minimal valid kwarg set for compose_briefing (real on-disk sources).
+
+    Pins ``transport=TRANSPORT_BRIDGE`` so the transport under test is
+    deterministic regardless of the runner's ambient ``ATELIER_TRANSPORT`` (since
+    the M7 flip the env default is ``cli``). These B1 caveman assertions are
+    defined against the byte-stable bridge briefing the file documents; a test
+    that needs the cli addendum overrides ``transport``.
+    """
     rules = (REPO_ROOT / "internal" / "team-mode-rules" / "SKILL.md").read_text(encoding="utf-8")
     base = {
         "role_id": "backend-engineer-1",
@@ -34,6 +41,7 @@ def _compose_kwargs(**overrides):
         "wave_id": "wave-1",
         "wave_phase": "implement",
         "deadline_iso": "2026-06-06T22:00:00Z",
+        "transport": TRANSPORT_BRIDGE,
     }
     # Sanity: rules fixture is non-empty so the briefing has a body to follow.
     assert rules, "rules SKILL.md is empty — fixture broken"

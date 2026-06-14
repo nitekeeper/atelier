@@ -23,8 +23,9 @@ The safety assertions here are LOAD-BEARING and built to be UN-FAKEABLE:
   merge is conflict-free + deterministic.
 
 ALL tests use M3's :class:`FakeCliRunner` (subclassed) — NO real ``claude`` is
-spawned.  The existing suite stays green; ``ATELIER_TRANSPORT`` default
-``bridge`` is untouched (the scheduler is reachable only on the CLI path).
+spawned.  These tests drive the scheduler directly (they do not depend on the
+``ATELIER_TRANSPORT`` default), which since M7 is ``cli`` (the host pipeline);
+``ATELIER_TRANSPORT=bridge`` is the explicit escape hatch to the legacy path.
 """
 
 from __future__ import annotations

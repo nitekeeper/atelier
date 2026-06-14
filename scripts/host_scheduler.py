@@ -68,7 +68,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from scripts.budget_pool import BudgetPool
+from scripts.budget_pool import BudgetExceeded, BudgetPool
 from scripts.cli_dispatch import (
     DEFAULT_DISALLOWED_TOOLS as _DEFAULT_DISALLOWED_TOOLS,
 )
@@ -91,16 +91,21 @@ from scripts.cli_dispatch import (
 from scripts.dag import DagProof
 from scripts.git_utils import git as _git
 from scripts.pm_dispatch import (
+    MAX_ATTEMPTS,
     MAX_PARALLEL_WORKERS,
     WALL_CLOCK_S,
     WaveDispatcher,
+    _default_escalate,
+    _parse_abandon_category,
 )
 from scripts.result_journal import ResultJournal
 
 __all__ = [
+    "MAX_ATTEMPTS",
     "MAX_PARALLEL_WORKERS",
     "JournalKeyTracker",
     "WorktreeError",
+    "is_abandoned_result",
     "parallel",
     "pipeline",
     "scheduler_upstream_hashes_for",
@@ -220,6 +225,177 @@ def _default_est_for(model: str) -> int:
     ``cli_dispatch._default_est_for`` — kept local so the fleet-width seed does
     not import a private name)."""
     return {"haiku": 2_000, "sonnet": 6_000, "opus": 12_000}.get(model, 6_000)
+
+
+# ── M5: termination/cascade/escalation parity helpers (Path A → Path B) ──────
+
+#: The structured "this task was abandoned" status string stored in
+#: ``results[tid]`` (NOT a bare ``None``, NOT the ``_FailedAttempt`` sentinel —
+#: which means an attempt RAN and failed). A downstream cascade reads this status,
+#: so the shape MUST be stable.
+_ABANDONED_STATUS = "abandoned"
+
+#: Abandon categories — IDENTICAL strings to Path A (pm_dispatch.py): ``"blocked"``
+#: for a cascade (dependent of an abandoned upstream) and ``"capacity"`` for a
+#: budget exhaustion (BudgetExceeded). Reusing the same vocabulary keeps the two
+#: scheduler paths' abandonment reports interchangeable.
+_CATEGORY_BLOCKED = "blocked"
+_CATEGORY_CAPACITY = "capacity"
+
+#: PRIVATE engine-controlled marker stamped on EVERY :func:`_abandoned_result`
+#: dict. THIS path fully controls this key; it is the positive signal that a
+#: result is the engine's OWN structured abandon (capacity/cascade) rather than a
+#: worker-authored self-abandon envelope. Worker envelope content is UNTRUSTED
+#: DATA (CLAUDE.md boundary) and ``ENVELOPE_SCHEMA`` sets ``additionalProperties:
+#: True``, so a worker CAN forge arbitrary keys (incl. ``category`` /
+#: ``upstream_task_id`` / even this sentinel) — therefore the sentinel is paired
+#: with a schema-guaranteed negative check (``type is None``) in
+#: :func:`_is_structured_abandon` so the disambiguation is un-spoofable.
+_ENGINE_ABANDON_KEY = "_engine_abandon"
+
+
+def _abandoned_result(
+    task_id: str,
+    *,
+    category: str,
+    upstream_task_id: str | None,
+    last_status: str,
+) -> dict[str, Any]:
+    """Build the STRUCTURED abandoned result dict stored in ``results[tid]``.
+
+    Distinct from a bare ``None`` (the old non-success marker) and from the
+    ``_FailedAttempt`` sentinel (which means an attempt ran and failed): this dict
+    asserts the task was abandoned WITHOUT (cascade) or because of (capacity) an
+    attempt, naming the upstream that caused a cascade. Downstream cascade
+    resolution and any journal-key path key on ``status == "abandoned"``, not on a
+    missing journal key (an abandoned task has none).
+
+    Carries the engine-controlled :data:`_ENGINE_ABANDON_KEY` sentinel (and NO
+    ``type`` key) so :func:`_is_structured_abandon` can tell this engine dict apart
+    from an UNTRUSTED worker self-abandon envelope un-spoofably.
+    """
+    return {
+        _ENGINE_ABANDON_KEY: True,
+        "status": _ABANDONED_STATUS,
+        "category": category,
+        "upstream_task_id": upstream_task_id,
+        "task_id": task_id,
+        "last_status": last_status,
+    }
+
+
+def is_abandoned_result(result: Any) -> bool:
+    """True iff *result* has ``status == "abandoned"`` — covers BOTH this path's
+    own STRUCTURED abandon (cascade/capacity) AND a worker-authored self-abandon
+    envelope. Both are terminal abandonments that must cascade to dependents, so
+    for the cascade-source decision they are treated alike.
+
+    To tell them APART (e.g. to choose the right escalation category — this path's
+    dicts carry an explicit ``category``, a worker envelope's category lives in
+    ``notes_md`` line 1), use :func:`_is_structured_abandon`.
+    """
+    return isinstance(result, Mapping) and result.get("status") == _ABANDONED_STATUS
+
+
+def _is_structured_abandon(result: Any) -> bool:
+    """True iff *result* is one of THIS path's OWN structured abandon dicts
+    (built by :func:`_abandoned_result`) — distinguished from an UNTRUSTED
+    worker-authored self-abandon envelope un-spoofably.
+
+    SECURITY (E2-R2): worker envelope content is untrusted DATA (CLAUDE.md
+    boundary) and ``ENVELOPE_SCHEMA`` sets ``additionalProperties: True``, so
+    ``validate_envelope`` KEEPS any keys a worker forges — a worker CAN add
+    ``category`` / ``upstream_task_id`` (and even :data:`_ENGINE_ABANDON_KEY`) to
+    its envelope. So we do NOT key on the presence of those (spoofable) keys.
+    Instead we combine an engine-controlled POSITIVE marker with a
+    schema-guaranteed NEGATIVE one:
+
+      * :data:`_ENGINE_ABANDON_KEY` is True — stamped by :func:`_abandoned_result`;
+      * ``result.get("type") is None`` — the engine dict has NO ``type`` key,
+        whereas EVERY validated worker envelope ALWAYS has ``type == "task_result"``
+        (``ENVELOPE_SCHEMA`` constrains ``type`` to ``const: "task_result"`` AND
+        lists it in ``required``, so validation rejects any worker result lacking
+        it / carrying a different value).
+
+    The AND is airtight: a worker would have to BOTH forge the sentinel AND drop
+    its mandatory ``type`` field — but a result with no/other ``type`` never passes
+    ``validate_envelope``, so it never reaches here as a worker result. A worker
+    self-abandon therefore always evaluates False and is routed to the
+    ``notes_md``-parsed, TM-006-grammar-checked category (FIX 1), never its
+    forged ``category``/``upstream_task_id``.
+    """
+    return (
+        isinstance(result, Mapping)
+        and result.get(_ENGINE_ABANDON_KEY) is True
+        and result.get("type") is None
+    )
+
+
+def _result_is_success(result: Any) -> bool:
+    """True iff *result* is a GENUINE success that produced its outputs — the ONLY
+    thing that satisfies a downstream dependency (M5 change 2, the classifier).
+
+    Success ⟺ a validated envelope ``Mapping`` whose ``status == "done"``. EVERY
+    other terminal encoding is a non-success that must cascade to dependents:
+
+      (i)   the ``_FailedAttempt`` sentinel — an attempt ran and failed (CLI
+            ``is_error`` / non-zero exit / wall-clock timeout / runner error);
+      (ii)  this path's STRUCTURED abandoned envelope (cascade ``"blocked"`` /
+            capacity ``"capacity"`` — including the BudgetExceeded → capacity case);
+      (iii) the false-`done`-converted-to-FAILED_ATTEMPT case (the #120 guard — a
+            `done` whose declared writes were absent becomes ``FAILED_ATTEMPT``,
+            covered by (i));
+      (iv)  a worker-authored validated envelope whose ``status`` is a terminal- or
+            non-terminal-FAILURE (``"failed"`` / ``"abandoned"`` / ``"blocked"`` /
+            ``"needs-input"``) — parity with Path A, which routes a ``failed`` /
+            ``abandoned`` envelope through ``_abandon_and_escalate`` and adds it to
+            ``abandoned_ids`` (pm_dispatch.py:802-821); only ``done`` produced the
+            declared outputs a dependent reads;
+      (v)   a bare ``None`` left by a legacy non-success path (defensive
+            fail-closed — a terminal upstream with no validated envelope).
+
+    Missing ANY of these would let a dependent be admitted on bad inputs — silent
+    corruption. This single predicate is the source of truth for BOTH the
+    ``succeeded`` decision (journal-key recording) and the ``pipeline_abandoned``
+    cascade-source population.
+    """
+    return isinstance(result, Mapping) and result.get("status") == "done"
+
+
+def _failed_envelope_category(result: Any) -> str | None:
+    """For a worker-authored validated envelope that is NOT a success, return the
+    abandon CATEGORY to escalate under (parity with Path A), or None if *result*
+    is not such an envelope.
+
+    * ``status == "abandoned"`` (worker self-abandon) → the category PARSED from
+      ``notes_md`` line 1 via :func:`~scripts.pm_dispatch._parse_abandon_category`
+      (the TM-006 ABANDON_RE grammar token: ``scope|blocked|conflict|capacity|
+      stale_rules|no_consensus|destructive_rejected|tests_unrecoverable``) —
+      EXACTLY Path A (pm_dispatch.py:793). Emitting the literal ``"abandoned"``
+      would be an OUT-OF-GRAMMAR token, so we never do that.
+    * ``status == "failed"`` → ``"failed"`` (Path A pm_dispatch.py:816).
+    * non-terminal ``"blocked"`` / ``"needs-input"`` returned at dispatch (pipeline
+      dispatches once, so there is no retry to consume) → its own status name, so
+      the abandonment is never silent.
+
+    This path's OWN structured abandon dicts (carry ``category`` + ``upstream_task_id``)
+    are escalated at their dedicated capacity/cascade sites, NOT here — guard against
+    them with :func:`_is_structured_abandon` so a future branch-order change can't
+    feed one through this helper.
+    """
+    if not isinstance(result, Mapping):
+        return None
+    if _is_structured_abandon(result):
+        # This path's own structured abandoned envelope — escalated elsewhere.
+        return None
+    status = result.get("status")
+    if status == "abandoned":
+        # Worker self-abandon — parse the real TM-006 category from notes_md
+        # (Path A parity), never the literal out-of-grammar "abandoned".
+        return _parse_abandon_category(result.get("notes_md") or "")
+    if status in ("failed", "blocked", "needs-input"):
+        return str(status)
+    return None
 
 
 # ── (3) Worktree isolation ──────────────────────────────────────────────────
@@ -590,6 +766,8 @@ async def pipeline(
     disallowed_tools: Sequence[str] = _DEFAULT_DISALLOWED_TOOLS,
     allowed_tools: Sequence[str] | None = None,
     sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
+    escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
+    max_budget_usd: float | None = None,
 ) -> list[dict[str, Any]]:
     """Advance *tasks* BARRIER-FREE along proven-independent DAG edges.
 
@@ -617,9 +795,64 @@ async def pipeline(
 
     Returns the validated envelope (or failed-attempt sentinel) per task, in the
     deterministic ``(parallel_group, task_id)`` order.
+
+    **M5 — termination/cascade/escalation parity (Path A → Path B).**
+
+    * ``escalate_fn`` — the GUARANTEED-emitting escalation sink (parity with
+      :class:`~scripts.pm_dispatch.WaveDispatcher`). Defaults to
+      :func:`~scripts.pm_dispatch._default_escalate` (always logs a WARNING; never
+      silent). When ``pipeline()`` is composed in a production root, thread the
+      SAME escalate_fn used for the WaveDispatcher there. A task abandoned by
+      cascade (``"blocked"``) or budget exhaustion (``"capacity"``) is escalated
+      through this sink — never best-effort.
+    * **Cascade-abandon (the crux).** A not-yet-spawned task with an abandoned
+      ancestor is NEVER admitted: it is marked terminal with a structured abandoned
+      result (``category="blocked"``, naming the upstream), charges NO attempt, and
+      escalates. The cascade is TRANSITIVE — each cascade-abandoned task is itself
+      added to the abandoned set so its own descendants cascade too (parity with
+      ``pm_dispatch._first_abandoned_ancestor`` /
+      ``WaveDispatcher.abandoned_ids``).
+    * **Budget exhaustion is per-task, not whole-run.** A ``BudgetExceeded`` raised
+      pre-spawn for one task abandons+escalates THAT task (``category="capacity"``)
+      and lets its dependents cascade, while unrelated independent tasks still
+      complete. It does NOT abort the run.
+    * ``max_budget_usd`` — optional per-task ``claude --max-budget-usd`` dollar
+      ceiling threaded into ``run_attempt`` (the documented second hung-query kill
+      lever). ``None`` ⇒ ``run_attempt`` derives it from the per-task token estimate.
+
+    **Intentional divergences from Path A (WaveDispatcher) — NOT bugs.** Two
+    deliberate decisions a future maintainer should not "fix" without re-scoping:
+
+    1. A terminal ``FAILED_ATTEMPT`` task with NO dependents does NOT self-escalate
+       here, whereas Path A escalates a task on attempt-exhaustion. In the
+       barrier-free path a bare ``FAILED_ATTEMPT`` is the engine's normal failure
+       marker; it stays observable in the returned results list and escalates only
+       when a DEPENDENT cascades (category ``"blocked"``). Full self-escalation
+       parity (escalate a terminal ``FAILED_ATTEMPT`` as ``"capacity"`` once the
+       attempt budget is spent) is a DEFERRED FOLLOW-UP, intentionally out of M5's
+       plan scope (M5 scope = cascade-abandon + per-task ``BudgetExceeded`` +
+       transient-spawn retry + wall-clock). A worker-AUTHORED ``failed`` /
+       ``abandoned`` envelope DOES self-escalate here (Path-A-parity category).
+    2. Worker ``blocked`` / ``needs-input`` envelopes are TERMINAL-and-cascade in
+       this path (it has NO re-queue site by design — each task is dispatched once),
+       whereas Path A treats them as RETRYABLE. Single-dispatch makes
+       terminal-and-cascade the only safe option (admitting a dependent on a
+       ``blocked`` upstream's absent output is silent corruption); it matches the
+       M5 obligation and is NOT a regression.
     """
     ordered = sorted(tasks, key=_sort_key)
     key_tracker = JournalKeyTracker(journal)
+    # GUARANTEED-emitting escalation sink (parity with WaveDispatcher). Never a
+    # best-effort default — _default_escalate always logs a WARNING.
+    _escalate = escalate_fn if escalate_fn is not None else _default_escalate
+    # In-memory task index for the bounded ancestor BFS (parity with
+    # WaveDispatcher._task_index): task_id → task dict, for walking depends_on.
+    task_index: dict[str, Mapping[str, Any]] = {_task_id(t): t for t in ordered}
+    # The cascade-abandon SOURCE set — task_ids that ended abandoned (failed
+    # attempt, budget capacity, or cascade blocked). Parity with
+    # WaveDispatcher.abandoned_ids; accumulated as each task finalizes so the
+    # cascade is transitive. Mutated only under the `progress` lock.
+    pipeline_abandoned: set[str] = set()
 
     # Shared concurrency counter (idea 3).  Sized to the remaining budget — only
     # ever NARROWS max_workers (idea 2).  At least 1 so a single ready task can
@@ -657,6 +890,34 @@ async def pipeline(
     # nested) for `merge`/`discard` at the END — the two are sequential within a
     # task and never held across `progress.wait()`.
     worktree_admin_lock = asyncio.Lock()
+
+    def _first_abandoned_ancestor(task: Mapping[str, Any]) -> str | None:
+        """Return the first ancestor id in ``pipeline_abandoned`` reachable via
+        ``depends_on``, or None (M5 — parity with
+        ``pm_dispatch._first_abandoned_ancestor``).
+
+        Bounded BFS with a visited-set so a cyclic ``depends_on`` (malformed
+        planner output) terminates. The walk reads the in-memory ``depends_on``
+        edges via ``task_index`` and checks each dep against ``pipeline_abandoned``;
+        because cascade-abandoned tasks are themselves added to
+        ``pipeline_abandoned``, this naturally finds a TRANSITIVE abandoned
+        ancestor (the dependent of a cascade-abandoned task cascades too). Caller
+        holds the ``progress`` lock, so the ``pipeline_abandoned`` read is
+        consistent.
+        """
+        visited: set[str] = set()
+        frontier: list[str] = list(_depends_on(task))
+        while frontier:
+            dep_id = frontier.pop()
+            if dep_id in visited:
+                continue
+            visited.add(dep_id)
+            if dep_id in pipeline_abandoned:
+                return dep_id
+            dep_task = task_index.get(dep_id)
+            if dep_task is not None:
+                frontier.extend(_depends_on(dep_task))
+        return None
 
     def _ready(task: Mapping[str, Any], live: dict[str, Mapping[str, Any]]) -> bool:
         """Pure readiness predicate (no clock, no RNG).  See module docstring.
@@ -760,6 +1021,7 @@ async def pipeline(
                     disallowed_tools=disallowed_tools,
                     allowed_tools=allowed_tools,
                     sandbox_wrap=sandbox_wrap,
+                    max_budget_usd=max_budget_usd,
                 )
                 # FALSE-`done` GUARD (engine-level): a worker can return a terminal
                 # `done` envelope while having written NONE of its declared outputs
@@ -798,13 +1060,40 @@ async def pipeline(
                         )
                         result = FAILED_ATTEMPT
                 success = True
+        except BudgetExceeded as exc:
+            # M5 (3): a per-task budget exhaustion is a PER-TASK abandon+escalate,
+            # NOT a whole-run abort. ``run_attempt`` raises BudgetExceeded at its
+            # pre-spawn gate (terminal); we convert it to a STRUCTURED capacity-
+            # abandoned result (same category string as Path A,
+            # pm_dispatch.py:902/911) and DO NOT re-raise — so THIS task is
+            # abandoned+escalated and its dependents cascade (via the admission-loop
+            # gate), while unrelated independent tasks still complete. ``success``
+            # stays False ⇒ the finally discards any worktree and the finalize
+            # block (below) records it in ``pipeline_abandoned`` + escalates.
+            logging.getLogger(__name__).warning(
+                "task %s ABANDONED (capacity): budget exhausted pre-spawn (%s) — "
+                "per-task abandon+escalate, run continues for independent tasks.",
+                tid,
+                exc,
+            )
+            result = _abandoned_result(
+                tid,
+                category=_CATEGORY_CAPACITY,
+                upstream_task_id=None,
+                last_status=f"budget-exceeded: {exc}",
+            )
         finally:
             # ALWAYS mark terminal + notify, even on a raised exception
-            # (BudgetExceeded / CloneEscapeError), so the admission loop never
-            # hangs waiting on a completion that never arrives.  The exception
-            # itself still propagates out of the coroutine (gathered after the
-            # loop) — terminal state is bookkeeping, not suppression.
-            succeeded = success and not is_failed_attempt(result)
+            # (CloneEscapeError, etc.), so the admission loop never hangs waiting on
+            # a completion that never arrives.  A non-BudgetExceeded exception still
+            # propagates out of the coroutine (gathered after the loop) — terminal
+            # state is bookkeeping, not suppression.
+            # M5: a task SUCCEEDED (satisfies dependents + records a journal key)
+            # ONLY if it ran to a validated `done` envelope. `_result_is_success`
+            # is the single source of truth: every other terminal encoding
+            # (_FailedAttempt, structured abandoned, a worker `failed`/`abandoned`/
+            # `blocked`/`needs-input` envelope, None) is a non-success that cascades.
+            succeeded = success and _result_is_success(result)
             # Pull this task's worktree out of the in-flight map (under the lock)
             # WITHOUT yet marking the task terminal — the merge must land in base
             # HEAD *before* the terminal transition (see the ordering note below).
@@ -859,13 +1148,71 @@ async def pipeline(
                 # carries this writer's output.  This runs even if the merge raised,
                 # so the admission loop is never stranded; the exception (if any)
                 # still propagates out of the coroutine to the post-loop drain.
+                #
+                # M5: any task that did NOT genuinely succeed is a CASCADE SOURCE —
+                # added to ``pipeline_abandoned`` so its dependents cascade (the
+                # admission-loop gate reads this set; the cascade is transitive
+                # because cascade-abandoned tasks are added to the same set at
+                # admission time). Escalation parity with Path A:
+                #   * a structured CAPACITY abandon (BudgetExceeded) escalates here;
+                #   * a worker-authored `failed`/`abandoned`/`blocked`/`needs-input`
+                #     envelope escalates here under its own category (Path A routes
+                #     a `failed`/`abandoned` envelope through _abandon_and_escalate);
+                #   * a bare `_FailedAttempt` sentinel does NOT escalate on its own —
+                #     it is the engine's normal failure marker; escalation for it
+                #     happens when a DEPENDENT cascades (category "blocked").
+                escalation: dict[str, Any] | None = None
                 async with progress:
                     results[tid] = result
                     terminal.add(tid)
                     in_flight.pop(tid, None)
                     if succeeded and jkey is not None:
                         key_tracker.record(tid, jkey)
+                    elif not succeeded:
+                        # This task did NOT succeed → it is a cascade SOURCE: its
+                        # dependents must not be admitted on bad inputs.
+                        pipeline_abandoned.add(tid)
+                        if _is_structured_abandon(result):
+                            # This path's OWN structured CAPACITY abandon (built by
+                            # _abandoned_result; carries explicit category +
+                            # last_status). Guaranteed escalation. NOTE: a worker
+                            # SELF-abandon also has status=="abandoned" but is NOT a
+                            # structured abandon (no category/upstream_task_id keys),
+                            # so it falls to the _failed_envelope_category branch
+                            # below where its real category is PARSED from notes_md.
+                            escalation = {
+                                "kind": "escalation",
+                                "task_id": tid,
+                                "worker": task.get("assigned_to"),
+                                "attempt": _attempt_for(task),
+                                "category": result.get("category"),
+                                "last_status": result.get("last_status"),
+                                "upstream_task_id": result.get("upstream_task_id"),
+                            }
+                        else:
+                            env_category = _failed_envelope_category(result)
+                            if env_category is not None:
+                                # A worker-authored failure envelope (`failed` /
+                                # self-`abandoned` / `blocked` / `needs-input`) —
+                                # escalate under its REAL category (Path A parity:
+                                # a self-`abandoned` parses notes_md, the rest use
+                                # their status name). A bare `_FailedAttempt` / `None`
+                                # yields None here → no self-escalation. ``last_status``
+                                # records the worker's terminal status string.
+                                escalation = {
+                                    "kind": "escalation",
+                                    "task_id": tid,
+                                    "worker": task.get("assigned_to"),
+                                    "attempt": _attempt_for(task),
+                                    "category": env_category,
+                                    "last_status": str(result.get("status")),
+                                    "upstream_task_id": None,
+                                }
                     progress.notify_all()
+                # GUARANTEED escalation OUTSIDE the lock (the user callback must not
+                # run while holding the admission lock).
+                if escalation is not None:
+                    _escalate(escalation)
 
     # ── the admission loop ──────────────────────────────────────────────────
     spawned: set[str] = set()
@@ -879,9 +1226,60 @@ async def pipeline(
     # after the done-callback has discarded it from `running`.
     running: set[asyncio.Task[None]] = set()
     all_workers: list[asyncio.Task[None]] = []
+    # Escalations queued by the cascade gate in the CURRENT pass — fired AFTER the
+    # `progress` lock is released (the user callback must not run under it). HOISTED
+    # above the `try` (and CLEARED, not rebound, at the top of each pass) so the
+    # `except BaseException` handler can flush any still-pending cascade escalations
+    # if a later step in the SAME pass raises (e.g. the defensive MAX_ATTEMPTS gate)
+    # — a cascade-abandoned task that already committed terminal should not lose its
+    # escalation just because a LATER in-pass task raised. Delivery is BEST-EFFORT,
+    # AT-MOST-ONCE: it SURVIVES a later in-pass raise (the M5 E1 invariant), but a
+    # SINK that itself raises is not retried — a sink raising twice can drop the
+    # remaining tail (pop-before-call guarantees the prefix never re-fires).
+    # *(review E1; E1-R2 exactly-once)*
+    cascade_escalations: list[dict[str, Any]] = []
     try:
         while len(terminal) < len(ordered):
+            cascade_escalations.clear()
             async with progress:
+                # M5 (1) — CASCADE GATE (the crux). BEFORE the readiness check, a
+                # not-yet-spawned task with an abandoned ancestor is NEVER admitted:
+                # it can never get correct upstream output. Mark it terminal with a
+                # STRUCTURED blocked result naming the upstream, add it to
+                # spawned+terminal+pipeline_abandoned (so its OWN descendants
+                # cascade — transitivity, parity with pm_dispatch.py:648), charge NO
+                # attempt, and queue its guaranteed escalation. Iterated in the
+                # deterministic order; a task cascaded this pass updates
+                # pipeline_abandoned immediately so a sibling depending on it (rare
+                # within one pass) also cascades.
+                for task in ordered:
+                    tid = _task_id(task)
+                    if tid in spawned or tid in terminal:
+                        continue
+                    upstream = _first_abandoned_ancestor(task)
+                    if upstream is not None:
+                        result = _abandoned_result(
+                            tid,
+                            category=_CATEGORY_BLOCKED,
+                            upstream_task_id=upstream,
+                            last_status="cascade",
+                        )
+                        results[tid] = result
+                        spawned.add(tid)
+                        terminal.add(tid)
+                        pipeline_abandoned.add(tid)  # transitive cascade source
+                        cascade_escalations.append(
+                            {
+                                "kind": "escalation",
+                                "task_id": tid,
+                                "worker": task.get("assigned_to"),
+                                "attempt": int(task.get("attempts") or 0),  # NO charge
+                                "category": _CATEGORY_BLOCKED,
+                                "last_status": "cascade",
+                                "upstream_task_id": upstream,
+                            }
+                        )
+
                 # Admit every currently-ready, not-yet-spawned task
                 # (deterministic order).  Independence is evaluated against the
                 # LIVE in-flight set, incrementally including peers admitted in
@@ -899,6 +1297,19 @@ async def pipeline(
                         admitted_this_pass.append(task)
                 for task in admitted_this_pass:
                     tid = _task_id(task)
+                    # M5 (8) — DEFENSIVE MAX_ATTEMPTS gate. pipeline() dispatches
+                    # each task ONCE at attempt 1 today, but guard the obligation so
+                    # a future re-dispatch can never silently exceed the §5.2
+                    # 5-attempt budget (the Path A invariant). A breach is a
+                    # SCHEDULER bug — fail loud, never silently over-dispatch.
+                    _attempt = _attempt_for(task)
+                    if _attempt > MAX_ATTEMPTS:
+                        raise RuntimeError(
+                            f"pipeline obligation (c) breach: task {tid!r} would "
+                            f"dispatch at attempt {_attempt} > MAX_ATTEMPTS="
+                            f"{MAX_ATTEMPTS}; a task must never be dispatched beyond "
+                            "the per-task attempt budget (scheduler bug)."
+                        )
                     spawned.add(tid)
                     in_flight[tid] = task
                 if admitted_this_pass:
@@ -907,24 +1318,66 @@ async def pipeline(
                         running.add(coro_task)
                         all_workers.append(coro_task)
                         coro_task.add_done_callback(running.discard)
+                elif cascade_escalations:
+                    # The cascade gate marked tasks terminal this pass without
+                    # dispatching any worker — that IS progress (terminal count
+                    # rose). Re-loop to re-evaluate (more tasks may now be ready, or
+                    # the run may be complete). Do NOT wait — there is no completion
+                    # to wait for and the loop condition has changed.
+                    pass
                 elif in_flight:
-                    # Nothing newly admittable but work is in flight — wait for a
-                    # completion to change the picture.
+                    # Nothing newly admittable AND nothing cascaded this pass, but
+                    # work is in flight — wait for a completion to change the
+                    # picture. The decide-and-wait is atomic under `progress` (held
+                    # continuously since the admission decision), so a worker's
+                    # notify_all() cannot be lost between the decision and the wait.
                     await progress.wait()
                 else:
-                    # Deadlock guard: nothing ready, nothing in flight, not all
-                    # terminal.  Only possible on a malformed DAG that
-                    # validate_dag would have rejected; fail loud, never hang.
+                    # Deadlock guard: nothing ready, nothing in flight, nothing
+                    # cascaded, not all terminal.  Only possible on a malformed DAG
+                    # that validate_dag would have rejected; fail loud, never hang.
                     remaining = [t for t in ordered if _task_id(t) not in terminal]
                     raise RuntimeError(
                         "pipeline stalled: no ready task and none in flight, but "
                         f"{[_task_id(t) for t in remaining]} are not terminal — "
                         "malformed DAG (should have failed validate_dag)."
                     )
+            # Fire the cascade escalations OUTSIDE the lock (the user callback must
+            # not run while holding the admission lock). Only the cascade-gate +
+            # admission branches reach here without having awaited; the
+            # `progress.wait()` branch leaves `cascade_escalations` empty (no task
+            # was cascaded this pass), so nothing fires spuriously after a wake.
+            #
+            # EXACTLY-ONCE (E1-R2): POP each escalation BEFORE calling _escalate so
+            # that if _escalate RAISES on the Kth item, items 1..K-1 are already
+            # removed and the `except BaseException` re-flush below fires ONLY the
+            # not-yet-fired remainder (K..end) — never re-firing 1..K-1. (A
+            # for-loop, or a trailing .clear(), would let the except handler
+            # double-fire the already-fired prefix when escalate_fn raises.)
+            while cascade_escalations:
+                _escalate(cascade_escalations.pop(0))
     except BaseException:
-        # The admission loop itself raised (e.g. the deadlock guard).  Drain any
-        # in-flight workers (best-effort, never masking the loop's exception),
-        # restore a clean base + remove leftover worktrees, then re-raise.
+        # The admission loop itself raised (e.g. the deadlock guard or the
+        # defensive MAX_ATTEMPTS gate).  FIRST flush any cascade escalations still
+        # PENDING from the raising pass — a task already committed terminal+abandoned
+        # this pass should not lose its escalation just because a LATER in-pass step
+        # raised before the normal post-block flush ran. Delivery is BEST-EFFORT,
+        # AT-MOST-ONCE: it survives the in-pass raise, but a sink that itself raises
+        # here aborts the drain (errors are suppressed below) and can drop the tail
+        # (review E1; E1-R2 exactly-once).
+        #
+        # POP-before-call (E1-R2) so this drain is itself exactly-once even if an
+        # _escalate here raises (the suppress would otherwise swallow it and the
+        # already-fired items would be gone from the list anyway): each item is
+        # removed before it fires, so the suppressed-and-aborted drain never
+        # re-fires what already went out, and the normal-flush prefix that already
+        # fired was already popped, so it is NOT in this list. Suppress secondary
+        # errors so this never masks the original exception. THEN drain in-flight
+        # workers (best-effort), restore a clean base + remove leftover worktrees,
+        # and re-raise.
+        with contextlib.suppress(BaseException):
+            while cascade_escalations:
+                _escalate(cascade_escalations.pop(0))
         with contextlib.suppress(BaseException):
             if all_workers:
                 await asyncio.gather(*all_workers, return_exceptions=True)

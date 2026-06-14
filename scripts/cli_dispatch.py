@@ -372,6 +372,69 @@ DEFAULT_PERMISSION_MODE = "acceptEdits"
 #: may override ``disallowed_tools`` but these are the floor.
 DEFAULT_DISALLOWED_TOOLS: tuple[str, ...] = ("Bash", "WebFetch", "WebSearch")
 
+#: M5 (6) — transient-spawn retry bound INSIDE one charged engine attempt.
+#: ``run_attempt`` retries ONLY a clearly-transient launch error (``OSError`` on
+#: spawn — e.g. EAGAIN / ENOMEM / transient fork failure), up to this many EXTRA
+#: tries (so ``TRANSIENT_SPAWN_RETRIES + 1`` total launch attempts). The retry
+#: happens within the SINGLE ``asyncio.wait_for(wall_clock_s)`` TOTAL bound (never
+#: a fresh deadline per try — that would multiply the per-attempt bound and defeat
+#: the termination proof), the engine attempt number is untouched, and the budget
+#: is charged exactly once (on the eventual success). A non-zero ``claude`` exit
+#: (``RuntimeError``), a wall-clock ``TimeoutError``, and JSON/Value errors are all
+#: TERMINAL — the model ran and failed, so they charge the attempt and are NOT
+#: retried as transient spawns.
+TRANSIENT_SPAWN_RETRIES = 2
+#: Tiny backoff between transient-spawn retries (seconds). Counts AGAINST the one
+#: ``wall_clock_s`` total bound (it runs inside the ``wait_for``), so it is kept
+#: small; tests monkeypatch it to 0.
+_TRANSIENT_SPAWN_BACKOFF_S = 0.05
+
+#: M5 (7) — ``--max-budget-usd`` derivation constants. The BudgetPool gates on
+#: OUTPUT tokens; the documented ``claude --max-budget-usd`` flag is a DOLLAR cost
+#: ceiling ("Maximum dollar amount to spend on API calls; only works with
+#: --print"). We derive a per-task dollar ceiling from the per-task output-token
+#: estimate the budget gate already computes, priced at the maintainer's default
+#: roster model (Opus) rate, plus an input-token allowance, with the SAME headroom
+#: factor the budget pool applies — so the dollar lever is proportionate to the
+#: token lever, never tighter than the work actually needs.
+#:
+#: Pricing source (claude-api skill, cached 2026-06-04): Opus-tier output is
+#: $25.00 / 1M tokens, input $5.00 / 1M tokens. Using the priciest roster tier
+#: makes the ceiling conservative (never under-budgets a cheaper-tier task).
+_USD_PER_OUTPUT_TOKEN = 25.0 / 1_000_000  # Opus output: $25 / MTok
+_USD_PER_INPUT_TOKEN = 5.0 / 1_000_000  # Opus input: $5 / MTok
+#: Assumed input:output token ratio for the dollar derivation. A task's input
+#: (system prompt + briefing + upstream envelopes + tool I/O) typically dwarfs its
+#: output; 5x is a deliberately generous allowance so the dollar lever never trips
+#: BEFORE the wall-clock kill (the primary, correctness-guaranteeing lever).
+_USD_INPUT_TO_OUTPUT_RATIO = 5.0
+#: Multiplier applied to the priced estimate to form the dollar ceiling — slack so
+#: the cost lever is a DEFENSE-IN-DEPTH backstop, not a primary gate (the budget
+#: pool's output-token gate + the wall-clock kill are the primary stops). 1.0 /
+#: 0.70 mirrors the budget pool's 0.70 headroom inverted: the dollar ceiling is the
+#: token estimate grossed up by the same buffer the pool reserves.
+_USD_CEILING_HEADROOM = 1.0 / 0.70
+
+
+def max_budget_usd_for(est_output_tokens: int) -> float:
+    """Derive the per-task ``--max-budget-usd`` dollar ceiling from the per-task
+    OUTPUT-token estimate the budget gate already computes (M5 change 7).
+
+    The BudgetPool gates on output tokens; ``claude --max-budget-usd`` is a dollar
+    cost ceiling. We price *est_output_tokens* at the Opus output rate, add an
+    input-token allowance (``_USD_INPUT_TO_OUTPUT_RATIO`` x the output estimate at
+    the input rate), and gross the sum up by ``_USD_CEILING_HEADROOM`` (the inverse
+    of the pool's 0.70 headroom) so the dollar lever is proportionate to — and
+    never tighter than — the token lever. Monotone in *est_output_tokens*: a bigger
+    task gets a bigger ceiling. The amount is a DEFENSE-IN-DEPTH backstop; the
+    wall-clock kill + child reap is the lever that guarantees termination.
+    """
+    est = max(0, int(est_output_tokens))
+    output_cost = est * _USD_PER_OUTPUT_TOKEN
+    input_cost = est * _USD_INPUT_TO_OUTPUT_RATIO * _USD_PER_INPUT_TOKEN
+    return (output_cost + input_cost) * _USD_CEILING_HEADROOM
+
+
 #: Subprocess env allowlist. ONLY these names (plus the ``LC_*`` prefix) are
 #: forwarded to ``claude`` — the full parent env (GH_TOKEN, AWS_*, ANTHROPIC_API_KEY,
 #: arbitrary secrets) is dropped so an autonomous agent running untrusted code
@@ -766,6 +829,7 @@ async def run_attempt(
     disallowed_tools: Sequence[str] = DEFAULT_DISALLOWED_TOOLS,
     allowed_tools: Sequence[str] | None = None,
     sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
+    max_budget_usd: float | None = None,
 ) -> dict[str, Any] | _FailedAttempt:
     """Run ONE metered, schema-validated, journaled ``claude -p`` attempt.
 
@@ -849,6 +913,17 @@ async def run_attempt(
     #    allow-list, and the sandbox wrap are the write-confinement controls — the
     #    path-guard above is defense-in-depth only (it does NOT confine the agent).
     prompt = _prompt_for(task, attempt)
+    # M5 (7): the second hung-query kill lever — a DOCUMENTED, cost-model-aligned
+    # dollar ceiling derived from the per-task output-token estimate (the same est
+    # the budget gate uses), with the budget pool's headroom applied. This is
+    # defense-in-depth; the wall-clock `wait_for` + child reap below is the lever
+    # that GUARANTEES termination. `--max-budget-usd` is documented as only working
+    # with `--print`, which we use (`-p`). Injectable via *max_budget_usd*; default
+    # derives from est_for(model). NOTE: `--max-turns` is deliberately NOT wired —
+    # it is undocumented/hidden on the pinned CLI (INERT-lever risk).
+    budget_usd = (
+        max_budget_usd_for(est_for(model)) if max_budget_usd is None else float(max_budget_usd)
+    )
     argv = [
         "claude",
         "-p",
@@ -863,6 +938,8 @@ async def run_attempt(
         briefing,
         "--permission-mode",
         permission_mode,
+        "--max-budget-usd",
+        f"{budget_usd:.2f}",
         "--add-dir",
         str(effective_add_dir),
     ]
@@ -877,8 +954,41 @@ async def run_attempt(
     #    journaled). asyncio.TimeoutError, a non-zero exit (RuntimeError from the
     #    real runner), or unparseable stdout (json.JSONDecodeError) all collapse
     #    to the sentinel. On timeout the runner reaps the child (no zombie).
+    #
+    #    M5 (6): a clearly-transient LAUNCH error (OSError on spawn — EAGAIN /
+    #    ENOMEM / transient fork failure) is retried INSIDE this one charged engine
+    #    attempt, up to TRANSIENT_SPAWN_RETRIES extra tries with a tiny backoff.
+    #    The attempt count is untouched and the budget is charged exactly once (on
+    #    the eventual success, in step 7). CRITICAL: the ENTIRE retry loop runs
+    #    inside the SINGLE `asyncio.wait_for(wall_clock_s)` TOTAL bound below — NOT
+    #    a fresh wall_clock_s per try — so the per-attempt termination bound (and
+    #    the :796-800 adapter<=engine invariant) is preserved. A non-zero exit
+    #    (RuntimeError), a wall-clock TimeoutError, and JSON/Value errors are all
+    #    TERMINAL: the model ran and failed, so they charge the attempt and are NOT
+    #    retried as transient spawns.
+    async def _launch_with_transient_retry() -> dict[str, Any]:
+        last_os_err: OSError | None = None
+        for try_i in range(TRANSIENT_SPAWN_RETRIES + 1):
+            try:
+                return await runner(argv, str(effective_cwd))
+            except OSError as exc:
+                # Clearly-transient launch failure — retry within the SAME
+                # wall_clock_s total bound (the backoff counts against it too).
+                last_os_err = exc
+                if try_i < TRANSIENT_SPAWN_RETRIES:
+                    if _TRANSIENT_SPAWN_BACKOFF_S:
+                        await asyncio.sleep(_TRANSIENT_SPAWN_BACKOFF_S)
+                    continue
+                raise
+        # Unreachable (the loop either returns or raises), but keep mypy happy.
+        raise (
+            last_os_err
+            if last_os_err is not None
+            else RuntimeError("spawn retry loop fell through")
+        )
+
     try:
-        result = await asyncio.wait_for(runner(argv, str(effective_cwd)), timeout=wall_clock_s)
+        result = await asyncio.wait_for(_launch_with_transient_retry(), timeout=wall_clock_s)
     except TimeoutError:
         return _FailedAttempt("wall-clock timeout")
     except (RuntimeError, json.JSONDecodeError, ValueError, OSError) as exc:
@@ -1211,6 +1321,7 @@ __all__ = [
     "ENVELOPE_SCHEMA",
     "ENV_ALLOWLIST",
     "FAILED_ATTEMPT",
+    "TRANSIENT_SPAWN_RETRIES",
     "TRANSPORT_CLI",
     "UNSANDBOXED_OPT_OUT_ENV",
     "CliDispatchTools",
@@ -1227,6 +1338,7 @@ __all__ = [
     "direct_upstream_hashes",
     "identity_sandbox_wrap",
     "is_failed_attempt",
+    "max_budget_usd_for",
     "native_sandbox_wrap",
     "real_cli_runner",
     "run_attempt",

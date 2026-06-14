@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 
 from scripts import mode_detector
-from scripts.budget_pool import BudgetExceeded, BudgetPool
+from scripts.budget_pool import BudgetPool
 from scripts.cli_dispatch import (
     CliDispatchTools,
     FakeCliRunner,
@@ -1028,8 +1028,17 @@ def test_dependent_writer_worktree_contains_upstream_outputs(tmp_path):
 
 
 def test_pipeline_budget_exceeded_propagates(tmp_path):
-    """A BudgetExceeded inside a worker is surfaced by pipeline() (terminal) and
-    does NOT hang the admission loop."""
+    """M5 (3) — NEW CONTRACT: a per-task BudgetExceeded is a PER-TASK abandon
+    (category 'capacity') + escalate, NOT a whole-run abort. pipeline() RETURNS a
+    result list (does not raise); the single task is abandoned 'capacity', the
+    worker never spawned (refused at the pre-spawn budget gate), and escalate_fn
+    fired once for it.
+
+    (Previously this asserted ``pytest.raises(BudgetExceeded)`` — that
+    whole-run-abort behavior is the bug M5 closed: one task's budget exhaustion
+    must not abort the run for unrelated tasks. See
+    ``test_pipeline_budget_exceeded_is_per_task_abandon_not_whole_run_abort`` for
+    the multi-task survivor proof.)"""
     clone = _git_init_clone(tmp_path)
     tasks = [
         {
@@ -1043,12 +1052,24 @@ def test_pipeline_budget_exceeded_propagates(tmp_path):
     dag_proof = compute_dag_proof(tasks)
     runner = _TimedRunner()
     journal = ResultJournal()
+    escalations, escalate_fn = _escalation_recorder()
     # Ceiling 700 < est 6_000 → assert_can_dispatch raises BudgetExceeded pre-spawn.
     budget = BudgetPool(total_tokens=1_000)
-    with pytest.raises(BudgetExceeded):
-        _run(pipeline(tasks, **_pipeline_kwargs(clone, runner, journal, budget, dag_proof)))
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(clone, runner, journal, budget, dag_proof, escalate_fn=escalate_fn),
+        )
+    )
+    # pipeline() RETURNED (no whole-run raise) with t1 abandoned 'capacity'.
+    assert isinstance(res, list) and len(res) == 1
+    t1 = _abandoned_for(res, "t1")
+    assert t1 is not None and t1["category"] == "capacity"
     # The worker never spawned (refused at the budget gate).
     assert runner.call_count == 0
+    # escalate_fn fired once for the capacity abandon.
+    cap = [e for e in escalations if e.get("task_id") == "t1" and e.get("category") == "capacity"]
+    assert len(cap) == 1, f"expected one capacity escalation for t1, got {escalations}"
 
 
 def test_pipeline_journal_replay_costs_nothing_on_rerun(tmp_path):
@@ -1671,3 +1692,969 @@ def test_missing_declared_writes_helper_resolves_repo_relative(tmp_path):
     assert missing == ["absent.txt"]
     # A task that declares no writes is trivially satisfied.
     assert hs._missing_declared_writes({"task_id": "t"}, wt) == []
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# M5 — termination/cascade/escalation parity on the pipeline() path.
+#
+# These re-home the WaveDispatcher (Path A) guarantees onto pipeline() (Path B):
+#   (1) a dependent of a failed/abandoned upstream is CASCADE-abandoned
+#       (category "blocked", names the upstream, NEVER spawned, charges no
+#       attempt, escalates) — and the cascade is TRANSITIVE.
+#   (3) a per-task BudgetExceeded is a PER-TASK abandon (category "capacity") +
+#       escalate, NOT a whole-run abort: unrelated tasks still complete.
+#   (8) every dispatched task's attempt <= MAX_ATTEMPTS and no task is dispatched
+#       more than once.
+# All un-fakeable via runner call_count + the structured abandoned envelope +
+# the escalate_fn capture.
+# ════════════════════════════════════════════════════════════════════════════
+
+from scripts.pm_dispatch import MAX_ATTEMPTS  # noqa: E402
+
+
+class _FailingRunner(FakeCliRunner):
+    """A FakeCliRunner that returns is_error=True (→ FAILED_ATTEMPT) for any task
+    in ``fail_ids`` and a valid `done` envelope (creating declared writes) for the
+    rest.  Records per-task call counts so a cascade test can assert a downstream
+    was NEVER spawned (call_count for it == 0)."""
+
+    def __init__(self, *, fail_ids: set[str], writes: dict[str, list[str]] | None = None):
+        super().__init__(structured_output=None)
+        self.fail_ids = set(fail_ids)
+        self.writes = writes or {}
+        self.per_task_calls: dict[str, int] = {}
+
+    async def __call__(self, argv, cwd):
+        tid = _tid_from_argv(argv)
+        self.per_task_calls[tid] = self.per_task_calls.get(tid, 0) + 1
+        self.calls.append({"argv": list(argv), "cwd": cwd})
+        if tid in self.fail_ids:
+            # is_error=True ⇒ run_attempt returns FAILED_ATTEMPT (an attempt ran
+            # and failed) — the (i) terminal-failure encoding.
+            return {
+                "usage": {"output_tokens": 1},
+                "is_error": True,
+                "subtype": "error",
+                "session_id": "s",
+            }
+        for rel in self.writes.get(tid, []):
+            p = Path(cwd) / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"by {tid}")
+        return {
+            "usage": {"output_tokens": 5},
+            "is_error": False,
+            "subtype": "success",
+            "session_id": "s",
+            "structured_output": _env(tid),
+        }
+
+
+def _escalation_recorder():
+    """Return ``(escalations_list, escalate_fn)`` — escalate_fn appends each
+    escalation mapping so a test can assert it fired for a cascade/capacity
+    abandon."""
+    escalations: list[dict] = []
+
+    def escalate_fn(escalation):
+        escalations.append(dict(escalation))
+
+    return escalations, escalate_fn
+
+
+def _abandoned_for(results, tid):
+    """Find the structured abandoned result dict for *tid* in pipeline()'s return
+    (which is in (parallel_group, task_id) order)."""
+    for r in results:
+        if isinstance(r, dict) and r.get("task_id") == tid and r.get("status") == "abandoned":
+            return r
+    return None
+
+
+def test_pipeline_cascade_abandons_dependent_of_failed_upstream(tmp_path):
+    """t1 (writes a) <- t2 (depends_on t1). t1's attempt FAILS. Assert: t2 is
+    NEVER spawned (runner call_count for t2 == 0), t2's result is abandoned/blocked
+    naming t1, t2 charged NO attempt, escalate_fn called for t2 category 'blocked'."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "t1",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t2",
+            "parallel_group": 1,
+            "reads": ["a"],
+            "depends_on": ["t1"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _FailingRunner(fail_ids={"t1"}, writes=_writes_map(tasks))
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    escalations, escalate_fn = _escalation_recorder()
+
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(clone, runner, journal, budget, dag_proof, escalate_fn=escalate_fn),
+        )
+    )
+    # t1 attempted (and failed); t2 was NEVER dispatched (cascade gate held it).
+    assert runner.per_task_calls.get("t1", 0) >= 1
+    assert runner.per_task_calls.get("t2", 0) == 0, "t2 must NOT be spawned — its upstream failed"
+    # t2's result is a structured abandoned/blocked envelope naming t1.
+    t2 = _abandoned_for(res, "t2")
+    assert t2 is not None, f"t2 must be abandoned, got {res}"
+    assert t2["category"] == "blocked"
+    assert t2["upstream_task_id"] == "t1"
+    # escalate_fn fired for t2 with category 'blocked'.
+    blocked = [
+        e for e in escalations if e.get("task_id") == "t2" and e.get("category") == "blocked"
+    ]
+    assert len(blocked) == 1, f"expected one blocked escalation for t2, got {escalations}"
+
+
+def test_pipeline_cascade_reaches_transitive_descendant(tmp_path):
+    """Chain t1 <- t2 <- t3, t1 fails. BOTH t2 and t3 cascade-abandoned (never
+    spawned), each naming its FIRST abandoned ancestor; t3 proves transitivity
+    (a fix that abandons only direct dependents would leave t3 admitted)."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "t1",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t2",
+            "parallel_group": 1,
+            "reads": ["a"],
+            "writes": ["b"],
+            "depends_on": ["t1"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t3",
+            "parallel_group": 2,
+            "reads": ["b"],
+            "depends_on": ["t2"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _FailingRunner(fail_ids={"t1"}, writes=_writes_map(tasks))
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    escalations, escalate_fn = _escalation_recorder()
+
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(clone, runner, journal, budget, dag_proof, escalate_fn=escalate_fn),
+        )
+    )
+    assert runner.per_task_calls.get("t2", 0) == 0
+    assert runner.per_task_calls.get("t3", 0) == 0, "TRANSITIVITY: t3 must cascade too"
+    t2, t3 = _abandoned_for(res, "t2"), _abandoned_for(res, "t3")
+    assert t2 is not None and t2["category"] == "blocked" and t2["upstream_task_id"] == "t1"
+    assert t3 is not None and t3["category"] == "blocked"
+    # t3's first abandoned ancestor on its depends_on chain is t2 (which is itself
+    # abandoned because t1 failed) — the transitive cascade source.
+    assert t3["upstream_task_id"] == "t2"
+    # Each cascade-abandoned task escalated once.
+    for tid in ("t2", "t3"):
+        hits = [
+            e for e in escalations if e.get("task_id") == tid and e.get("category") == "blocked"
+        ]
+        assert len(hits) == 1, f"expected one blocked escalation for {tid}, got {escalations}"
+
+
+def test_pipeline_budget_exceeded_is_per_task_abandon_not_whole_run_abort(tmp_path):
+    """Independent t_ok + t_broke whose est trips BudgetExceeded for t_broke only
+    (a downstream of t_broke cascades). Assert: t_broke abandoned 'capacity' +
+    escalate once; t_ok completes done; pipeline() RETURNS (does not raise); the
+    dependent of t_broke is cascade-abandoned 'blocked'."""
+    clone = _git_init_clone(tmp_path)
+    # t_ok is independent and cheap; t_broke is expensive enough to trip the gate;
+    # t_dep depends on t_broke so it must cascade once t_broke is capacity-abandoned.
+    tasks = [
+        {
+            "task_id": "t_ok",
+            "parallel_group": 0,
+            "writes": ["ok"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t_broke",
+            "parallel_group": 0,
+            "writes": ["broke"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t_dep",
+            "parallel_group": 1,
+            "reads": ["broke"],
+            "depends_on": ["t_broke"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _FailingRunner(fail_ids=set(), writes=_writes_map(tasks))
+    journal = ResultJournal()
+    # effective_ceiling = 14_000 * 0.70 = 9_800. Per-task est for t_broke (opus
+    # via model_for below) = 12_000 > 9_800 ⇒ BudgetExceeded for t_broke; t_ok est
+    # (haiku) = 2_000 < 9_800 ⇒ completes.
+    budget = BudgetPool(total_tokens=14_000)
+    escalations, escalate_fn = _escalation_recorder()
+
+    def model_for(task, attempt):
+        return "opus" if task["task_id"] == "t_broke" else "haiku"
+
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(
+                clone,
+                runner,
+                journal,
+                budget,
+                dag_proof,
+                model_for=model_for,
+                escalate_fn=escalate_fn,
+            ),
+        )
+    )
+    # pipeline() RETURNED a result list (no whole-run raise).
+    assert isinstance(res, list)
+    # t_ok completed done.
+    ok = next((r for r in res if isinstance(r, dict) and r.get("task_id") == "t_ok"), None)
+    assert ok is not None and ok.get("status") == "done", f"t_ok should complete, got {res}"
+    # t_broke abandoned 'capacity' + escalated once.
+    broke = _abandoned_for(res, "t_broke")
+    assert broke is not None and broke["category"] == "capacity"
+    cap = [
+        e for e in escalations if e.get("task_id") == "t_broke" and e.get("category") == "capacity"
+    ]
+    assert len(cap) == 1, f"expected one capacity escalation for t_broke, got {escalations}"
+    # t_dep cascade-abandoned 'blocked' naming t_broke (never spawned).
+    assert runner.per_task_calls.get("t_dep", 0) == 0
+    dep = _abandoned_for(res, "t_dep")
+    assert dep is not None and dep["category"] == "blocked" and dep["upstream_task_id"] == "t_broke"
+
+
+def test_pipeline_per_task_attempt_bound_le_max_attempts(tmp_path):
+    """Every dispatched attempt is <= MAX_ATTEMPTS and no task is dispatched more
+    than once (call_count <= 1). Pairs with the mutation note: re-appending a task
+    to the admission set would make call_count exceed 1 → RED (non-tautology)."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "t1",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t2",
+            "parallel_group": 0,
+            "writes": ["b"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+
+    seen_attempts: list[int] = []
+
+    class _AttemptSpyRunner(FakeCliRunner):
+        def __init__(self):
+            super().__init__(structured_output=None)
+            self.writes = _writes_map(tasks)
+            self.per_task_calls: dict[str, int] = {}
+
+        async def __call__(self, argv, cwd):
+            tid = _tid_from_argv(argv)
+            # The attempt number rides the -p prompt: "(attempt N)".
+            m = re.search(r"\(attempt (\d+)\)", argv[2])
+            assert m is not None
+            seen_attempts.append(int(m.group(1)))
+            self.per_task_calls[tid] = self.per_task_calls.get(tid, 0) + 1
+            for rel in self.writes.get(tid, []):
+                (Path(cwd) / rel).write_text(f"by {tid}")
+            self.calls.append({"argv": list(argv), "cwd": cwd})
+            return {
+                "usage": {"output_tokens": 5},
+                "is_error": False,
+                "subtype": "success",
+                "structured_output": _env(tid),
+            }
+
+    runner = _AttemptSpyRunner()
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    res = _run(pipeline(tasks, **_pipeline_kwargs(clone, runner, journal, budget, dag_proof)))
+    assert [r["status"] for r in res] == ["done", "done"]
+    # Every dispatched attempt is within the MAX_ATTEMPTS budget ceiling.
+    assert all(1 <= a <= MAX_ATTEMPTS for a in seen_attempts), seen_attempts
+    # No task dispatched more than once (pipeline dispatches each task at attempt 1).
+    assert all(c <= 1 for c in runner.per_task_calls.values()), runner.per_task_calls
+
+
+def test_pipeline_cascade_on_failed_status_envelope_upstream(tmp_path):
+    """M5 (2) classifier — a worker-authored validated ``status="failed"`` envelope
+    is a TERMINAL FAILURE (parity with Path A pm_dispatch.py:802-821), NOT a
+    success: its dependent CASCADE-abandons. A classifier that treated any
+    validated envelope as success would admit t2 on a non-existent input (silent
+    corruption) — this test catches that."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "t1",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t2",
+            "parallel_group": 1,
+            "reads": ["a"],
+            "depends_on": ["t1"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+
+    class _FailedStatusRunner(FakeCliRunner):
+        def __init__(self):
+            super().__init__(structured_output=None)
+            self.per_task_calls: dict[str, int] = {}
+
+        async def __call__(self, argv, cwd):
+            tid = _tid_from_argv(argv)
+            self.per_task_calls[tid] = self.per_task_calls.get(tid, 0) + 1
+            self.calls.append({"argv": list(argv), "cwd": cwd})
+            # t1 returns a VALIDATED `failed` envelope (a hard run-and-failed —
+            # accepted by validate_envelope, charged + journaled, but NOT a success).
+            so = {
+                "type": "task_result",
+                "task_id": tid,
+                "attempt": 1,
+                "status": "failed",
+                "artifacts": [],
+                "notes_md": "unrecoverable",
+            }
+            return {
+                "usage": {"output_tokens": 3},
+                "is_error": False,
+                "subtype": "success",
+                "structured_output": so,
+            }
+
+    runner = _FailedStatusRunner()
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    escalations, escalate_fn = _escalation_recorder()
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(clone, runner, journal, budget, dag_proof, escalate_fn=escalate_fn),
+        )
+    )
+    # t1 ran (and returned `failed`); t2 was NEVER spawned (cascade held it).
+    assert runner.per_task_calls.get("t1", 0) == 1
+    assert runner.per_task_calls.get("t2", 0) == 0, "t2 must cascade: its upstream `failed`"
+    # t2 is cascade-abandoned 'blocked' naming t1.
+    t2 = _abandoned_for(res, "t2")
+    assert t2 is not None and t2["category"] == "blocked" and t2["upstream_task_id"] == "t1"
+    # t1's own `failed` envelope escalated under category 'failed' (Path A parity).
+    failed_esc = [
+        e for e in escalations if e.get("task_id") == "t1" and e.get("category") == "failed"
+    ]
+    assert len(failed_esc) == 1, f"expected one 'failed' escalation for t1, got {escalations}"
+
+
+def test_result_is_success_classifier_only_done_is_success():
+    """Unit: ``_result_is_success`` is True ONLY for a validated `done` envelope;
+    every other terminal encoding (FAILED_ATTEMPT, structured abandoned, a worker
+    failed/abandoned/blocked/needs-input envelope, None) is a NON-success."""
+    import scripts.host_scheduler as hs
+    from scripts.cli_dispatch import FAILED_ATTEMPT
+
+    assert hs._result_is_success({"status": "done"}) is True
+    assert hs._result_is_success(FAILED_ATTEMPT) is False
+    assert hs._result_is_success(None) is False
+    assert (
+        hs._result_is_success(
+            hs._abandoned_result(
+                "t", category="blocked", upstream_task_id="u", last_status="cascade"
+            )
+        )
+        is False
+    )
+    for bad in ("failed", "abandoned", "blocked", "needs-input"):
+        assert hs._result_is_success({"status": bad}) is False, bad
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# M5 review round 2 — Path-A parity hardening + coverage (review @ 7aa863b).
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class _StatusEnvelopeRunner(FakeCliRunner):
+    """A FakeCliRunner that returns a per-task VALIDATED envelope with a
+    configurable status + notes_md (so a worker self-`abandoned` / `failed` /
+    false-`done` can be exercised end-to-end through pipeline()). Records per-task
+    call counts. Honest `done` writers create their declared writes."""
+
+    def __init__(self, *, specs: dict[str, dict], writes: dict[str, list[str]] | None = None):
+        super().__init__(structured_output=None)
+        # specs[tid] = {"status":..., "notes_md":..., "artifacts":..., "write": bool}
+        self.specs = specs
+        self.writes = writes or {}
+        self.per_task_calls: dict[str, int] = {}
+
+    async def __call__(self, argv, cwd):
+        tid = _tid_from_argv(argv)
+        self.per_task_calls[tid] = self.per_task_calls.get(tid, 0) + 1
+        self.calls.append({"argv": list(argv), "cwd": cwd})
+        spec = self.specs.get(tid, {"status": "done"})
+        status = spec.get("status", "done")
+        # Only an HONEST `done` writer (spec.write True) creates its declared
+        # outputs; a false-`done` (write False) writes nothing.
+        if status == "done" and spec.get("write", True):
+            for rel in self.writes.get(tid, []):
+                p = Path(cwd) / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(f"by {tid}")
+        so = {
+            "type": "task_result",
+            "task_id": tid,
+            "attempt": 1,
+            "status": status,
+            "artifacts": spec.get("artifacts", [{"path": "f.py", "sha": "s"}]),
+            "notes_md": spec.get("notes_md", "ok"),
+        }
+        return {
+            "usage": {"output_tokens": 4},
+            "is_error": False,
+            "subtype": "success",
+            "structured_output": so,
+        }
+
+
+def test_pipeline_worker_self_abandon_escalates_parsed_category(tmp_path):
+    """FIX 1 (E2/O1) — a worker SELF-abandon envelope (status='abandoned',
+    notes_md line-1 'ABANDON: capacity: ...') must escalate under the PARSED
+    category 'capacity' (Path A parity via _parse_abandon_category), NOT None.
+    Its dependent cascade-abandons 'blocked' naming the upstream and is never
+    spawned. On pre-fix code the upstream's self-escalation category is None (the
+    is_abandoned_result branch reads keys absent on a worker envelope) → RED."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "u",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "d",
+            "parallel_group": 1,
+            "reads": ["a"],
+            "depends_on": ["u"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _StatusEnvelopeRunner(
+        specs={
+            "u": {
+                "status": "abandoned",
+                "notes_md": "ABANDON: capacity: ran out of room",
+                "artifacts": [{"path": "x", "sha": "y"}],
+            },
+        },
+        writes=_writes_map(tasks),
+    )
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    escalations, escalate_fn = _escalation_recorder()
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(clone, runner, journal, budget, dag_proof, escalate_fn=escalate_fn),
+        )
+    )
+    # (a) dependent cascades 'blocked' naming u, never spawned.
+    assert runner.per_task_calls.get("d", 0) == 0
+    d = _abandoned_for(res, "d")
+    assert d is not None and d["category"] == "blocked" and d["upstream_task_id"] == "u"
+    # (b) the upstream's OWN self-escalation carries the PARSED category 'capacity'.
+    u_esc = [e for e in escalations if e.get("task_id") == "u"]
+    assert len(u_esc) == 1, f"expected one self-escalation for u, got {escalations}"
+    assert u_esc[0]["category"] == "capacity", f"parsed category lost: {u_esc[0]}"
+    assert u_esc[0]["last_status"] == "abandoned"
+    assert u_esc[0]["upstream_task_id"] is None
+
+
+def test_failed_envelope_category_parses_abandoned_notes_md():
+    """FIX 1 defense-in-depth — _failed_envelope_category for a worker `abandoned`
+    envelope parses the ABANDON_RE category from notes_md (NOT the literal
+    out-of-grammar 'abandoned'); failed/blocked/needs-input still return str(status)."""
+    import scripts.host_scheduler as hs
+
+    aband = {"status": "abandoned", "notes_md": "ABANDON: conflict: two writers", "artifacts": []}
+    assert hs._failed_envelope_category(aband) == "conflict"
+    # No/garbage notes_md → defensive 'capacity' (matches _parse_abandon_category fallback).
+    assert hs._failed_envelope_category({"status": "abandoned", "notes_md": ""}) == "capacity"
+    # failed/blocked/needs-input keep their own status string (those match Path A).
+    assert hs._failed_envelope_category({"status": "failed", "notes_md": "x"}) == "failed"
+    assert hs._failed_envelope_category({"status": "blocked", "notes_md": "x"}) == "blocked"
+    assert hs._failed_envelope_category({"status": "needs-input", "notes_md": "x"}) == "needs-input"
+    # This path's OWN structured abandon (has category + upstream_task_id) → None.
+    structured = hs._abandoned_result(
+        "t", category="blocked", upstream_task_id="u", last_status="cascade"
+    )
+    assert hs._failed_envelope_category(structured) is None
+    # done / non-mapping → None.
+    assert hs._failed_envelope_category({"status": "done"}) is None
+    assert hs._failed_envelope_category(None) is None
+
+
+def test_pipeline_cascade_escalation_survives_max_attempts_gate_raise(tmp_path):
+    """FIX 2 (E1) — if the defensive MAX_ATTEMPTS gate raises in the SAME admission
+    pass that cascade-abandoned a task, the cascaded task's GUARANTEED escalation
+    must STILL have fired before the run aborts. On pre-fix code the queued
+    cascade_escalations are flushed only AFTER the (raising) block → lost → RED."""
+    clone = _git_init_clone(tmp_path)
+    # Pass 1 dispatches t_fail (fails) + t_gate (ok). Pass 2: t_fail is now
+    # abandoned ⇒ t_dep CASCADES (escalation queued this pass); t_gate is now done
+    # ⇒ t_over becomes ready in the SAME pass with attempts=MAX_ATTEMPTS so
+    # _attempt_for→6 trips the defensive gate, raising INSIDE the block AFTER
+    # t_dep's cascade escalation was queued. (t_over depends on t_gate, not on the
+    # failed task, so it does NOT itself cascade — it reaches the admission/gate.)
+    tasks = [
+        {
+            "task_id": "t_fail",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t_gate",
+            "parallel_group": 0,
+            "writes": ["g"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t_dep",
+            "parallel_group": 1,
+            "reads": ["a"],
+            "depends_on": ["t_fail"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "t_over",
+            "parallel_group": 1,
+            "reads": ["g"],
+            "writes": ["b"],
+            "depends_on": ["t_gate"],
+            "attempts": MAX_ATTEMPTS,
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _FailingRunner(fail_ids={"t_fail"}, writes=_writes_map(tasks))
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    escalations, escalate_fn = _escalation_recorder()
+    with pytest.raises(RuntimeError, match=r"obligation \(c\) breach"):
+        _run(
+            pipeline(
+                tasks,
+                **_pipeline_kwargs(
+                    clone, runner, journal, budget, dag_proof, escalate_fn=escalate_fn
+                ),
+            )
+        )
+    # The cascaded task's escalation STILL fired despite the gate raise.
+    dep_esc = [
+        e for e in escalations if e.get("task_id") == "t_dep" and e.get("category") == "blocked"
+    ]
+    assert len(dep_esc) == 1, f"cascade escalation LOST on gate raise: {escalations}"
+
+
+def test_pipeline_max_attempts_gate_trips_on_over_budget_attempt(tmp_path):
+    """FIX 4 (Obi-V2) — behavioral coverage for the defensive MAX_ATTEMPTS gate:
+    a ready task pre-set to attempts=MAX_ATTEMPTS makes _attempt_for→6 > 5, which
+    MUST raise (deleting the gate keeps the rest of the suite green, so this is its
+    only coverage)."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "t1",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "attempts": MAX_ATTEMPTS,
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _FailingRunner(fail_ids=set(), writes=_writes_map(tasks))
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    with pytest.raises(RuntimeError, match=r"obligation \(c\) breach"):
+        _run(pipeline(tasks, **_pipeline_kwargs(clone, runner, journal, budget, dag_proof)))
+    # The over-budget task was NEVER dispatched (the gate refused it pre-spawn).
+    assert runner.per_task_calls.get("t1", 0) == 0
+
+
+def test_pipeline_cascade_on_false_done_upstream(tmp_path):
+    """FIX 6 (Obi-O2) — an upstream that returns `done` but writes NONE of its
+    declared outputs (false-`done` #120 → FAILED_ATTEMPT) is a cascade SOURCE: its
+    dependent cascade-abandons 'blocked' naming it and is never spawned. Pins the
+    false-done→cascade path so a future split from FAILED_ATTEMPT can't regress."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "u",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "d",
+            "parallel_group": 1,
+            "reads": ["a"],
+            "depends_on": ["u"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    # u returns `done` but writes nothing (write=False) → false-`done` guard
+    # converts it to FAILED_ATTEMPT.
+    runner = _StatusEnvelopeRunner(
+        specs={"u": {"status": "done", "write": False}},
+        writes=_writes_map(tasks),
+    )
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    escalations, escalate_fn = _escalation_recorder()
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(clone, runner, journal, budget, dag_proof, escalate_fn=escalate_fn),
+        )
+    )
+    assert runner.per_task_calls.get("u", 0) == 1
+    assert runner.per_task_calls.get("d", 0) == 0, "d must cascade: upstream false-`done`"
+    d = _abandoned_for(res, "d")
+    assert d is not None and d["category"] == "blocked" and d["upstream_task_id"] == "u"
+    # A bare FAILED_ATTEMPT does NOT self-escalate; only the dependent's cascade does.
+    dep_esc = [e for e in escalations if e.get("task_id") == "d" and e.get("category") == "blocked"]
+    assert len(dep_esc) == 1
+
+
+def test_pipeline_diamond_cascade_picks_deterministic_ancestor(tmp_path):
+    """FIX 6 (Obi-O3) — multi-parent cascade. A child depending on one ABANDONED
+    and one OK parent cascades, naming the abandoned parent. A child with TWO
+    abandoned parents names the DETERMINISTIC ancestor _first_abandoned_ancestor
+    returns (LIFO frontier.pop over depends_on order). Pin the actual value so a
+    refactor that changes pop-order is RED."""
+    clone = _git_init_clone(tmp_path)
+    # Diamond-ish: p_bad fails; p_ok succeeds; child c1 depends_on [p_bad, p_ok].
+    # c2 depends_on [p_bad, p_bad2] where BOTH are abandoned (p_bad2 also fails).
+    tasks = [
+        {
+            "task_id": "p_bad",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "p_bad2",
+            "parallel_group": 0,
+            "writes": ["a2"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "p_ok",
+            "parallel_group": 0,
+            "writes": ["b"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "c1",
+            "parallel_group": 1,
+            "reads": ["a", "b"],
+            "depends_on": ["p_bad", "p_ok"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "c2",
+            "parallel_group": 1,
+            "reads": ["a", "a2"],
+            "depends_on": ["p_bad", "p_bad2"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _FailingRunner(fail_ids={"p_bad", "p_bad2"}, writes=_writes_map(tasks))
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    escalations, escalate_fn = _escalation_recorder()
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(clone, runner, journal, budget, dag_proof, escalate_fn=escalate_fn),
+        )
+    )
+    # p_ok completed; both bad parents abandoned (failed attempt).
+    p_ok = next((r for r in res if isinstance(r, dict) and r.get("task_id") == "p_ok"), None)
+    assert p_ok is not None and p_ok.get("status") == "done"
+    # c1: one abandoned parent (p_bad) → cascades naming p_bad (the only abandoned).
+    assert runner.per_task_calls.get("c1", 0) == 0
+    c1 = _abandoned_for(res, "c1")
+    assert c1 is not None and c1["category"] == "blocked" and c1["upstream_task_id"] == "p_bad"
+    # c2: TWO abandoned parents [p_bad, p_bad2] → BFS frontier = list(depends_on),
+    # pop() is LIFO so the LAST depends_on entry (p_bad2) is examined first.
+    assert runner.per_task_calls.get("c2", 0) == 0
+    c2 = _abandoned_for(res, "c2")
+    assert c2 is not None and c2["category"] == "blocked"
+    assert c2["upstream_task_id"] == "p_bad2", (
+        f"deterministic ancestor pick changed: {c2['upstream_task_id']} "
+        "(BFS frontier.pop LIFO over depends_on → last entry p_bad2)"
+    )
+    # Both children escalated once (guaranteed), each naming its picked ancestor.
+    c1_esc = [e for e in escalations if e.get("task_id") == "c1" and e.get("category") == "blocked"]
+    c2_esc = [e for e in escalations if e.get("task_id") == "c2" and e.get("category") == "blocked"]
+    assert len(c1_esc) == 1 and c1_esc[0]["upstream_task_id"] == "p_bad"
+    assert len(c2_esc) == 1 and c2_esc[0]["upstream_task_id"] == "p_bad2"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# M5 review round 3 — exactly-once escalation under a raising sink (E1-R2) +
+# un-spoofable structured-abandon disambiguation (E2-R2). Review @ 756ab15.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_pipeline_cascade_escalation_exactly_once_even_if_sink_raises(tmp_path):
+    """FIX A (E1-R2) — two INDEPENDENT cascade sources fail in one pass so
+    cascade_escalations == [esc(d1), esc(d2)]; escalate_fn RAISES on its 2nd call.
+    Assert: (a) each cascaded task_id appears EXACTLY ONCE across the fire log (no
+    double-fire of the prefix already flushed before the raise), AND (b) the run
+    still raises the original sink exception. On pre-fix code the for-loop fires d1,
+    d2 raises → except re-flushes the WHOLE list → d1 fires TWICE → RED."""
+    clone = _git_init_clone(tmp_path)
+    # Two independent failing roots (f1, f2), each with its own dependent (d1, d2).
+    # f1/f2 are write-disjoint and independent → both dispatched + fail in pass 1;
+    # in pass 2 d1 AND d2 both cascade in the SAME pass (two queued escalations).
+    tasks = [
+        {
+            "task_id": "f1",
+            "parallel_group": 0,
+            "writes": ["a1"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "f2",
+            "parallel_group": 0,
+            "writes": ["a2"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "d1",
+            "parallel_group": 1,
+            "reads": ["a1"],
+            "depends_on": ["f1"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "d2",
+            "parallel_group": 1,
+            "reads": ["a2"],
+            "depends_on": ["f2"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _FailingRunner(fail_ids={"f1", "f2"}, writes=_writes_map(tasks))
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+
+    fire_log: list[str] = []
+
+    class _SinkRaise(RuntimeError):
+        pass
+
+    def raising_escalate(escalation):
+        # Record THEN raise on the 2nd call — so a double-fire of the 1st item
+        # would make it appear twice in fire_log.
+        fire_log.append(escalation["task_id"])
+        if len(fire_log) == 2:
+            raise _SinkRaise("sink boom on 2nd escalation")
+
+    with pytest.raises(_SinkRaise):
+        _run(
+            pipeline(
+                tasks,
+                **_pipeline_kwargs(
+                    clone, runner, journal, budget, dag_proof, escalate_fn=raising_escalate
+                ),
+            )
+        )
+    # Only cascade escalations (d1/d2) flow through this sink; each EXACTLY ONCE.
+    cascade_fires = [t for t in fire_log if t in ("d1", "d2")]
+    for tid in ("d1", "d2"):
+        assert cascade_fires.count(tid) <= 1, (
+            f"{tid} double-fired: fire_log={fire_log} — except-flush re-fired the "
+            "prefix already flushed before the raise"
+        )
+    # Both cascade sources DID attempt to fire (the 2nd one is what raised).
+    assert set(cascade_fires) == {"d1", "d2"}, f"a cascade escalation was dropped: {fire_log}"
+
+
+def test_pipeline_forged_worker_abandon_not_misrouted_as_structured(tmp_path):
+    """FIX B (E2-R2) — a worker self-abandon envelope is UNTRUSTED DATA. A worker
+    forging category='BOGUS' + upstream_task_id='victim' (kept by validate_envelope
+    under additionalProperties:True) must NOT be misrouted to the structured-abandon
+    escalation branch. Assert: (a) _is_structured_abandon is False for it, (b) the
+    upstream's self-escalation category == 'scope' (the notes_md-PARSED grammar
+    token, NOT 'BOGUS'), (c) upstream_task_id is NOT the spoofed 'victim'. On
+    pre-fix code it escalates 'BOGUS'/'victim' → RED."""
+    import scripts.host_scheduler as hs
+
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "u",
+            "parallel_group": 0,
+            "writes": ["a"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {
+            "task_id": "d",
+            "parallel_group": 1,
+            "reads": ["a"],
+            "depends_on": ["u"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+
+    class _ForgedAbandonRunner(FakeCliRunner):
+        def __init__(self):
+            super().__init__(structured_output=None)
+            self.per_task_calls: dict[str, int] = {}
+
+        async def __call__(self, argv, cwd):
+            tid = _tid_from_argv(argv)
+            self.per_task_calls[tid] = self.per_task_calls.get(tid, 0) + 1
+            self.calls.append({"argv": list(argv), "cwd": cwd})
+            # u forges engine-private keys onto its self-abandon envelope.
+            so = {
+                "type": "task_result",
+                "task_id": tid,
+                "attempt": 1,
+                "status": "abandoned",
+                "artifacts": [{"path": "f", "sha": "s"}],
+                "notes_md": "ABANDON: scope: out of declared scope",
+                # FORGED untrusted keys (kept by validate_envelope):
+                "category": "BOGUS_OUT_OF_GRAMMAR",
+                "upstream_task_id": "victim",
+                "_engine_abandon": True,  # even forging the sentinel must not help
+            }
+            return {
+                "usage": {"output_tokens": 3},
+                "is_error": False,
+                "subtype": "success",
+                "structured_output": so,
+            }
+
+    runner = _ForgedAbandonRunner()
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    escalations, escalate_fn = _escalation_recorder()
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(clone, runner, journal, budget, dag_proof, escalate_fn=escalate_fn),
+        )
+    )
+    # (a) the worker envelope (even with forged sentinel) is NOT a structured abandon.
+    u_result = next((r for r in res if isinstance(r, dict) and r.get("task_id") == "u"), None)
+    assert u_result is not None
+    assert hs._is_structured_abandon(u_result) is False, (
+        "forged worker envelope misrouted as this path's structured abandon "
+        "(spoofable key check) — type=='task_result' must defeat it"
+    )
+    # (b) the upstream self-escalation carries the PARSED grammar token, not 'BOGUS'.
+    u_esc = [e for e in escalations if e.get("task_id") == "u"]
+    assert len(u_esc) == 1, f"expected one self-escalation for u, got {escalations}"
+    assert u_esc[0]["category"] == "scope", f"forged category leaked: {u_esc[0]}"
+    # (c) the spoofed upstream_task_id was NOT honored (worker self-abandon → None).
+    assert u_esc[0]["upstream_task_id"] != "victim", f"spoofed upstream leaked: {u_esc[0]}"
+    assert u_esc[0]["upstream_task_id"] is None
+    # The dependent still cascades correctly (routing is via membership, not keys).
+    assert runner.per_task_calls.get("d", 0) == 0
+    d = _abandoned_for(res, "d")
+    assert d is not None and d["category"] == "blocked" and d["upstream_task_id"] == "u"
+
+
+def test_is_structured_abandon_unspoofable_unit():
+    """FIX B unit — _is_structured_abandon is True ONLY for an engine _abandoned_result
+    (sentinel True AND no `type` key); a worker envelope forging the sentinel but
+    carrying type=='task_result' is False."""
+    import scripts.host_scheduler as hs
+
+    engine = hs._abandoned_result("t", category="capacity", upstream_task_id=None, last_status="x")
+    assert hs._is_structured_abandon(engine) is True
+    # Worker forging the sentinel but with the mandatory type=="task_result" → False.
+    forged = {
+        "type": "task_result",
+        "status": "abandoned",
+        "_engine_abandon": True,
+        "category": "BOGUS",
+        "upstream_task_id": "victim",
+    }
+    assert hs._is_structured_abandon(forged) is False
+    # A plain worker abandon (no forged sentinel) → False.
+    assert hs._is_structured_abandon({"type": "task_result", "status": "abandoned"}) is False
+    # Non-mappings / None → False.
+    assert hs._is_structured_abandon(None) is False

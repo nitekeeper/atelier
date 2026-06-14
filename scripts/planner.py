@@ -237,23 +237,88 @@ def check_reviewer_disjointness(tasks: list[dict[str, Any]]) -> None:
                 f"in the task list (known task_ids: {known}). Point `reviews` at "
                 f"an in-list implement task."
             )
-        reviewer_persona = t.get("assigned_persona")
-        reviewed_persona = by_id[reviews].get("assigned_persona")
-        if not reviewer_persona or not reviewed_persona:
-            raise PlannerDagInvalid(
-                f"reviewer-disjointness: review task {tid!r} or the task {reviews!r} "
-                f"it reviews is missing assigned_persona (reviewer="
-                f"{reviewer_persona!r}, reviewed={reviewed_persona!r}). Both must "
-                f"name a persona so reviewer independence can be verified."
-            )
-        if reviewer_persona == reviewed_persona:
-            raise PlannerDagInvalid(
-                f"reviewer-disjointness: review task {tid!r} is assigned persona "
-                f"{reviewer_persona!r}, the SAME persona as the implement task "
-                f"{reviews!r} it reviews. A reviewer MUST be a DIFFERENT persona "
-                f"than the implementer (separation of duties, A4/P2/F9). "
-                f"Re-assign {tid!r} to another persona."
-            )
+        # Persona-disjointness is the SHARED predicate (one comparator, no drift):
+        # synthesis-time here and dispatch-time in the host scheduler both call
+        # `assert_reviewer_disjoint`, so the EXACT-STRING compare can never diverge.
+        assert_reviewer_disjoint(t, by_id[reviews])
+
+
+def assert_reviewer_disjoint(
+    reviewer: dict[str, Any],
+    reviewed: dict[str, Any],
+) -> None:
+    """The CANONICAL reviewer/reviewed persona-disjointness comparator (atelier#59).
+
+    Raises :class:`PlannerDagInvalid` iff *reviewer* and *reviewed* violate
+    separation-of-duties: either side is missing ``assigned_persona`` (a missing
+    one is a DEFECT, not "disjoint by absence" — the silent fail-open hazard), or
+    the two ``assigned_persona`` values are EQUAL (EXACT-STRING compare on the
+    canonical roster ids; no normalization).
+
+    SINGLE SOURCE OF TRUTH. :func:`check_reviewer_disjointness` calls this at
+    synthesis time, and the host scheduler (:func:`scripts.host_scheduler.pipeline`)
+    calls the SAME predicate at dispatch time — so the comparator never drifts
+    between the plan gate and the dispatch re-check (defense in depth: a reviewer
+    re-assigned to the implementer's persona AFTER synthesis is still caught).
+
+    Pure, side-effect-free, ``.get()``-safe.
+    """
+    reviewer_id = reviewer.get("task_id", "?")
+    reviewed_id = reviewed.get("task_id", "?")
+    reviewer_persona = reviewer.get("assigned_persona")
+    reviewed_persona = reviewed.get("assigned_persona")
+    if not reviewer_persona or not reviewed_persona:
+        raise PlannerDagInvalid(
+            f"reviewer-disjointness: review task {reviewer_id!r} or the task "
+            f"{reviewed_id!r} it reviews is missing assigned_persona (reviewer="
+            f"{reviewer_persona!r}, reviewed={reviewed_persona!r}). Both must "
+            f"name a persona so reviewer independence can be verified."
+        )
+    if reviewer_persona == reviewed_persona:
+        raise PlannerDagInvalid(
+            f"reviewer-disjointness: review task {reviewer_id!r} is assigned persona "
+            f"{reviewer_persona!r}, the SAME persona as the implement task "
+            f"{reviewed_id!r} it reviews. A reviewer MUST be a DIFFERENT persona "
+            f"than the implementer (separation of duties, A4/P2/F9). "
+            f"Re-assign {reviewer_id!r} to another persona."
+        )
+
+
+def build_review_pairing(tasks: list[dict[str, Any]]) -> dict[str, str]:
+    """Return the BIDIRECTIONAL implement↔review task-id pairing (atelier M6b-1).
+
+    Walks the in-memory task list and, for each REVIEW task (one that carries a
+    validated ``reviews: "<task_id>"`` field), records BOTH directions in one dict:
+
+      * ``implement_task_id -> review_task_id`` (so the implement dispatch can find
+        its paired reviewer to run the nested review-fix loop), and
+      * ``review_task_id -> implement_task_id`` (so the dispatch-time disjointness
+        re-check can resolve the task a reviewer reviews).
+
+    Reuses the same ``by_id`` index pattern as :func:`check_reviewer_disjointness`
+    so pairing and disjointness share ONE canonical resolution. ASSUMES the list
+    already passed :func:`check_reviewer_disjointness` (valid, non-self, in-list
+    ``reviews`` pointers); it is ``.get()``-safe and skips any malformed/dangling
+    pointer rather than raising. ``reviews`` exists ONLY in the in-memory task list
+    (it is never persisted — see :func:`persist_tasks`), so this is the host path's
+    sole source for the pairing.
+
+    Pure, side-effect-free. A list with no review tasks yields ``{}``.
+    """
+    by_id = {t.get("task_id"): t for t in tasks}
+    pairing: dict[str, str] = {}
+    for t in tasks:
+        reviews = t.get("reviews")
+        if not isinstance(reviews, str) or not reviews:
+            continue  # not a review task (or a malformed pointer — skip, .get-safe)
+        review_id = t.get("task_id")
+        if not isinstance(review_id, str) or not review_id:
+            continue
+        if reviews == review_id or reviews not in by_id:
+            continue  # self-reference / dangling — skip (assume already validated)
+        pairing[reviews] = review_id  # implement -> review
+        pairing[review_id] = reviews  # review -> implement
+    return pairing
 
 
 def persist_tasks(

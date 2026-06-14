@@ -399,6 +399,35 @@ def _failed_envelope_category(result: Any) -> str | None:
     return None
 
 
+def _reviewer_verdict(result: Any, succeeded: bool) -> str:
+    """Classify a reviewer dispatch result into the review-fix loop verdict
+    (M6b-1): ``"pass"`` / ``"block"`` / ``"abandon"``.
+
+    A reviewer is just another worker — its envelope IS the verdict:
+
+      * ``"pass"`` — a validated ``done`` envelope (``succeeded`` True per
+        :func:`_result_is_success`). The implement output is clean; the loop ends.
+      * ``"block"`` — a deliberate BLOCKING VERDICT the reviewer authored:
+        ``status == "blocked"`` or ``"needs-input"``. The reviewer ran fine and
+        found issues; the implement is re-dispatched to FIX.
+      * ``"abandon"`` — a reviewer WORKER FAILURE, NOT a verdict: a
+        ``_FailedAttempt`` sentinel (CLI error / timeout), this path's structured
+        capacity-abandon (the child budget tripped), or a worker-authored
+        ``failed`` / ``abandoned`` envelope. The implement is NOT re-dispatched (a
+        broken reviewer cannot grade); the reviewer cascades to ITS dependents.
+
+    The block-vs-abandon split is load-bearing (T5): a blocking VERDICT triggers
+    a fix; an abandoning reviewer does not. A bare ``done`` is the ONLY pass.
+    """
+    if succeeded and _result_is_success(result):
+        return "pass"
+    if isinstance(result, Mapping) and not _is_structured_abandon(result):
+        status = result.get("status")
+        if status in ("blocked", "needs-input"):
+            return "block"
+    return "abandon"
+
+
 # ── (3) Worktree isolation ──────────────────────────────────────────────────
 
 #: Fixed INTERNAL git identity for the engine's own commits (writer-result
@@ -769,6 +798,7 @@ async def pipeline(
     sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
     escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
     max_budget_usd: float | None = None,
+    review_pairing: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Advance *tasks* BARRIER-FREE along proven-independent DAG edges.
 
@@ -842,6 +872,9 @@ async def pipeline(
        M5 obligation and is NOT a regression.
     """
     ordered = sorted(tasks, key=_sort_key)
+    # Normalize the None-default pairing (avoid a mutable default arg; parity with
+    # the None pattern in run_host_pipeline_for_project + CliDispatchTools).
+    review_pairing = review_pairing or {}
     key_tracker = JournalKeyTracker(journal)
     # GUARANTEED-emitting escalation sink (parity with WaveDispatcher). Never a
     # best-effort default — _default_escalate always logs a WARNING.
@@ -849,6 +882,42 @@ async def pipeline(
     # In-memory task index for the bounded ancestor BFS (parity with
     # WaveDispatcher._task_index): task_id → task dict, for walking depends_on.
     task_index: dict[str, Mapping[str, Any]] = {_task_id(t): t for t in ordered}
+    # M6b-1 — the review-fix loop pairing. ``review_pairing`` is the BIDIRECTIONAL
+    # implement↔review task-id map (planner.build_review_pairing): it carries each
+    # pair twice (``impl_id -> review_id`` AND ``review_id -> impl_id``). Split it
+    # into the two ORIENTED single-direction indexes the loop reads:
+    #   * review_by_implement[impl_id] = review_id — an IMPLEMENT task that has a
+    #     paired reviewer drives the nested review-fix loop after it succeeds.
+    #   * implement_by_review[review_id] = impl_id — a REVIEW task is driven by its
+    #     implement (NOT admitted independently) and resolves the reviewed task for
+    #     the dispatch-time disjointness re-check.
+    # Orientation comes from the in-memory tasks' own ``reviews`` field (the SAME
+    # source build_review_pairing read — the review task carries ``reviews``, the
+    # implement does not), and a pair is ACTIVATED only when BOTH directions are
+    # present in ``review_pairing`` (the caller's explicit opt-in) AND both endpoints
+    # are in this task set (defense in depth — a pairing pointing outside the
+    # dispatched set is ignored). Empty ``review_pairing`` ⇒ both maps empty ⇒
+    # byte-for-byte the pre-M6b-1 single-dispatch behavior.
+    review_by_implement: dict[str, str] = {}
+    implement_by_review: dict[str, str] = {}
+    # Lazy import (parity with the compute_dag_proof import in the host entrypoint):
+    # the shared disjointness comparator is used ONLY when a pairing is active.
+    from scripts.planner import assert_reviewer_disjoint as _assert_reviewer_disjoint
+
+    for t in ordered:
+        reviews = t.get("reviews")
+        if not isinstance(reviews, str) or not reviews:
+            continue
+        review_id = _task_id(t)
+        impl_id = reviews
+        if (
+            review_id in task_index
+            and impl_id in task_index
+            and review_pairing.get(impl_id) == review_id
+            and review_pairing.get(review_id) == impl_id
+        ):
+            review_by_implement[impl_id] = review_id
+            implement_by_review[review_id] = impl_id
     # The cascade-abandon SOURCE set — task_ids that ended abandoned (failed
     # attempt, budget capacity, or cascade blocked). Parity with
     # WaveDispatcher.abandoned_ids; accumulated as each task finalizes so the
@@ -945,275 +1014,443 @@ async def pipeline(
                 return False
         return True
 
+    async def _dispatch_one_attempt(
+        the_task: Mapping[str, Any],
+        attempt: int,
+        the_budget: BudgetPool,
+        *,
+        extra_upstream_hashes: Sequence[str] = (),
+    ) -> tuple[Any, str | None, bool]:
+        """Dispatch ONE attempt of *the_task* and return ``(result, jkey, succeeded)``.
+
+        Encapsulates the per-attempt mechanics SHARED by the main dispatch and the
+        M6b-1 nested review-fix loop: the seam calls, the SHARED ``semaphore``
+        (NEVER a second one — the global concurrency cap is one counter), the
+        optional per-writer worktree carve, ``run_attempt`` charged against
+        *the_budget* (the parent pool for the first attempt, a CHILD pool for the
+        fix loop — charges bubble to the parent), the false-`done` guard, and the
+        EAGER worktree merge-on-success / discard-on-fail (so TERMINAL ⟹ MERGED is
+        preserved for downstreams). ``BudgetExceeded`` is converted to a structured
+        capacity-abandon result (M5 per-task semantics) — it does NOT propagate.
+
+        ``extra_upstream_hashes`` is APPENDED to the DAG-derived
+        ``upstream_envelope_hashes`` (M6b-1): the journal key is content-addressed
+        and IGNORES ``attempt`` (a fresh attempt with identical inputs REPLAYS), so
+        a fix re-dispatch makes genuine progress ONLY when its INPUTS differ — the
+        review-fix loop threads the reviewer's BLOCKING-envelope hash here so the
+        FIX is a content-genuinely-different dispatch ("implement, GIVEN the
+        reviewer's feedback") that re-runs rather than replaying the blocked output.
+
+        Does NOT touch ``terminal`` / ``results`` / ``in_flight`` /
+        ``pipeline_abandoned`` / escalation — that finalization is the caller's job
+        (:func:`_finalize_task`), so the loop can drive several attempts before one
+        terminal transition.
+        """
+        the_tid = _task_id(the_task)
+        result: Any = None
+        jkey: str | None = None
+        success = False
+        done_wt: _Worktree | None = None
+        carve_failed = False
+        # OUTER try/finally so the EAGER merge/discard tail ALWAYS runs — even when a
+        # non-BudgetExceeded exception (CloneEscapeError, an eager-merge CONFLICT, …)
+        # propagates out of the dispatch — so a worktree is never leaked
+        # un-merged/un-discarded (parity with the pre-M6b-1 `finally`). The raise
+        # still propagates to `_run_one`'s except (terminal + notify + re-raise).
+        try:
+            # MAJOR-1: the production seams are FALLIBLE — they run inside the try so a
+            # raise routes through the merge/cleanup tail instead of leaking a
+            # worktree (the caller's finalize still marks terminal + notifies).
+            model = model_for(the_task, attempt)
+            briefing = briefing_for(the_task, attempt)
+            async with semaphore:
+                run_cwd: str | Path = clone_dir
+                run_add_dir: str | Path = clone_dir
+                if worktree_factory is not None and _is_writer(the_task):
+                    # Carve the worktree under the worktree-admin lock so the
+                    # `.git/worktrees/` admin mutation is serialized against every
+                    # other writer's add/merge/remove (the slow agent run below stays
+                    # concurrent — only this fast git step is locked).
+                    try:
+                        async with worktree_admin_lock:
+                            done_wt = await asyncio.to_thread(worktree_factory, the_tid)
+                    except WorktreeError:
+                        # SAFE-BY-CONSTRUCTION: isolation is mandatory for a writer
+                        # under fan-out; FAIL THIS ATTEMPT (no worktree ⇒ no merge ⇒
+                        # nothing lands in the base) rather than run un-isolated.
+                        result = FAILED_ATTEMPT
+                        carve_failed = True
+                    else:
+                        run_cwd = done_wt.path
+                        run_add_dir = done_wt.path
+                        async with lock:
+                            writer_worktrees[the_tid] = done_wt
+                if not carve_failed:
+                    up_hashes = list(
+                        scheduler_upstream_hashes_for(the_task, dag_proof, key_tracker)
+                    )
+                    # M6b-1: APPEND the fix-feedback hashes (the reviewer's blocking
+                    # envelope) so a fix re-dispatch is content-genuinely-different
+                    # from the prior attempt (attempt alone is NOT in the journal key).
+                    up_hashes.extend(extra_upstream_hashes)
+                    jkey = journal.key(
+                        the_task,
+                        attempt,
+                        model=model,
+                        briefing=briefing,
+                        upstream_envelope_hashes=up_hashes,
+                    )
+                    result = await run_attempt(
+                        the_task,
+                        attempt,
+                        budget=the_budget,
+                        journal=journal,
+                        model=model,
+                        briefing=briefing,
+                        clone_dir=clone_dir,
+                        upstream_envelope_hashes=up_hashes,
+                        runner=runner,
+                        cwd=run_cwd,
+                        add_dir=run_add_dir,
+                        est_for=est_for,
+                        wall_clock_s=wall_clock_s,
+                        permission_mode=permission_mode,
+                        disallowed_tools=disallowed_tools,
+                        allowed_tools=allowed_tools,
+                        sandbox_wrap=sandbox_wrap,
+                        max_budget_usd=max_budget_usd,
+                    )
+                    # FALSE-`done` GUARD (engine-level): a `done` writer that produced
+                    # NONE of its declared outputs is converted to FAILED_ATTEMPT so
+                    # the worktree is DISCARDED (its partial state never lands in the
+                    # base). Read-only / review tasks (no declared `writes`) are EXEMPT.
+                    if (
+                        not is_failed_attempt(result)
+                        and isinstance(result, Mapping)
+                        and result.get("status") == "done"
+                        and _is_writer(the_task)
+                    ):
+                        missing = _missing_declared_writes(the_task, run_cwd)
+                        if missing:
+                            logging.getLogger(__name__).warning(
+                                "false `done` REJECTED for task %s: declared write(s) %s "
+                                "absent in %s — converting to FAILED_ATTEMPT (worktree "
+                                "discarded, not merged); the engine will re-queue/abandon "
+                                "per budget.",
+                                the_tid,
+                                missing,
+                                run_cwd,
+                            )
+                            result = FAILED_ATTEMPT
+                    success = True
+        except BudgetExceeded as exc:
+            # M5 (3): a per-task budget exhaustion is a PER-TASK abandon — NOT a
+            # whole-run abort. A CHILD pool's `assert_can_dispatch` trips when the
+            # snapshot of the parent's remaining budget is exhausted, so a tripped
+            # parent budget aborts the fix loop here too. Convert to a structured
+            # capacity-abandon (same category as Path A) and do NOT re-raise.
+            logging.getLogger(__name__).warning(
+                "task %s ABANDONED (capacity): budget exhausted pre-spawn (%s) — "
+                "per-task abandon+escalate, run continues for independent tasks.",
+                the_tid,
+                exc,
+            )
+            result = _abandoned_result(
+                the_tid,
+                category=_CATEGORY_CAPACITY,
+                upstream_task_id=None,
+                last_status=f"budget-exceeded: {exc}",
+            )
+            success = False
+        finally:
+            # ── EAGER worktree merge (success) / discard (failure) ──────────
+            # OUTSIDE the semaphore (so the blocking git op never holds a concurrency
+            # slot) and serialized by `worktree_admin_lock`. TERMINAL ⟹
+            # MERGED-INTO-HEAD is preserved: a successful writer's output is in base
+            # HEAD before the caller marks it terminal (and before its paired reviewer
+            # reads HEAD). Runs even when the body RAISED (the merge can itself raise a
+            # CONFLICT — surfaced loudly via the re-raise of the original exception).
+            succeeded = success and _result_is_success(result)
+            async with progress:
+                popped_wt = writer_worktrees.pop(the_tid, None)
+            eff_wt = popped_wt if popped_wt is not None else done_wt
+            if eff_wt is not None:
+                async with worktree_admin_lock:
+                    if succeeded:
+                        await asyncio.to_thread(_merge_worktree, eff_wt)
+                    else:
+                        await asyncio.to_thread(_discard_worktree, eff_wt)
+        return result, jkey, succeeded
+
+    async def _finalize_task(
+        the_task: Mapping[str, Any],
+        result: Any,
+        jkey: str | None,
+        succeeded: bool,
+    ) -> None:
+        """Mark *the_task* terminal + notify + (on non-success) escalate.
+
+        Single source of truth for the per-task terminal transition (M5): records
+        the result, adds to ``terminal`` (and on success records the journal key),
+        and on a non-success adds the task to ``pipeline_abandoned`` (cascade
+        source) and emits AT MOST ONE self-escalation under the result's REAL
+        category (structured capacity, or the worker-authored envelope category) —
+        OUTSIDE the lock. A bare ``_FailedAttempt`` / ``None`` self-escalates only
+        when a dependent cascades (handled by the cascade gate), exactly as before.
+        """
+        the_tid = _task_id(the_task)
+        escalation: dict[str, Any] | None = None
+        async with progress:
+            results[the_tid] = result
+            terminal.add(the_tid)
+            in_flight.pop(the_tid, None)
+            if succeeded and jkey is not None:
+                key_tracker.record(the_tid, jkey)
+            elif not succeeded:
+                pipeline_abandoned.add(the_tid)
+                if _is_structured_abandon(result):
+                    escalation = {
+                        "kind": "escalation",
+                        "task_id": the_tid,
+                        "worker": the_task.get("assigned_to"),
+                        "attempt": _attempt_for(the_task),
+                        "category": result.get("category"),
+                        "last_status": result.get("last_status"),
+                        "upstream_task_id": result.get("upstream_task_id"),
+                    }
+                else:
+                    env_category = _failed_envelope_category(result)
+                    if env_category is not None:
+                        escalation = {
+                            "kind": "escalation",
+                            "task_id": the_tid,
+                            "worker": the_task.get("assigned_to"),
+                            "attempt": _attempt_for(the_task),
+                            "category": env_category,
+                            "last_status": str(result.get("status")),
+                            "upstream_task_id": None,
+                        }
+            progress.notify_all()
+        # GUARANTEED escalation OUTSIDE the lock (the user callback must not run
+        # while holding the admission lock).
+        if escalation is not None:
+            _escalate(escalation)
+
     async def _run_one(task: Mapping[str, Any]) -> None:
         # ``tid`` is a plain dict read the admission loop already performed to
         # spawn this task, so it cannot raise here; the ``finally`` keys on it.
         tid = _task_id(task)
         result: Any = None
-        success = False
         jkey: str | None = None
+        succeeded = False
         try:
-            # MAJOR-1: the production seams (`_attempt_for` / `model_for` /
-            # `briefing_for`) are FALLIBLE (unknown persona, missing template) —
-            # they MUST run inside the ``try`` so a raise routes through the
-            # ``finally`` (mark terminal + notify) instead of hanging the
-            # admission loop on a completion that never arrives.
+            # T6 — DISPATCH-TIME reviewer-disjointness re-check (M6b-1). When THIS
+            # task is a paired REVIEWER, re-assert separation-of-duties via the SAME
+            # comparator the planner used at synthesis (planner.assert_reviewer_disjoint
+            # — one comparator, no drift). A persona re-assigned to the implementer's
+            # AFTER synthesis is caught here. Fail-LOUD (raise) — routed through the
+            # finalize tail below so the reviewer is marked terminal + notified and
+            # the admission loop never hangs.
+            if tid in implement_by_review:
+                reviewed = task_index.get(implement_by_review[tid])
+                if reviewed is not None:
+                    _assert_reviewer_disjoint(dict(task), dict(reviewed))
+
             attempt = _attempt_for(task)
-            model = model_for(task, attempt)
-            briefing = briefing_for(task, attempt)
-            async with semaphore:
-                # Decide on isolation for a writer (when a factory is wired).
-                wt: _Worktree | None = None
-                run_cwd: str | Path = clone_dir
-                run_add_dir: str | Path = clone_dir
-                if worktree_factory is not None and _is_writer(task):
-                    # MAJOR-1: carve the worktree under the worktree-admin lock so
-                    # the `.git/worktrees/` admin mutation is serialized against
-                    # every other writer's add/merge/remove (the slow agent run
-                    # below stays concurrent — only this fast git step is locked).
-                    try:
-                        async with worktree_admin_lock:
-                            wt = await asyncio.to_thread(worktree_factory, tid)
-                    except WorktreeError:
-                        # SAFE-BY-CONSTRUCTION (MAJOR-1): isolation is mandatory for
-                        # a writer under fan-out.  The old code fell back to running
-                        # UN-ISOLATED in the shared base — but that put TWO writers
-                        # in the same working tree concurrently (a race on
-                        # `.git/index.lock`, outputs left uncommitted/untracked),
-                        # defeating file-race-freedom.  Instead we FAIL THIS ATTEMPT:
-                        # return the failed-attempt sentinel (no worktree ⇒ no merge
-                        # ⇒ nothing lands in the base) so the engine re-queues /
-                        # abandons it, and the pipeline NEVER runs two writers in the
-                        # base tree.  `success` stays False ⇒ the `finally` marks it
-                        # terminal as a failed attempt and notifies; downstreams of a
-                        # failed writer simply never see it succeed.
-                        result = FAILED_ATTEMPT
-                        return
-                    run_cwd = wt.path
-                    run_add_dir = wt.path
-                    async with lock:
-                        writer_worktrees[tid] = wt
+            result, jkey, succeeded = await _dispatch_one_attempt(task, attempt, budget)
 
-                up_hashes = list(scheduler_upstream_hashes_for(task, dag_proof, key_tracker))
-                # The journal key this task is stored under (for the task_id→key
-                # map so downstreams resolve our envelope hash).
-                jkey = journal.key(
-                    task,
-                    attempt,
-                    model=model,
-                    briefing=briefing,
-                    upstream_envelope_hashes=up_hashes,
-                )
-                result = await run_attempt(
-                    task,
-                    attempt,
-                    budget=budget,
-                    journal=journal,
-                    model=model,
-                    briefing=briefing,
-                    clone_dir=clone_dir,
-                    upstream_envelope_hashes=up_hashes,
-                    runner=runner,
-                    cwd=run_cwd,
-                    add_dir=run_add_dir,
-                    est_for=est_for,
-                    wall_clock_s=wall_clock_s,
-                    permission_mode=permission_mode,
-                    disallowed_tools=disallowed_tools,
-                    allowed_tools=allowed_tools,
-                    sandbox_wrap=sandbox_wrap,
-                    max_budget_usd=max_budget_usd,
-                )
-                # FALSE-`done` GUARD (engine-level): a worker can return a terminal
-                # `done` envelope while having written NONE of its declared outputs
-                # (observed live — a model returns status="done" but wrote nothing;
-                # previously mitigated ONLY by briefing wording, which is fragile).
-                # Trusting that `done` would silently corrupt downstream tasks (they
-                # proceed on missing/stale inputs).  So BEFORE the eager merge +
-                # terminal transition, VERIFY every declared write actually exists in
-                # the dir the agent wrote into (`run_cwd` — the worktree when
-                # isolated, else the clone).  If ANY is absent, CONVERT the result to
-                # FAILED_ATTEMPT so the engine routes it through its normal
-                # re-queue/abandon path (retried up to budget, then abandoned — never
-                # silently accepted as done).  The downstream `finally` then sees a
-                # failed attempt (`succeeded` False) and DISCARDS the worktree (its
-                # partial/garbage state never lands in the base), exactly like any
-                # other failed writer.  Read-only / review tasks (no declared
-                # `writes`) are EXEMPT.  Only `done` is checked — a `blocked` /
-                # `abandoned` / `needs-input` / already-FAILED_ATTEMPT result is
-                # untouched.
-                if (
-                    not is_failed_attempt(result)
-                    and isinstance(result, Mapping)
-                    and result.get("status") == "done"
-                    and _is_writer(task)
-                ):
-                    missing = _missing_declared_writes(task, run_cwd)
-                    if missing:
-                        logging.getLogger(__name__).warning(
-                            "false `done` REJECTED for task %s: declared write(s) %s "
-                            "absent in %s — converting to FAILED_ATTEMPT (worktree "
-                            "discarded, not merged); the engine will re-queue/abandon "
-                            "per budget.",
-                            tid,
-                            missing,
-                            run_cwd,
-                        )
-                        result = FAILED_ATTEMPT
-                success = True
-        except BudgetExceeded as exc:
-            # M5 (3): a per-task budget exhaustion is a PER-TASK abandon+escalate,
-            # NOT a whole-run abort. ``run_attempt`` raises BudgetExceeded at its
-            # pre-spawn gate (terminal); we convert it to a STRUCTURED capacity-
-            # abandoned result (same category string as Path A,
-            # pm_dispatch.py:902/911) and DO NOT re-raise — so THIS task is
-            # abandoned+escalated and its dependents cascade (via the admission-loop
-            # gate), while unrelated independent tasks still complete. ``success``
-            # stays False ⇒ the finally discards any worktree and the finalize
-            # block (below) records it in ``pipeline_abandoned`` + escalates.
-            logging.getLogger(__name__).warning(
-                "task %s ABANDONED (capacity): budget exhausted pre-spawn (%s) — "
-                "per-task abandon+escalate, run continues for independent tasks.",
-                tid,
-                exc,
-            )
-            result = _abandoned_result(
-                tid,
-                category=_CATEGORY_CAPACITY,
-                upstream_task_id=None,
-                last_status=f"budget-exceeded: {exc}",
-            )
-        finally:
-            # ALWAYS mark terminal + notify, even on a raised exception
-            # (CloneEscapeError, etc.), so the admission loop never hangs waiting on
-            # a completion that never arrives.  A non-BudgetExceeded exception still
-            # propagates out of the coroutine (gathered after the loop) — terminal
-            # state is bookkeeping, not suppression.
-            # M5: a task SUCCEEDED (satisfies dependents + records a journal key)
-            # ONLY if it ran to a validated `done` envelope. `_result_is_success`
-            # is the single source of truth: every other terminal encoding
-            # (_FailedAttempt, structured abandoned, a worker `failed`/`abandoned`/
-            # `blocked`/`needs-input` envelope, None) is a non-success that cascades.
-            succeeded = success and _result_is_success(result)
-            # Pull this task's worktree out of the in-flight map (under the lock)
-            # WITHOUT yet marking the task terminal — the merge must land in base
-            # HEAD *before* the terminal transition (see the ordering note below).
-            async with progress:
-                done_wt = writer_worktrees.pop(tid, None)
+            # M6b-1 — the NESTED REVIEW-FIX LOOP. An IMPLEMENT task that (a) reached
+            # terminal SUCCESS and (b) has a paired reviewer drives a nested loop on
+            # a CHILD BudgetPool(parent=budget) + the SAME shared semaphore: dispatch
+            # the reviewer; on a BLOCK verdict re-dispatch the implement (attempts
+            # incremented so `_attempt_for` advances + MAX_ATTEMPTS bounds it), then
+            # re-review; until PASS or the ≤MAX_ATTEMPTS bound. On a reviewer ABANDON
+            # (worker failure, NOT a BLOCK verdict) the implement is NOT re-dispatched
+            # — the reviewer cascades blocked to its dependents (T5). The implement's
+            # own terminal state is finalized in the `finally` from `result`/`succeeded`
+            # as updated by the loop.
+            if succeeded and tid in review_by_implement:
+                result, jkey, succeeded = await _run_review_fix_loop(task, result, jkey)
+        except BaseException as exc:
+            # A non-BudgetExceeded raise (CloneEscapeError, an eager-merge CONFLICT
+            # surfaced from `_dispatch_one_attempt`, the T6 disjointness raise, …):
+            # record a fail-closed result so the finalize marks the task terminal +
+            # notifies (the admission loop never hangs), then RE-RAISE so the
+            # post-loop drain surfaces it. The T6 disjointness raise is the one we
+            # WANT to surface loudly.
+            if result is None:
+                result = FAILED_ATTEMPT
+            succeeded = False
+            await _finalize_task(task, result, jkey, succeeded)
+            raise exc
+        else:
+            await _finalize_task(task, result, jkey, succeeded)
 
-            # BUGFIX (dependent-writer reads-its-inputs): a successful writer's
-            # worktree is merged into the base clone EAGERLY — the instant it
-            # completes — instead of deferring all merges to after the admission
-            # loop.  A downstream task carves its OWN worktree from base HEAD at
-            # admission (`git worktree add … HEAD`), and that only fires once every
-            # `depends_on` upstream is TERMINAL.  So the invariant a downstream
-            # relies on is: TERMINAL ⟹ ALREADY MERGED INTO HEAD.  We therefore do
-            # the (blocking, thread-offloaded) git merge/discard HERE — OUTSIDE the
-            # `progress` lock (so the admission lock is never held across git) and
-            # serialized by `worktree_admin_lock` (so two concurrent completions —
-            # or a completion racing another writer's `git worktree add` — never
-            # mutate the base index/refs or `.git/worktrees/` at once) — and ONLY
-            # THEN, below, mark the task
-            # terminal + notify.  The old code deferred the merge to after the loop,
-            # leaving a downstream's worktree branched from a HEAD that did NOT yet
-            # contain its upstreams' outputs, so the dependent agent could not READ
-            # its inputs (a.txt/b.txt) and blocked.  Invariants preserved: writers
-            # are still each isolated WHILE in-flight (the merge runs only after a
-            # writer completes, no longer racing), writes stay confined to the
-            # clone, and the merge stays conflict-free by the disjointness gate.
-            #
-            # CRITICAL: the merge can RAISE (a conflict = breached-disjointness
-            # invariant, or any git failure).  We wrap it in its own try/finally so
-            # that — pass or fail — this task is STILL marked terminal + notified
-            # below.  Otherwise a raised merge would strand the admission loop on
-            # `progress.wait()` forever (the coroutine never signalling completion).
-            # The exception is re-raised after the terminal transition so the
-            # post-loop drain surfaces it (and runs the clean-up + re-raise path).
-            try:
-                if done_wt is not None:
-                    # Both merge and discard mutate the shared worktree admin dir /
-                    # refs, so both run under `worktree_admin_lock` — serialized
-                    # against every other writer's add/merge/discard (MAJOR-1).
-                    async with worktree_admin_lock:
-                        if succeeded:
-                            await asyncio.to_thread(_merge_worktree, done_wt)
-                        else:
-                            # MINOR-1 (writer-failure): a FAILED writer's partial
-                            # writes must NOT land in the base — DISCARD its worktree
-                            # (remove, don't merge).
-                            await asyncio.to_thread(_discard_worktree, done_wt)
-            finally:
-                # NOW mark terminal + notify — AFTER the merge has landed in HEAD
-                # (on success), so a downstream admitted by this notify (its last
-                # dep now terminal) carves its worktree from a HEAD that already
-                # carries this writer's output.  This runs even if the merge raised,
-                # so the admission loop is never stranded; the exception (if any)
-                # still propagates out of the coroutine to the post-loop drain.
-                #
-                # M5: any task that did NOT genuinely succeed is a CASCADE SOURCE —
-                # added to ``pipeline_abandoned`` so its dependents cascade (the
-                # admission-loop gate reads this set; the cascade is transitive
-                # because cascade-abandoned tasks are added to the same set at
-                # admission time). Escalation parity with Path A:
-                #   * a structured CAPACITY abandon (BudgetExceeded) escalates here;
-                #   * a worker-authored `failed`/`abandoned`/`blocked`/`needs-input`
-                #     envelope escalates here under its own category (Path A routes
-                #     a `failed`/`abandoned` envelope through _abandon_and_escalate);
-                #   * a bare `_FailedAttempt` sentinel does NOT escalate on its own —
-                #     it is the engine's normal failure marker; escalation for it
-                #     happens when a DEPENDENT cascades (category "blocked").
-                escalation: dict[str, Any] | None = None
+    async def _run_review_fix_loop(
+        implement_task: Mapping[str, Any],
+        implement_result: Any,
+        implement_jkey: str | None,
+    ) -> tuple[Any, str | None, bool]:
+        """Drive the nested review→fix loop for a SUCCEEDED implement task.
+
+        Returns the implement's FINAL ``(result, jkey, succeeded)`` (the implement
+        is the task this caller finalizes). The paired REVIEWER's terminal state is
+        finalized HERE (it is never admitted independently), so when this returns,
+        the reviewer is already terminal/recorded.
+
+        Loop:
+          * dispatch the reviewer (re-admit the EXISTING reviewer task) on the CHILD
+            budget + the SAME semaphore → classify the verdict;
+          * PASS (reviewer ``done``) → implement stays success, reviewer finalized
+            success → return;
+          * ABANDON (reviewer worker failure — FAILED_ATTEMPT / `failed` /
+            `abandoned`) → reviewer finalized abandoned (cascades to ITS dependents);
+            the implement is NOT re-dispatched and stays success → return;
+          * BLOCK (reviewer `blocked` / `needs-input` verdict) → re-dispatch the
+            implement with attempts INCREMENTED; if the re-dispatch FAILS the
+            implement becomes the failure (reviewer not finalized — never ran this
+            round) → return; if it succeeds, re-review. On exhausting MAX_ATTEMPTS
+            the implement is abandoned (category capacity, escalated once via
+            finalize) and the (last) reviewer is finalized with its blocking verdict.
+
+        Shares ONE concurrency counter (the outer `semaphore`) — NEVER a second —
+        and a CHILD BudgetPool(parent=budget) whose charges BUBBLE to the parent.
+        """
+        impl_tid = _task_id(implement_task)
+        review_tid = review_by_implement[impl_tid]
+        reviewer_task = task_index[review_tid]
+        # T6 — DISPATCH-TIME reviewer-disjointness re-check (M6b-1). BEFORE driving
+        # the paired reviewer, re-assert separation-of-duties via the SAME comparator
+        # the planner used at synthesis (one comparator, no drift): a reviewer
+        # re-assigned to the implementer's persona AFTER synthesis is caught here.
+        # Fail-LOUD — the raise propagates out to `_run_one`'s except, which records
+        # a fail-closed terminal for the IMPLEMENT (so the loop never hangs) and
+        # re-raises so pipeline's post-loop drain surfaces it.
+        _assert_reviewer_disjoint(dict(reviewer_task), dict(implement_task))
+        # CHILD budget: total = a snapshot of the parent's remaining headroom (so the
+        # child's own gate trips when the shared budget is exhausted) and parent=budget
+        # so every child charge BUBBLES to the parent's reconciliation totals.
+        child_budget = BudgetPool(
+            total_tokens=max(1, budget.remaining()),
+            headroom=1.0,
+            parent=budget,
+        )
+        # Mutable working copies so re-dispatches can advance `attempts` without
+        # mutating the shared task_index dicts.
+        work_impl: dict[str, Any] = dict(implement_task)
+        work_review: dict[str, Any] = dict(reviewer_task)
+        result = implement_result
+        jkey = implement_jkey
+        succeeded = True
+        # ANTI-STALE-REPLAY — the REAL guard (do NOT remove the key_tracker.record
+        # at the loop top): the reviewer's journal key is busted each round NOT by
+        # the attempt number (`ResultJournal.key` IGNORES `attempt` — it is sha256
+        # over task_id‖persona‖phase‖model‖briefing‖upstream_digest ONLY; see
+        # result_journal.py:39-41,138-141), but by the IMPLEMENT's recorded upstream
+        # ENVELOPE HASH changing each round. The chain: each fix re-dispatch carries
+        # the prior BLOCK feedback hash (extra_upstream_hashes) → a different
+        # implement key → and `validate_envelope` FORCES the envelope's `attempt`
+        # field == the dispatched attempt (pm_dispatch_envelope.py), so a
+        # re-dispatched implement's envelope necessarily differs → its envelope hash
+        # differs → after key_tracker.record(impl_tid, jkey) at the loop top, the
+        # reviewer's `upstream_digest` changes → the reviewer's key is busted → it
+        # genuinely RE-REVIEWS the fix instead of replaying the stale $0 verdict.
+        #
+        # `review_base_attempt`/`review_round` advance the reviewer's `attempts` ONLY
+        # for the envelope `attempt` field + the `-p` prompt's "(attempt N)" line —
+        # they do NOT affect the journal key (kept for observability/audit, not as a
+        # replay guard). Base from the reviewer's own pre-set `attempts` (0 → first
+        # review at 1).
+        review_base_attempt = _attempt_for(reviewer_task)
+        review_round = 0
+        # ACCUMULATED reviewer-feedback hashes (each round's BLOCK envelope). Each
+        # fix re-dispatch threads ALL prior feedback as extra upstream hashes so the
+        # fix is a content-genuinely-different journal dispatch every round (the key
+        # ignores `attempt`); accumulating — not just the latest — also keeps a fix
+        # distinct even if two rounds' BLOCK envelopes were byte-identical.
+        fix_feedback_hashes: list[str] = []
+        while True:
+            # Record the CURRENT (succeeded) implement's journal key in the tracker
+            # so the reviewer's `upstream_envelope_hashes` resolves THIS round's
+            # implement output — a re-dispatched (fixed) implement has a different
+            # envelope hash, so the reviewer re-reviews the fix, not a stale input.
+            if jkey is not None:
                 async with progress:
-                    results[tid] = result
-                    terminal.add(tid)
-                    in_flight.pop(tid, None)
-                    if succeeded and jkey is not None:
-                        key_tracker.record(tid, jkey)
-                    elif not succeeded:
-                        # This task did NOT succeed → it is a cascade SOURCE: its
-                        # dependents must not be admitted on bad inputs.
-                        pipeline_abandoned.add(tid)
-                        if _is_structured_abandon(result):
-                            # This path's OWN structured CAPACITY abandon (built by
-                            # _abandoned_result; carries explicit category +
-                            # last_status). Guaranteed escalation. NOTE: a worker
-                            # SELF-abandon also has status=="abandoned" but is NOT a
-                            # structured abandon (no category/upstream_task_id keys),
-                            # so it falls to the _failed_envelope_category branch
-                            # below where its real category is PARSED from notes_md.
-                            escalation = {
-                                "kind": "escalation",
-                                "task_id": tid,
-                                "worker": task.get("assigned_to"),
-                                "attempt": _attempt_for(task),
-                                "category": result.get("category"),
-                                "last_status": result.get("last_status"),
-                                "upstream_task_id": result.get("upstream_task_id"),
-                            }
-                        else:
-                            env_category = _failed_envelope_category(result)
-                            if env_category is not None:
-                                # A worker-authored failure envelope (`failed` /
-                                # self-`abandoned` / `blocked` / `needs-input`) —
-                                # escalate under its REAL category (Path A parity:
-                                # a self-`abandoned` parses notes_md, the rest use
-                                # their status name). A bare `_FailedAttempt` / `None`
-                                # yields None here → no self-escalation. ``last_status``
-                                # records the worker's terminal status string.
-                                escalation = {
-                                    "kind": "escalation",
-                                    "task_id": tid,
-                                    "worker": task.get("assigned_to"),
-                                    "attempt": _attempt_for(task),
-                                    "category": env_category,
-                                    "last_status": str(result.get("status")),
-                                    "upstream_task_id": None,
-                                }
-                    progress.notify_all()
-                # GUARANTEED escalation OUTSIDE the lock (the user callback must not
-                # run while holding the admission lock).
-                if escalation is not None:
-                    _escalate(escalation)
+                    key_tracker.record(impl_tid, jkey)
+            # ── review the current (succeeded) implement output ──────────────
+            # (attempt is for the envelope field/prompt only — NOT a key guard; the
+            # busted-key guard is the implement upstream-hash change recorded above.)
+            review_attempt = review_base_attempt + review_round
+            work_review["attempts"] = review_attempt - 1
+            rev_result, rev_jkey, rev_succeeded = await _dispatch_one_attempt(
+                work_review, review_attempt, child_budget
+            )
+            review_round += 1
+            verdict = _reviewer_verdict(rev_result, rev_succeeded)
+            if verdict == "pass":
+                # Reviewer PASS — finalize the reviewer as a clean success; the
+                # implement stays success.
+                await _finalize_task(work_review, rev_result, rev_jkey, True)
+                return result, jkey, True
+            if verdict == "abandon":
+                # Reviewer WORKER FAILURE (not a verdict) — finalize the reviewer as
+                # abandoned; it cascades to ITS dependents. The implement is NOT
+                # re-dispatched and stays success.
+                await _finalize_task(work_review, rev_result, rev_jkey, False)
+                return result, jkey, True
+            # verdict == "block": the reviewer found issues — re-dispatch the
+            # implement to FIX, attempts INCREMENTED so `_attempt_for` advances and
+            # MAX_ATTEMPTS bounds the loop. Record the BLOCK envelope's hash as the
+            # fix's feedback input (content-chaining: the fix is "implement, given
+            # this review feedback" → a genuinely different journal dispatch).
+            if rev_jkey is not None:
+                fb = journal.get_envelope_hash(rev_jkey)
+                if fb is not None:
+                    fix_feedback_hashes.append(fb)
+            next_attempt = _attempt_for(work_impl) + 1
+            if next_attempt > MAX_ATTEMPTS:
+                # Bound reached — abandon the implement (category capacity) and
+                # finalize the (last) reviewer with its blocking verdict so both
+                # tasks are terminal. The implement's capacity abandon escalates
+                # exactly once via _finalize_task.
+                logging.getLogger(__name__).warning(
+                    "task %s ABANDONED (capacity): review-fix loop exhausted "
+                    "MAX_ATTEMPTS=%d without a PASS verdict from reviewer %s.",
+                    impl_tid,
+                    MAX_ATTEMPTS,
+                    review_tid,
+                )
+                abandon = _abandoned_result(
+                    impl_tid,
+                    category=_CATEGORY_CAPACITY,
+                    upstream_task_id=None,
+                    last_status=f"review-fix loop exhausted MAX_ATTEMPTS={MAX_ATTEMPTS}",
+                )
+                await _finalize_task(work_review, rev_result, rev_jkey, rev_succeeded)
+                return abandon, None, False
+            # Pre-set `attempts` so `_attempt_for` advances on the re-dispatch.
+            work_impl["attempts"] = next_attempt - 1
+            result, jkey, succeeded = await _dispatch_one_attempt(
+                work_impl,
+                next_attempt,
+                child_budget,
+                extra_upstream_hashes=list(fix_feedback_hashes),
+            )
+            if not succeeded:
+                # The fix attempt itself failed (no reviewable output) — the
+                # implement becomes this failure. FINALIZE THE REVIEWER with its
+                # ACTUAL BLOCK verdict (rev_result/rev_jkey, succeeded=False) — the
+                # reviewer DID run this round and authored a real BLOCK; recording
+                # its true verdict (mirroring the MAX_ATTEMPTS-exhaust branch above)
+                # gives a higher-fidelity abandonment report than letting the cascade
+                # gate later stamp it as a structured blocked-CASCADE. No
+                # double-finalize: _finalize_task adds the reviewer to `terminal`, and
+                # the cascade gate SKIPS any task already in `terminal` (:1485). The
+                # implement stays un-finalized here ⇒ the caller's except/else marks
+                # it terminal as the failure; the reviewer is now terminal too.
+                await _finalize_task(work_review, rev_result, rev_jkey, False)
+                return result, jkey, False
+            # Fix succeeded → loop back to re-review.
 
     # ── the admission loop ──────────────────────────────────────────────────
     spawned: set[str] = set()
@@ -1289,6 +1526,19 @@ async def pipeline(
                 for task in ordered:
                     tid = _task_id(task)
                     if tid in spawned:
+                        continue
+                    # M6b-1 — a PAIRED REVIEWER is NOT admitted independently: it is
+                    # driven by its implement task's nested review-fix loop (else it
+                    # would be dispatched twice — once here, once in the loop). We do
+                    # NOT mark it `spawned` (which would also hide it from the cascade
+                    # gate): the implement records the reviewer's terminal state when
+                    # the loop runs it, AND if the implement is itself cascade-abandoned
+                    # (never runs the loop) the cascade gate then marks this reviewer
+                    # blocked on its abandoned `depends_on: [implement]` upstream. Its
+                    # `depends_on: [implement]` already holds it back from the readiness
+                    # gate while the implement is in-flight; this skip is the backstop
+                    # for a degenerate (same-wave / no-depends_on) pairing.
+                    if tid in implement_by_review:
                         continue
                     # `live` = currently in-flight + peers admitted this pass.
                     live = dict(in_flight)
@@ -1475,6 +1725,7 @@ async def run_host_pipeline_for_project(
     sandbox_wrap: SandboxWrap | None = None,
     escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
     max_budget_usd: float | None = None,
+    review_pairing: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Drive the deterministic host pipeline for a project (M6a production caller).
 
@@ -1527,6 +1778,22 @@ async def run_host_pipeline_for_project(
     # one (a proof is only defined for a valid DAG).
     dag_proof = compute_dag_proof([dict(t) for t in task_list], existing_files=existing_files or ())
 
+    # M6b-1 — the review-fix pairing. When the caller did not supply one, DERIVE it
+    # from the in-memory task list (lazy import, parity with the compute_dag_proof
+    # import) IFF any task carries a `reviews` field — `reviews` lives ONLY in the
+    # in-memory list (never persisted), so the host path is its sole source. A run
+    # with no review tasks yields an empty pairing ⇒ pipeline() is byte-for-byte the
+    # pre-M6b-1 single-dispatch behavior.
+    eff_review_pairing: Mapping[str, str]
+    if review_pairing is not None:
+        eff_review_pairing = review_pairing
+    elif any(t.get("reviews") for t in task_list):
+        from scripts.planner import build_review_pairing
+
+        eff_review_pairing = build_review_pairing([dict(t) for t in task_list])
+    else:
+        eff_review_pairing = {}
+
     # The shared model-tier + roster-briefing seams (the SAME builders the
     # `build_cli_dispatch_for_project` leaf factory wires). `pipeline()` consumes
     # the seam callables DIRECTLY (it constructs each `run_attempt` itself — it does
@@ -1577,4 +1844,9 @@ async def run_host_pipeline_for_project(
         pipeline_kwargs["escalate_fn"] = escalate_fn
     if max_budget_usd is not None:
         pipeline_kwargs["max_budget_usd"] = max_budget_usd
+    # Thread the pairing ONLY when non-empty so a run without review tasks is a
+    # byte-for-byte no-op (pipeline() defaults `review_pairing` to None, normalized
+    # internally to {}, so leaving it unset keeps the single-dispatch behavior).
+    if eff_review_pairing:
+        pipeline_kwargs["review_pairing"] = eff_review_pairing
     return await pipeline(task_list, **pipeline_kwargs)

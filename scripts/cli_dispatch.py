@@ -1141,6 +1141,8 @@ class CliDispatchTools:
         disallowed_tools: Sequence[str] = DEFAULT_DISALLOWED_TOOLS,
         allowed_tools: Sequence[str] | None = None,
         sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
+        review_pairing: Mapping[str, str] | None = None,
+        task_index: Mapping[Any, Mapping[str, Any]] | None = None,
     ) -> None:
         self.budget = budget
         self.journal = journal
@@ -1154,6 +1156,14 @@ class CliDispatchTools:
         self.disallowed_tools = tuple(disallowed_tools)
         self.allowed_tools = tuple(allowed_tools) if allowed_tools is not None else None
         self.sandbox_wrap = sandbox_wrap
+        # M6b-1 — dispatch-time reviewer-disjointness re-check (leaf/parallel path).
+        # ``review_pairing`` is the bidirectional implement↔review id map
+        # (planner.build_review_pairing); ``task_index`` resolves a task_id → its
+        # task dict. When a dispatched task is a paired REVIEWER, `_coro_for`
+        # re-asserts separation-of-duties via the SAME comparator the planner used.
+        # Both default empty ⇒ NO-OP for the parallel path unless explicitly wired.
+        self.review_pairing = dict(review_pairing) if review_pairing else {}
+        self.task_index = dict(task_index) if task_index else {}
         # The event loop the futures live on. The synchronous WaveDispatcher
         # drives spawn/poll outside any running loop, so we own one explicitly
         # and pump it from `pump()` (wired to the engine's injected sleep_fn).
@@ -1168,6 +1178,20 @@ class CliDispatchTools:
         self._in_flight: dict[Any, _InFlight] = {}
 
     def _coro_for(self, task: Mapping[str, Any], attempt: int) -> Awaitable[Any]:
+        # M6b-1 (T6) — DISPATCH-TIME reviewer-disjointness re-check on the leaf/
+        # parallel path. When THIS task is a paired REVIEWER (it carries a `reviews`
+        # field AND the pairing is wired), re-assert separation-of-duties via the
+        # SAME comparator the planner used at synthesis (one comparator, no drift):
+        # a persona re-assigned to the implementer's AFTER synthesis is caught here.
+        # Fail-LOUD — the raise propagates out of the spawned future and is surfaced
+        # by the engine's poll seam (it never silently dispatches a self-review).
+        reviews = task.get("reviews")
+        if self.review_pairing and isinstance(reviews, str) and reviews:
+            reviewed = self.task_index.get(reviews)
+            if reviewed is not None:
+                from scripts.planner import assert_reviewer_disjoint
+
+                assert_reviewer_disjoint(dict(task), dict(reviewed))
         up = list(self.upstream_hashes_for(task, attempt)) if self.upstream_hashes_for else []
         return run_attempt(
             task,

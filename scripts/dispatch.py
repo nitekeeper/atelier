@@ -220,6 +220,76 @@ def resolve_transport(env: Mapping[str, str] = os.environ) -> str:
     return raw
 
 
+# ── M6a: the transport ROUTING branch (bridge factory | host pipeline) ───────
+#
+# Before M6a, `resolve_transport` re-pointed only the BRIEFING TEXT (the CLI
+# CHANNELS/REPLY-CONTRACT addendum in `compose_briefing`). It did NOT route the
+# actual DISPATCH: there was no production code path that, on
+# `ATELIER_TRANSPORT=cli`, drove the M5 host `pipeline()` instead of building the
+# bridge `WaveDispatcher`. This is that routing branch — additive and fail-loud.
+#
+# The PRODUCTION entrypoint is a SKILL recipe the orchestrator drives
+# (`internal/dev-dispatch/SKILL.md` → `build_wave_dispatcher_for_project`), not a
+# single Python `dispatch()` function. This function is the Python-layer routing
+# the recipe (and any production caller) invokes so that flipping
+# `ATELIER_TRANSPORT=cli` actually selects the host pipeline. The default
+# (`bridge`) branch is BYTE-FOR-BYTE the existing path: it returns exactly the
+# `build_wave_dispatcher_for_project(...)` WaveDispatcher the recipe already used
+# (no behavior change). Only the new `cli` branch is added.
+#
+# DELIBERATELY NOT in M6a (M6b): the host-path review-fix loop, the dispatch-time
+# reviewer-disjointness re-check, and R-MODE. And M7's default-FLIP (making `cli`
+# the default + retiring the bridge) is out of scope — `bridge` stays the default
+# here and the SKILL recipe still calls the bridge factory directly today; this
+# function is the seam M7 flips the recipe onto.
+#
+# M7 PLANNING NOTE (estimate aid, not M6a work): activating this on the host path
+# is a NEW host-drive SKILL section, NOT just a Python branch flip. The host
+# entrypoint is an AWAITED coroutine that returns a FLAT `list[dict]` of envelopes
+# in one shot — so the recipe must consume that list DIRECTLY (no per-turn
+# bridge-poll servicer loop), and the Loom-kickoff + abandonment/escalation-
+# surfacing steps must be relocated/replaced for the awaited-coroutine model
+# (they currently hang off the bridge poll turns). I.e. M7 rewrites the
+# orchestration recipe's control flow, not only the `is_host_transport` switch.
+
+
+def is_host_transport(env: Mapping[str, str] = os.environ) -> bool:
+    """True iff the resolved transport is the M5/M6 deterministic-host (CLI) path.
+
+    A tiny, side-effect-free predicate the orchestrator recipe (and tests) use to
+    branch dispatch construction: ``bridge`` (the default) → the WaveDispatcher
+    factory; ``cli`` → :func:`scripts.host_scheduler.run_host_pipeline_for_project`.
+    Fail-loud on an unknown transport (delegates to :func:`resolve_transport`).
+    """
+    return resolve_transport(env) == TRANSPORT_CLI
+
+
+async def dispatch_host_pipeline(
+    tasks: Any,
+    *,
+    clone_dir: Any,
+    budget: Any,
+    journal: Any,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Route a dispatch through the deterministic host pipeline (``cli`` transport).
+
+    The thin production seam the orchestrator recipe calls when
+    :func:`is_host_transport` is true. Delegates to
+    :func:`scripts.host_scheduler.run_host_pipeline_for_project` (the M6a
+    production caller that composes the recommend-backed CLI dispatch factory with
+    the M5 ``pipeline()`` scheduler). Kept here so the transport-selection logic
+    lives next to :func:`resolve_transport`; lazy-imports ``host_scheduler`` to
+    keep its (heavy) chain off the bare import path. The bridge path NEVER reaches
+    this — it builds the WaveDispatcher via ``build_wave_dispatcher_for_project``.
+    """
+    from scripts.host_scheduler import run_host_pipeline_for_project
+
+    return await run_host_pipeline_for_project(
+        tasks, clone_dir=clone_dir, budget=budget, journal=journal, **kwargs
+    )
+
+
 # ── CLI-mode CHANNELS / REPLY-CONTRACT addendum (M3) ───────────────────────
 #
 # In `cli` transport the worker is a one-shot `claude -p --json-schema` call:

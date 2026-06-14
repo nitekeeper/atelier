@@ -1315,6 +1315,226 @@ def build_cli_poll_fn(
     return poll_fn
 
 
+# ── M6a: CLI dispatch factory (the bridge-factory analog for the host path) ──
+#
+# The bridge path's production factory is
+# `atelier_entrypoint.build_wave_dispatcher_for_project`, which defaults its
+# `model_for` to `_default_model_for(phase, env)` (a `scripts.model_tier.recommend`
+# -backed closure). The host/CLI path had NO such factory: `CliDispatchTools` took
+# `model_for` as a REQUIRED ctor arg and every PRODUCTION call site was missing —
+# only tests constructed it (always with a constant lambda). This factory closes
+# that gap: it is the FIRST production constructor of `CliDispatchTools`, with the
+# SAME recommend-backed tier policy as the bridge.
+#
+# Two seams differ from the bridge in WHERE they read their inputs, NOT in policy:
+#
+#   * model_for — the bridge closes over ONE cycle `phase` and reads the task's
+#     `assigned_to` (the DB column). The host-path task dict carries a PER-TASK
+#     `phase` AND `assigned_persona` (the planner field; see scripts/roster.py).
+#     We REUSE `_default_model_for` verbatim (no re-implementation of tier /
+#     precedence / ATELIER_MODEL_TIER): for each task we resolve that task's phase
+#     and call `_default_model_for(task_phase, env)` on a view of the task whose
+#     `assigned_to` is the planner persona. The tier flow is therefore IDENTICAL
+#     to the bridge (override > env > difficulty > phase > default, then
+#     ROLE_FLOOR raise-only) — just sourced per-task.
+#   * briefing_for — the bridge resolves the persona-profile body from agents.db;
+#     the host path is DB-free at dispatch, so `briefing_for` resolves the persona
+#     from the IN-MEMORY roster (scripts/roster.resolve_persona) and feeds it to
+#     `compose_briefing(persona_profile_text=...)`.
+
+
+def _host_model_for(
+    env: Mapping[str, str] | None,
+) -> Callable[[Mapping[str, Any], int], str]:
+    """Build the host-path ``model_for(task, attempt) -> tier`` seam.
+
+    REUSES ``atelier_entrypoint._default_model_for`` (the bridge's
+    recommend-backed closure) so the tier precedence — explicit override > env
+    ``ATELIER_MODEL_TIER`` > (reserved) difficulty > PHASE_TIER > DEFAULT_TIER,
+    then ROLE_FLOOR raise-only — is byte-for-byte the SAME policy as the bridge.
+
+    The only difference is the INPUT SOURCING: a host-path task carries its OWN
+    ``phase`` and the planner's ``assigned_persona`` (vs the bridge's single cycle
+    ``phase`` + the ``assigned_to`` DB column). For each task we read that task's
+    phase, build the bridge closure for THAT phase, and invoke it on a task view
+    whose ``assigned_to`` is the planner persona (so the role-floor + role signal
+    flow exactly as ``_default_model_for`` expects). ``recommend`` never raises, so
+    this never raises; a task with no phase / persona simply omits that signal.
+    """
+    # Lazy import to keep the heavy entrypoint chain off the bare import path
+    # (and to avoid any import cycle: atelier_entrypoint imports dispatch which
+    # cli_dispatch already imports — importing it at module top could cycle).
+    from scripts.atelier_entrypoint import _default_model_for
+
+    resolved_env: Mapping[str, str] = env if env is not None else os.environ
+
+    def model_for(task: Mapping[str, Any], attempt: int) -> str:
+        phase = task.get("phase")
+        phase = phase if isinstance(phase, str) else None
+        # The planner field is `assigned_persona` (== roster agent_id). Map it onto
+        # the `assigned_to` key `_default_model_for` reads, falling back to an
+        # already-`assigned_to`-shaped task (parity with a DB row) so this seam is
+        # robust to either shape. Build a shallow view rather than mutating the
+        # caller's task dict.
+        role = task.get("assigned_persona")
+        if role is None:
+            role = task.get("assigned_to")
+        task_view = {**task, "assigned_to": role}
+        # Reuse the bridge closure for THIS task's phase — identical policy.
+        picker = _default_model_for(phase, resolved_env)
+        return picker(task_view, attempt)
+
+    return model_for
+
+
+def _host_briefing_for(
+    *,
+    clone_dir: str | os.PathLike[str],
+    team_id: str,
+    team_lead_name: str,
+    wave_id: str,
+    phase_procedure_for: Callable[[Mapping[str, Any]], str] | None = None,
+    deadline_iso: str = "2099-01-01T00:00:00Z",
+) -> Callable[[Mapping[str, Any], int], str]:
+    """Build the host-path ``briefing_for(task, attempt) -> str`` seam.
+
+    Resolves the worker's persona-profile body from the IN-MEMORY roster
+    (``scripts.roster.resolve_persona`` — NO DB read) and feeds it to
+    ``scripts.dispatch.compose_briefing(persona_profile_text=...)``. The transport
+    is pinned to ``TRANSPORT_CLI`` so the composer appends the CLI CHANNELS /
+    REPLY-CONTRACT addendum (the worker returns its structured envelope, not a
+    bridge send) — the host path has no bridge.
+
+    ``phase_procedure_for(task) -> str`` supplies the dev-arc phase-procedure body
+    (the bridge sources it from ``internal/<phase>/SKILL.md``); defaults to a
+    deterministic stub so the factory is constructible from a minimal call site.
+    An unknown persona raises ``PersonaNotInRosterError`` (fail-loud) — that runs
+    inside ``pipeline``'s ``_run_one`` try-block, so it surfaces as a per-task
+    failed attempt, never a hung admission loop.
+    """
+    from scripts.dispatch import compose_briefing
+    from scripts.roster import resolve_persona
+
+    def briefing_for(task: Mapping[str, Any], attempt: int) -> str:
+        persona = task.get("assigned_persona")
+        if persona is None:
+            persona = task.get("assigned_to")
+        persona_text = resolve_persona(persona)
+        task_id = task.get("task_id", "")
+        role_id = persona if isinstance(persona, str) else str(persona)
+        if phase_procedure_for is not None:
+            phase_text = phase_procedure_for(task)
+        else:
+            phase_text = f"(phase procedure for {task.get('phase')!r})"
+        task_brief = str(task.get("description") or task.get("task_brief") or f"task {task_id}")
+        return compose_briefing(
+            role_id=role_id,
+            task_id=task_id,
+            persona_profile_text=persona_text,
+            phase_procedure_text=phase_text,
+            task_brief=task_brief,
+            team_id=team_id,
+            team_lead_name=team_lead_name,
+            wave_id=wave_id,
+            wave_phase=str(task.get("phase") or "implement"),
+            deadline_iso=deadline_iso,
+            transport=TRANSPORT_CLI,
+        )
+
+    return briefing_for
+
+
+def build_cli_dispatch_for_project(
+    *,
+    clone_dir: str | os.PathLike[str],
+    budget: BudgetPool,
+    journal: ResultJournal,
+    team_id: str = "host-team",
+    team_lead_name: str = "team-lead",
+    wave_id: str = "wave-1",
+    env: Mapping[str, str] | None = None,
+    model_for: Callable[[Mapping[str, Any], int], str] | None = None,
+    briefing_for: Callable[[Mapping[str, Any], int], str] | None = None,
+    phase_procedure_for: Callable[[Mapping[str, Any]], str] | None = None,
+    runner: Runner = real_cli_runner,
+    upstream_hashes_for: Callable[[Mapping[str, Any], int], Sequence[str]] | None = None,
+    wall_clock_s: float = WALL_CLOCK_S,
+    loop: asyncio.AbstractEventLoop | None = None,
+    permission_mode: str = DEFAULT_PERMISSION_MODE,
+    disallowed_tools: Sequence[str] = DEFAULT_DISALLOWED_TOOLS,
+    allowed_tools: Sequence[str] | None = None,
+    sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
+) -> CliDispatchTools:
+    """Build the production ``CliDispatchTools`` for the host/CLI transport (M6a).
+
+    The host-path analog of
+    :func:`scripts.atelier_entrypoint.build_wave_dispatcher_for_project`: it
+    constructs the leaf adapter with the SAME recommend-backed model-tier policy
+    as the bridge, plus an in-memory roster-backed briefing.
+
+    .. note::
+       This factory builds the ``CliDispatchTools`` LEAF (it owns an event loop;
+       drive it via the ``parallel()`` façade / ``build_cli_spawn_fn`` +
+       ``build_cli_poll_fn``). The M6a PRODUCTION host caller
+       (:func:`scripts.host_scheduler.run_host_pipeline_for_project`) does NOT use
+       this leaf object — ``pipeline()`` consumes the seam CALLABLES directly — so
+       it reuses the same seam builders (:func:`_host_model_for` /
+       :func:`_host_briefing_for`) WITHOUT constructing this object. As of M6a this
+       factory is therefore the sibling leaf constructor for the ``parallel()``
+       façade / a future leaf-owning caller, and is presently exercised by tests
+       only; it is wired to the SAME seams so a future caller inherits identical
+       tier + roster behavior.
+
+    Defaults wired in (a caller / test may override each):
+
+    * ``model_for`` — :func:`_host_model_for`, which REUSES
+      ``atelier_entrypoint._default_model_for`` so phase/role/``ATELIER_MODEL_TIER``
+      precedence (and the ROLE_FLOOR opus floor for review/security/architect/
+      safety) is IDENTICAL to the bridge — just sourced from the host task's
+      per-task ``phase`` + planner ``assigned_persona``.
+    * ``briefing_for`` — :func:`_host_briefing_for`, which resolves the persona
+      profile from the in-memory roster (no DB) and composes the briefing in
+      ``TRANSPORT_CLI`` mode.
+    * ``est_for`` — the leaf's own ``_default_est_for`` (haiku 2k / sonnet 6k /
+      opus 12k); ``CliDispatchTools`` threads it into ``run_attempt`` already, and
+      :func:`pipeline` is seeded with the same ``_default_est_for`` by
+      :func:`scripts.host_scheduler.run_host_pipeline_for_project`. The per-tier
+      budget ceiling therefore tracks the chosen tier (a wrong tier compounds —
+      it sets BOTH ``--model`` AND the seeding — which is exactly why the model_for
+      flow above is the shared bridge policy, not a separate one).
+
+    Use as a context manager (``with build_cli_dispatch_for_project(...) as tools:``)
+    when the factory owns the event loop, so the loop is closed deterministically.
+    """
+    pick_model = model_for if model_for is not None else _host_model_for(env)
+    brief = (
+        briefing_for
+        if briefing_for is not None
+        else _host_briefing_for(
+            clone_dir=clone_dir,
+            team_id=team_id,
+            team_lead_name=team_lead_name,
+            wave_id=wave_id,
+            phase_procedure_for=phase_procedure_for,
+        )
+    )
+    return CliDispatchTools(
+        budget=budget,
+        journal=journal,
+        clone_dir=clone_dir,
+        model_for=pick_model,
+        briefing_for=brief,
+        runner=runner,
+        upstream_hashes_for=upstream_hashes_for,
+        wall_clock_s=wall_clock_s,
+        loop=loop,
+        permission_mode=permission_mode,
+        disallowed_tools=disallowed_tools,
+        allowed_tools=allowed_tools,
+        sandbox_wrap=sandbox_wrap,
+    )
+
+
 __all__ = [
     "DEFAULT_DISALLOWED_TOOLS",
     "DEFAULT_PERMISSION_MODE",
@@ -1331,6 +1551,7 @@ __all__ = [
     "SandboxWrap",
     "UnsandboxedBypassError",
     "UnsandboxedRealRunError",
+    "build_cli_dispatch_for_project",
     "build_cli_poll_fn",
     "build_cli_spawn_fn",
     "build_subprocess_env",

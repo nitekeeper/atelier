@@ -108,6 +108,7 @@ __all__ = [
     "is_abandoned_result",
     "parallel",
     "pipeline",
+    "run_host_pipeline_for_project",
     "scheduler_upstream_hashes_for",
     "simple_worktree_factory",
 ]
@@ -1436,3 +1437,144 @@ def _seed_per_agent(
         return 1
     ests = [est_for(model_for(t, _attempt_for(t))) for t in tasks]
     return max(1, max(ests))
+
+
+# ── M6a: the FIRST production caller of pipeline() (host/CLI transport) ───────
+#
+# Until M6a, NOTHING in production constructed `CliDispatchTools` or called
+# `pipeline()` — only tests did. This is that production caller: it builds the
+# CLI dispatch (the recommend-backed `build_cli_dispatch_for_project` factory),
+# computes the DAG proof, and drives `pipeline()` end to end with the SAME
+# `_default_est_for` the leaf uses (so the per-tier budget seeding and the
+# per-task `--model` come from one tier source). It is reached ONLY from the
+# `ATELIER_TRANSPORT=cli` branch (scripts/dispatch.py::dispatch_host_pipeline);
+# the bridge default never touches this path.
+
+
+async def run_host_pipeline_for_project(
+    tasks: Sequence[Mapping[str, Any]],
+    *,
+    clone_dir: str | Path,
+    budget: BudgetPool,
+    journal: ResultJournal,
+    existing_files: Sequence[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    team_id: str = "host-team",
+    team_lead_name: str = "team-lead",
+    wave_id: str = "wave-1",
+    model_for: Callable[[Mapping[str, Any], int], str] | None = None,
+    briefing_for: Callable[[Mapping[str, Any], int], str] | None = None,
+    phase_procedure_for: Callable[[Mapping[str, Any]], str] | None = None,
+    worktree_factory: Callable[[str], _Worktree] | None = None,
+    runner: Runner | None = None,
+    max_workers: int = MAX_PARALLEL_WORKERS,
+    wall_clock_s: float = WALL_CLOCK_S,
+    permission_mode: str | None = None,
+    disallowed_tools: Sequence[str] | None = None,
+    allowed_tools: Sequence[str] | None = None,
+    sandbox_wrap: SandboxWrap | None = None,
+    escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
+    max_budget_usd: float | None = None,
+) -> list[dict[str, Any]]:
+    """Drive the deterministic host pipeline for a project (M6a production caller).
+
+    This reuses the SAME M6a seam BUILDERS the
+    :func:`scripts.cli_dispatch.build_cli_dispatch_for_project` factory wires
+    (:func:`scripts.cli_dispatch._host_model_for` — recommend-backed ``model_for``;
+    :func:`scripts.cli_dispatch._host_briefing_for` — in-memory-roster
+    ``briefing_for``; :func:`scripts.cli_dispatch._default_est_for`) and passes the
+    seam CALLABLES to the M5 :func:`pipeline` scheduler. It does NOT construct the
+    factory's ``CliDispatchTools`` object: ``pipeline()`` consumes seam callables
+    directly (it builds each ``run_attempt`` itself), so a ``CliDispatchTools``
+    instance would be an unused leaf (and an unused owned event loop). The factory
+    (T1) is the sibling ``CliDispatchTools`` constructor for the ``parallel()``
+    façade / a future leaf-owning caller. This function is the host/CLI transport's
+    analog of the bridge's ``build_wave_dispatcher_for_project`` + per-turn poll
+    servicer.
+
+    The model-tier seam is the SHARED bridge policy (override > env
+    ``ATELIER_MODEL_TIER`` > difficulty > PHASE_TIER > DEFAULT, then ROLE_FLOOR
+    opus floor) sourced per-task; the same ``est_for`` the leaf uses
+    (:func:`scripts.cli_dispatch._default_est_for`) seeds ``pipeline``'s fleet
+    width, so the chosen tier sets BOTH the ``--model`` argv AND the per-tier
+    budget seeding from one source (a wrong tier would compound — hence the single
+    policy).
+
+    ``runner`` / ``sandbox_wrap`` / ``permission_mode`` / ``disallowed_tools``
+    default to the leaf's secure defaults (real runner, identity wrap → the
+    mandatory-sandbox gate refuses an unsandboxed real run unless the operator
+    attests via ``ATELIER_CLI_ALLOW_UNSANDBOXED=1``; a caller wires
+    ``native_sandbox_wrap(clone)`` for a confined real run). Tests inject a
+    ``FakeCliRunner`` (exempt from the sandbox gate — no real process).
+
+    Returns the per-task validated envelope (or failed-attempt sentinel) in the
+    deterministic ``(parallel_group, task_id)`` order :func:`pipeline` produces.
+    """
+    from scripts.cli_dispatch import (
+        _default_est_for,
+        _host_briefing_for,
+        _host_model_for,
+        identity_sandbox_wrap,
+        real_cli_runner,
+    )
+    from scripts.dag import compute_dag_proof
+
+    resolved_env: Mapping[str, str] = env if env is not None else os.environ
+    task_list = list(tasks)
+
+    # The DAG proof: fail-closed over the SAME existing-files set the planner gate
+    # used. `compute_dag_proof` validates the DAG first and raises on an invalid
+    # one (a proof is only defined for a valid DAG).
+    dag_proof = compute_dag_proof([dict(t) for t in task_list], existing_files=existing_files or ())
+
+    # The shared model-tier + roster-briefing seams (the SAME builders the
+    # `build_cli_dispatch_for_project` leaf factory wires). `pipeline()` consumes
+    # the seam callables DIRECTLY (it constructs each `run_attempt` itself — it does
+    # NOT take a CliDispatchTools), so we build the seams here and pass them through.
+    # A caller-supplied `model_for` / `briefing_for` overrides the default seam.
+    pick_model = model_for if model_for is not None else _host_model_for(resolved_env)
+    brief = (
+        briefing_for
+        if briefing_for is not None
+        else _host_briefing_for(
+            clone_dir=clone_dir,
+            team_id=team_id,
+            team_lead_name=team_lead_name,
+            wave_id=wave_id,
+            phase_procedure_for=phase_procedure_for,
+        )
+    )
+
+    # Resolve the leaf's secure defaults at call time (so a None passes through to
+    # the documented default rather than overriding it with a frozen value).
+    eff_runner = runner if runner is not None else real_cli_runner
+    eff_sandbox = sandbox_wrap if sandbox_wrap is not None else identity_sandbox_wrap
+
+    pipeline_kwargs: dict[str, Any] = {
+        "budget": budget,
+        "journal": journal,
+        "dag_proof": dag_proof,
+        "model_for": pick_model,
+        "briefing_for": brief,
+        "clone_dir": clone_dir,
+        "worktree_factory": worktree_factory,
+        "runner": eff_runner,
+        # The SAME est_for the leaf threads into run_attempt — so the chosen tier
+        # sets BOTH the --model argv AND the per-tier fleet/budget seeding from one
+        # source (a wrong tier compounds; one policy avoids the divergence).
+        "est_for": _default_est_for,
+        "max_workers": max_workers,
+        "wall_clock_s": wall_clock_s,
+        "sandbox_wrap": eff_sandbox,
+    }
+    if permission_mode is not None:
+        pipeline_kwargs["permission_mode"] = permission_mode
+    if disallowed_tools is not None:
+        pipeline_kwargs["disallowed_tools"] = disallowed_tools
+    if allowed_tools is not None:
+        pipeline_kwargs["allowed_tools"] = allowed_tools
+    if escalate_fn is not None:
+        pipeline_kwargs["escalate_fn"] = escalate_fn
+    if max_budget_usd is not None:
+        pipeline_kwargs["max_budget_usd"] = max_budget_usd
+    return await pipeline(task_list, **pipeline_kwargs)

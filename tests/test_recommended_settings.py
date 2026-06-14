@@ -2,8 +2,11 @@
 version-upgrade eligibility module (the single source of truth for the
 consent-gated "apply a recommended settings PROFILE on a version bump" feature).
 
-The offer is now a NAMED-PROFILE CHOICE: two profiles (``cost-effective`` —
-the default/recommended — and ``code-quality``) plus skip. Each profile manages
+The offer is now a NAMED-PROFILE CHOICE: three profiles (``cost-effective`` —
+the default/recommended — ``balanced``, and ``code-quality``) plus skip. The
+flow is profile-COUNT-agnostic (it iterates ``PROFILES`` and never assumes a
+binary), so adding ``balanced`` (M6b-2) did not change its correctness. Each
+profile manages
 a fixed set of top-level keys + the ``CLAUDE_CODE_SUBAGENT_MODEL`` env key, and
 applying a profile RECONCILES the managed keys (sets the profile's keys, removes
 managed keys the profile does not specify, preserves all unmanaged keys + env
@@ -50,12 +53,13 @@ def _write_json(path, payload):
 
 
 def test_profiles_registry_shape():
-    """PROFILES holds exactly the two named profiles; the default is
-    cost-effective; the registry is ordered default-first."""
-    assert set(rs.PROFILES) == {"cost-effective", "code-quality"}
+    """PROFILES holds the three named profiles; the default is cost-effective;
+    the registry is ordered cheap → neutral → quality (default first)."""
+    assert set(rs.PROFILES) == {"cost-effective", "balanced", "code-quality"}
     assert rs.DEFAULT_PROFILE == "cost-effective"
-    # Ordered, default first (the SKILL renders the menu in this order).
-    assert next(iter(rs.PROFILES)) == "cost-effective"
+    # Ordered, default first, then balanced, then code-quality (the SKILL renders
+    # the menu in this order).
+    assert list(rs.PROFILES) == ["cost-effective", "balanced", "code-quality"]
 
 
 def test_cost_effective_profile_exact():
@@ -71,6 +75,72 @@ def test_cost_effective_profile_exact():
     }
     assert "ultracode" not in rs.PROFILES["cost-effective"]
     assert not rs.PROFILES["cost-effective"]["model"].startswith("claude-")
+
+
+def test_balanced_profile_present_and_global_flow_three_profiles(hermetic, monkeypatch):
+    """M6b-2 Iron-Law 3: PROFILES has all THREE (cost-effective / balanced /
+    code-quality); the global settings-rec flow (maybe_offer / compute_changes /
+    apply_profile) works with 3 and does NOT assume a binary; DEFAULT_PROFILE stays
+    cost-effective.
+
+    RED pre-fix: ``balanced`` is absent from PROFILES → the registry/membership
+    assertions fail, so the test is RED until balanced is added."""
+    settings, _ = hermetic
+    # All three present; default unchanged.
+    assert set(rs.PROFILES) == {"cost-effective", "balanced", "code-quality"}
+    assert rs.DEFAULT_PROFILE == "cost-effective"
+
+    # maybe_offer enumerates ALL THREE (not a binary) — ordered default-first.
+    monkeypatch.setattr(rs, "current_plugin_version", lambda: "2.0.0")
+    offer = rs.maybe_offer()
+    assert offer is not None
+    assert list(offer["profiles"]) == ["cost-effective", "balanced", "code-quality"]
+    # Each profile carries its posture + a computed diff (count-agnostic loop).
+    for pid in ("cost-effective", "balanced", "code-quality"):
+        assert offer["profiles"][pid]["posture"] == rs.PROFILES[pid]
+        assert "set" in offer["profiles"][pid]["changes"]
+
+    # compute_changes works for the NEW profile.
+    bal_diff = rs.compute_changes({}, "balanced")
+    assert bal_diff["set"]["model"] == "sonnet"
+    assert bal_diff["set"]["effortLevel"] == "high"
+    assert bal_diff["env_set"] == {"CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"}
+
+    # apply_profile applies the balanced profile end to end (writes settings.json).
+    applied = rs.apply_profile("balanced")
+    assert applied["empty"] is False
+    after = json.loads(settings.read_text(encoding="utf-8"))
+    assert after["model"] == "sonnet"
+    assert after["effortLevel"] == "high"
+    assert "ultracode" not in after
+    assert after["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == "sonnet"
+
+    # Switching balanced → code-quality clears the stale effortLevel (reconciler is
+    # profile-count-agnostic — it removes managed keys the new profile omits).
+    rs.apply_profile("code-quality")
+    after2 = json.loads(settings.read_text(encoding="utf-8"))
+    assert after2["model"] == "opus"
+    assert after2["ultracode"] is True
+    assert "effortLevel" not in after2
+
+    # 'balanced' is a WRITE-valid decision token (the state validator accepts every
+    # profile id — not just the original two).
+    assert "balanced" in rs._valid_decisions()
+    rs.write_state("2.0.0", "balanced")  # no raise
+
+
+def test_balanced_profile_exact():
+    """balanced (M6b-2): sonnet orchestrator @ effortLevel high (sets effortLevel,
+    NOT ultracode — like cost-effective), sonnet subagents (no lean), autoCompact
+    on. ANTI-REVERT: model is the family ALIAS (not a pinned claude-* id)."""
+    assert rs.PROFILES["balanced"] == {
+        "model": "sonnet",
+        "effortLevel": "high",
+        "autoCompactEnabled": True,
+        "env": {"CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"},
+    }
+    assert "ultracode" not in rs.PROFILES["balanced"]
+    assert not rs.PROFILES["balanced"]["model"].startswith("claude-")
 
 
 def test_code_quality_profile_exact():
@@ -345,8 +415,8 @@ def test_eligibility_payload_schema(hermetic, monkeypatch):
     assert offer["eligible"] is True
     assert offer["current_version"] == "1.9.0"
     assert offer["default_profile"] == "cost-effective"
-    # Per-profile info, ordered default-first.
-    assert list(offer["profiles"]) == ["cost-effective", "code-quality"]
+    # Per-profile info, ordered default-first — ALL of PROFILES (now three).
+    assert list(offer["profiles"]) == ["cost-effective", "balanced", "code-quality"]
     ce = offer["profiles"]["cost-effective"]
     assert ce["posture"] == rs.PROFILES["cost-effective"]
     assert ce["changes"]["set"]["model"] == "sonnet"

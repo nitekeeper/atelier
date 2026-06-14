@@ -4,7 +4,7 @@ This module is the SINGLE SOURCE OF TRUTH for the opt-in, consent-gated
 "apply a recommended settings PROFILE on a version upgrade" feature.
 
 When atelier's plugin version is bumped, the FIRST session on the new
-version OFFERS (consent-gated) a choice between TWO named profiles for the
+version OFFERS (consent-gated) a choice among the named profiles for the
 user's global ``~/.claude/settings.json``. The presented default is the
 recommended ``cost-effective`` profile: pressing Enter / an empty answer
 APPLIES it (informed consent — the menu states this explicitly), while an
@@ -13,11 +13,18 @@ explicit skip writes nothing. (This keystroke→action mapping lives wholly in
 — it never sees the user's input and only acts on the explicit
 ``apply_profile`` / ``write_state`` calls the SKILL makes.)
 
-The two profiles:
+The profiles (ordered cheap → neutral → quality; every consent/reconcile/
+eligibility path iterates :data:`PROFILES` and is profile-COUNT-agnostic — it
+does NOT assume a binary, so the offer may present TWO or THREE):
 
   * ``cost-effective`` (the DEFAULT / recommended profile) —
     orchestrator ``model: "sonnet"`` at ``effortLevel: "high"``; subagents
     via ``env.CLAUDE_CODE_SUBAGENT_MODEL: "haiku"``; ``autoCompactEnabled``.
+  * ``balanced`` (the neutral MIDDLE, M6b-2) — orchestrator ``model: "sonnet"``
+    at ``effortLevel: "high"`` (sets ``effortLevel``, NOT ``ultracode`` — like
+    cost-effective); subagents via ``env.CLAUDE_CODE_SUBAGENT_MODEL: "sonnet"``
+    (no lean either way); ``autoCompactEnabled``. The R-MODE ``balanced`` run
+    mode maps onto this profile. Values are a sane neutral middle and TUNABLE.
   * ``code-quality`` (optional) — orchestrator ``model: "opus"`` with
     ``ultracode: true`` (NOT ``effortLevel`` — see the harness facts below);
     subagents via ``env.CLAUDE_CODE_SUBAGENT_MODEL: "sonnet"``;
@@ -109,6 +116,20 @@ COST_EFFECTIVE: dict[str, Any] = {
     "env": {"CLAUDE_CODE_SUBAGENT_MODEL": "haiku"},
 }
 
+# BALANCED — the neutral MIDDLE profile (M6b-2). Sonnet orchestrator at
+# effortLevel high (NO ultracode — so it sets `effortLevel`, NOT the
+# mutually-exclusive `ultracode` key, exactly like cost-effective), sonnet
+# subagents (no lean either way). It is the orchestrator-model family + subagent
+# posture for the R-MODE `balanced` run mode (scripts/run_mode.py). The values are
+# a sane neutral middle and are TUNABLE — a maintainer re-tunes the spread here
+# without touching the reconciler/eligibility logic (which is profile-COUNT-agnostic).
+BALANCED: dict[str, Any] = {
+    "model": "sonnet",  # TUNABLE: neutral orchestrator family (advisory via R-MODE)
+    "effortLevel": "high",  # TUNABLE: sets effortLevel (NOT ultracode) — like cost-effective
+    "autoCompactEnabled": True,
+    "env": {"CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"},  # TUNABLE: neutral subagent (no lean)
+}
+
 CODE_QUALITY: dict[str, Any] = {
     "model": "opus",
     "ultracode": True,
@@ -117,9 +138,14 @@ CODE_QUALITY: dict[str, Any] = {
 }
 
 # Ordered, DEFAULT FIRST — the SKILL renders the menu in this order and marks
-# the default as recommended.
+# the default as recommended. `balanced` sits BETWEEN cost-effective and
+# code-quality (cheap → neutral → quality). All consent/reconcile/eligibility
+# paths iterate PROFILES and are profile-COUNT-agnostic (they do NOT assume a
+# binary), so adding `balanced` does not change the global settings-rec flow's
+# correctness — it may now offer THREE profiles, which is acceptable.
 PROFILES: dict[str, dict[str, Any]] = {
     "cost-effective": COST_EFFECTIVE,
+    "balanced": BALANCED,
     "code-quality": CODE_QUALITY,
 }
 DEFAULT_PROFILE = "cost-effective"
@@ -326,8 +352,9 @@ def eligibility() -> dict | None:
           "eligible":        True,
           "current_version": <ver>,
           "default_profile": "cost-effective",
-          "profiles": {                # ordered default-first
+          "profiles": {                # ordered default-first; ALL of PROFILES
             "cost-effective": {"posture": <profile dict>, "changes": <diff>},
+            "balanced":       {"posture": <profile dict>, "changes": <diff>},
             "code-quality":   {"posture": <profile dict>, "changes": <diff>},
           },
           "changes": <diff>,           # convenience: the DEFAULT profile's diff

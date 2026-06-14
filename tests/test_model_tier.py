@@ -378,7 +378,85 @@ def test_env_none_means_no_pin():
         {"env": {ENV_TIER_VAR: "garbage"}},
         {"phase": None, "role_id": None, "difficulty": None},
         {"role_id": "review", "phase": "garbage"},
+        {"posture": "garbage"},
+        {"posture": "cost-lean", "role_id": "review"},
     ],
 )
 def test_recommend_always_returns_a_valid_tier(kwargs):
     assert recommend(**kwargs) in TIERS
+
+
+# ── M6b-2 Iron-Law 1: R-MODE posture caps tier, but ROLE_FLOOR stays HARD ─────
+
+
+def test_rmode_posture_caps_tier_but_role_floor_stays_hard():
+    """The R-MODE posture biases the BASE tier (cost-lean DOWN, opus-lean UP),
+    neutral is a NO-OP — BUT a review/security/architect/safety ROLE_FLOOR stays a
+    HARD opus floor in ALL THREE postures (cost-lean NEVER downshifts a floored
+    role below opus). Also pins the floor-AFTER-posture ordering: were the order
+    reversed (floor THEN posture), cost-lean would drag a floored opus down to
+    sonnet — so this asserts the floor survives cost-lean, which is only true when
+    the floor is applied LAST.
+
+    RED pre-fix: ``recommend`` had no ``posture`` param → every call here raises
+    TypeError, so the whole test is RED until the param + floor-after-posture
+    ordering exist.
+    """
+    # Base signals with NO floor — the posture transform is visible.
+    # qa phase → sonnet base.
+    assert recommend(phase="qa") == "sonnet"  # neutral baseline (no posture)
+    assert recommend(phase="qa", posture="neutral") == "sonnet"  # neutral == no-op
+    assert recommend(phase="qa", posture="cost-lean") == "haiku"  # DOWN one rung
+    assert recommend(phase="qa", posture="opus-lean") == "opus"  # UP one rung
+
+    # doc phase → haiku base; cost-lean clamps at the cheapest tier (no wrap).
+    assert recommend(phase="doc") == "haiku"
+    assert recommend(phase="doc", posture="cost-lean") == "haiku"  # clamped, no wrap
+    assert recommend(phase="doc", posture="opus-lean") == "sonnet"  # UP one rung
+
+    # neutral posture == today's recommend output for a range of phases (the no-op
+    # the host's default-None path relies on).
+    for ph in ("design", "qa", "doc", "tdd:green", "review"):
+        assert recommend(phase=ph, posture="neutral") == recommend(phase=ph)
+        assert recommend(phase=ph, posture=None) == recommend(phase=ph)
+
+    # THE HARD FLOOR: a floored role under cost-lean STILL returns opus. Pick a
+    # CHEAP phase (doc → haiku base) so the ONLY thing that can make it opus is the
+    # floor — and assert cost-lean does not defeat it.
+    for role in ("security-engineer-1", "code-reviewer-1", "software-architect-1", "safety-1"):
+        assert recommend(phase="doc", role_id=role, posture="cost-lean") == "opus", (
+            f"ROLE_FLOOR must stay HARD opus under cost-lean for {role}"
+        )
+        # And neutral / opus-lean obviously keep the floor too.
+        assert recommend(phase="doc", role_id=role, posture="neutral") == "opus"
+        assert recommend(phase="doc", role_id=role, posture="opus-lean") == "opus"
+
+    # Floor-AFTER-posture ordering pin (un-fakeable): if the floor were applied
+    # BEFORE the posture, cost-lean would cap the floored opus down to sonnet. The
+    # observed opus above proves the floor is applied LAST. Make the dependency
+    # explicit: a floored role whose phase base is already opus also survives —
+    # equivalent only because floor is the final raise, not a pre-posture step.
+    assert recommend(phase="review", role_id="security-engineer-1", posture="cost-lean") == "opus"
+
+
+def test_rmode_env_pin_outranks_posture():
+    """Precedence: the ATELIER_MODEL_TIER env pin (rung 2) returns OUTRIGHT and is
+    NEVER posture-adjusted — the env pin stays the operator's hard one-tier escape
+    hatch ABOVE the posture. So a sonnet pin under cost-lean is still sonnet (NOT
+    capped to haiku)."""
+    assert recommend(phase="qa", env={ENV_TIER_VAR: "sonnet"}, posture="cost-lean") == "sonnet"
+    assert recommend(phase="qa", env={ENV_TIER_VAR: "haiku"}, posture="opus-lean") == "haiku"
+    # An explicit override (rung 1) likewise outranks the posture.
+    assert recommend(phase="qa", override="opus", posture="cost-lean") == "opus"
+
+
+def test_rmode_recommend_is_pure_no_global_mutation():
+    """``recommend`` with a posture must NOT mutate the module-level PHASE_TIER /
+    DEFAULT_TIER (concurrency/test hazard). Snapshot the constants, run every
+    posture, and assert they are unchanged."""
+    phase_snapshot = dict(model_tier.PHASE_TIER)
+    default_snapshot = model_tier.DEFAULT_TIER
+    for posture in ("cost-lean", "neutral", "opus-lean", None, "garbage"):
+        recommend(phase="qa", role_id="security-1", posture=posture)
+    assert phase_snapshot == model_tier.PHASE_TIER
+    assert default_snapshot == model_tier.DEFAULT_TIER

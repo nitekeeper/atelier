@@ -324,6 +324,7 @@ def build_wave_dispatcher(
 def _default_model_for(
     phase: str | None,
     env: Mapping[str, str] | None,
+    posture: str | None = None,
 ) -> Callable[[Mapping[str, Any], int], str | None]:
     """Build the default ``model_for(task, attempt) -> str | None`` seam.
 
@@ -333,6 +334,13 @@ def _default_model_for(
     operator's ``ATELIER_MODEL_TIER`` env pin is honored: when the factory got an
     explicit ``env`` mapping we forward it; otherwise we fall back to the live
     ``os.environ`` so a pin set in the shell still wins.
+
+    ``posture`` (M6b-2 R-MODE) — an OPTIONAL one-rung cost↔quality bias threaded
+    into ``recommend`` (cost-lean / neutral / opus-lean). It defaults to ``None``
+    (== neutral == NO transform), so the BRIDGE path — which never supplies a
+    posture — is byte-identical to its pre-M6b-2 tier output. The HOST path
+    (``cli_dispatch._host_model_for``) passes the resolved RunMode's posture here so
+    the run-wide posture fans out per task while reusing this ONE shared policy.
 
     Defensive: a task without ``assigned_to`` / ``difficulty`` simply omits that
     signal; ``recommend`` always returns a valid tier (never raises).
@@ -349,6 +357,7 @@ def _default_model_for(
             role_id=role_id if isinstance(role_id, str) else None,
             difficulty=difficulty if isinstance(difficulty, str) else None,
             env=resolved_env,
+            posture=posture,
         )
 
     return model_for

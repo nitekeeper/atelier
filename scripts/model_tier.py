@@ -111,6 +111,27 @@ PHASE_TIER: dict[str, str] = {
     "format": "haiku",
 }
 
+#: The R-MODE posture vocabulary (M6b-2). A posture is a POST-BASE transform
+#: applied to the resolved base tier (difficulty/phase/default) BEFORE the
+#: ROLE_FLOOR — it biases the base cost↔quality WITHOUT forking the tier policy:
+#:
+#:   * ``cost-lean``  — cap the base DOWN one rung (toward haiku/sonnet);
+#:   * ``neutral``    — NO transform (byte-identical to the pre-posture behavior —
+#:                      so the R-MODE ``balanced`` mode / ``posture=None`` is a no-op);
+#:   * ``opus-lean``  — raise the base UP one rung (toward opus).
+#:
+#: The transform is a ONE-RUNG shift (clamped to the TIERS range), deliberately
+#: gentle so a posture nudges the spread rather than collapsing every task to one
+#: tier (the operator's ``ATELIER_MODEL_TIER`` env pin remains the hard one-tier
+#: lever, and it sits ABOVE the posture in precedence). CRITICAL: the posture is
+#: applied to the BASE only; the ROLE_FLOOR (review/security/architect/safety →
+#: opus) is applied AFTER and stays a HARD floor in ALL THREE postures — a
+#: cost-lean run NEVER downshifts a floored role below opus.
+POSTURE_COST_LEAN = "cost-lean"
+POSTURE_NEUTRAL = "neutral"
+POSTURE_OPUS_LEAN = "opus-lean"
+VALID_POSTURES: frozenset[str] = frozenset({POSTURE_COST_LEAN, POSTURE_NEUTRAL, POSTURE_OPUS_LEAN})
+
 #: Role-id substring → MINIMUM tier (a FLOOR that only RAISES, never lowers).
 #: An independent reviewer / security / architect / safety role must never run
 #: below Opus — it has to catch what the implementer missed. Matching is by
@@ -247,6 +268,30 @@ def _more_capable(a: str, b: str | None) -> str:
     return b if _RANK[b] > _RANK[a] else a
 
 
+def _apply_posture(base: str, posture: str | None) -> str:
+    """Bias *base* by the R-MODE *posture* — a ONE-RUNG shift clamped to TIERS.
+
+    Applied to the BASE tier (difficulty/phase/default) AFTER the base is resolved
+    and BEFORE the ROLE_FLOOR (so the floor can still raise a posture-capped role
+    back to its hard minimum). Pure — reads only :data:`TIERS` / :data:`_RANK`.
+
+    * ``cost-lean`` → shift DOWN one rung (``max(0, rank-1)``) — toward haiku;
+    * ``opus-lean`` → shift UP one rung (``min(last, rank+1)``) — toward opus;
+    * ``neutral`` / ``None`` / any unknown value → NO shift (returns *base*
+      unchanged — so a neutral/absent posture is byte-identical to today).
+
+    The clamp means a base already at the cheapest tier under cost-lean (or the
+    priciest under opus-lean) is returned unchanged — the shift never wraps.
+    """
+    if posture == POSTURE_COST_LEAN:
+        return TIERS[max(0, _RANK[base] - 1)]
+    if posture == POSTURE_OPUS_LEAN:
+        return TIERS[min(len(TIERS) - 1, _RANK[base] + 1)]
+    # neutral / None / unknown — no transform (forward-defensive: an unrecognized
+    # posture is IGNORED rather than raising, mirroring the env/override tolerance).
+    return base
+
+
 def recommend(
     *,
     phase: str | None = None,
@@ -255,6 +300,7 @@ def recommend(
     override: str | None = None,
     default: str | None = None,
     env: Mapping[str, str] | None = None,
+    posture: str | None = None,
 ) -> str:
     """Recommend a model TIER alias (``"haiku"`` | ``"sonnet"`` | ``"opus"``).
 
@@ -279,10 +325,21 @@ def recommend(
        rung is always reached via the PHASE branch; the difficulty branch is kept
        forward-compatible but is presently DEAD in production. The ACTIVE base
        signal today is phase.
-    4. **ROLE_FLOOR** — raise the base to the floor of any matching role
-       (``_more_capable``). The floor only RAISES: a base that already
+    3b. **R-MODE posture** (M6b-2) — a one-rung cost↔quality bias applied to the
+       BASE from rung 3, AFTER the base and BEFORE the ROLE_FLOOR: ``cost-lean``
+       caps DOWN, ``opus-lean`` raises UP, ``neutral`` / ``None`` is a NO-OP
+       (byte-identical to the pre-posture behavior). It sits BELOW the env pin
+       (rung 2): ``ATELIER_MODEL_TIER`` returns outright and is NEVER posture-
+       adjusted (the env pin stays the operator's hard one-tier escape hatch above
+       the posture). It sits ABOVE the floor so a floored role is ALWAYS raised
+       back to opus even under ``cost-lean``.
+    4. **ROLE_FLOOR** — raise the POSTURE-ADJUSTED base to the floor of any matching
+       role (``_more_capable``). The floor only RAISES: a base that already
        meets/exceeds the floor is unchanged, and a high base is NEVER lowered by a
-       low floor.
+       low floor. CRITICAL ORDERING: the floor is applied AFTER the posture, so
+       ``cost-lean`` can never downshift a review/security/architect/safety role
+       below opus — the floor wins (proven by
+       ``test_rmode_posture_caps_tier_but_role_floor_stays_hard``).
 
     ``default`` defaults to ``None``, meaning "use the live module-level
     :data:`DEFAULT_TIER`"; it is resolved INSIDE the body so a runtime
@@ -317,5 +374,13 @@ def recommend(
     if base is None:
         base = default if _valid_tier(default) is not None else DEFAULT_TIER
 
-    # (4) apply the role floor — RAISES only.
+    # (3b) R-MODE posture — bias the BASE cost↔quality (one-rung shift), applied
+    # AFTER the base and BEFORE the floor. neutral/None is a no-op. The env pin
+    # (rung 2) already returned outright above, so the posture never overrides it.
+    base = _apply_posture(base, posture)
+
+    # (4) apply the role floor — RAISES only. Applied AFTER the posture, so a
+    # floored role (review/security/architect/safety → opus) is ALWAYS raised back
+    # to opus even when cost-lean capped its base down — the floor is HARD in all
+    # three postures.
     return _more_capable(base, _role_floor(role_id))

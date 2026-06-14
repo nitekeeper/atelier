@@ -80,6 +80,26 @@ class BudgetPool:
     # ── read-only properties ───────────────────────────────────────────────
 
     @property
+    def total_tokens(self) -> int:
+        """The hard ``total_tokens`` limit (BEFORE headroom scaling).
+
+        The base the headroom multiplies to form :attr:`effective_ceiling`.
+        Exposed so an UPSTREAM caller (e.g. the R-MODE host entrypoint sizing a
+        fresh pool from a mode's ceiling factor — M6b-2) can read the base total
+        without reaching into the private ``_total`` field.
+        """
+        return self._total
+
+    @property
+    def headroom(self) -> float:
+        """The headroom fraction (the ``(0, 1]`` multiplier on :attr:`total_tokens`).
+
+        Exposed alongside :attr:`total_tokens` so an upstream caller can read the
+        pool's sizing without touching the private ``_headroom`` field.
+        """
+        return self._headroom
+
+    @property
     def effective_ceiling(self) -> int:
         """``total_tokens * headroom``, *floored*.
 

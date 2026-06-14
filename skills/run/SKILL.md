@@ -87,6 +87,42 @@ user's choice, continue the original command. The offer is mode-agnostic (it
 fires on both `proceed-local` and `proceed-memex`); the procedure file is the
 single source of truth for the prompt text (do not inline it here).
 
+## Run mode selection — R-MODE (after pre-flight, before any work request)
+
+Establish the session's **run mode** — a per-run cost/quality posture. R-MODE is **PER-RUN / transient**: it is resolved at run START, honored for the whole run, and **NEVER writes `~/.claude/settings.json`** (it is ORTHOGONAL to the once-per-version "Settings recommendation" flow above, which is the SOLE settings.json writer). The orchestrator model R-MODE surfaces is an **ADVISORY recommendation only** — a running session cannot change its own model mid-run.
+
+The three modes (mapped onto `recommended_settings.PROFILES` — the single source of model families — in `scripts/run_mode.py`):
+
+- **cost-lean** — cheapest posture: per-task tiers biased DOWN (toward haiku/sonnet), a tighter token budget, narrower fan-out. Maps to the `cost-effective` profile.
+- **balanced** — neutral middle: no tier lean, default budget/fan-out. Maps to the `balanced` profile. (This is the byte-identical no-op posture.)
+- **quality-lean** — quality posture: per-task tiers biased UP (toward opus), a looser budget, wider fan-out. Maps to the `code-quality` profile.
+
+In every mode the **ROLE_FLOOR stays HARD**: a review / security / architect / safety role is ALWAYS opus, even under cost-lean.
+
+**ALWAYS-PROMPT (interactive only).** When the session is interactive (a TTY, no CI marker, no `ATELIER_RUN_MODE` env pin), ALWAYS prompt the user at run start:
+
+> *"Run mode for this run? **(1) cost-lean / (2) balanced / (3) quality-lean** — Enter for the saved default (`<DEFAULT_PROFILE>`'s mode). This is per-run only and never changes your settings.json; the orchestrator-model line is advisory."*
+
+The Enter-default is the SAVED profile (`recommended_settings.DEFAULT_PROFILE`, currently `cost-effective` → `cost-lean`). Resolve the answer:
+
+```python
+from scripts.run_mode import resolve_run_mode
+run_mode = resolve_run_mode(interactive_choice=<"cost-lean"|"balanced"|"quality-lean"|None>)
+# Surface (do NOT write) the advisory orchestrator-model recommendation:
+print(f"Advisory orchestrator model for this run: {run_mode.orchestrator_model} "
+      f"(advisory only — R-MODE never writes settings.json).")
+```
+
+**NON-INTERACTIVE / CI — skip the prompt, never block.** When `CI` / `GITHUB_ACTIONS` is set, stdin is non-TTY, or `ATELIER_RUN_MODE` is pinned, do NOT prompt — call `resolve_run_mode()` (no `interactive_choice`) and it resolves silently: the `ATELIER_RUN_MODE` env pin if set, else the saved-profile default. A non-interactive run NEVER blocks on the prompt.
+
+**Honor the resolved RunMode for the run.** Pass it to the host pipeline so the four levers (per-task posture, BudgetPool, fleet width, advisory orchestrator model) fan out:
+
+```python
+await run_host_pipeline_for_project(..., run_mode=run_mode)   # host/CLI transport
+```
+
+(The default `run_mode=None` inside `run_host_pipeline_for_project` calls `resolve_run_mode()` itself, so a caller that forgets to thread it still gets the env/CI-default behavior — but the always-prompt is THIS recipe's job and only fires here.)
+
 ## Dispatch-mode selection (after pre-flight, before any work request)
 
 Once `startup_check` returns a `proceed-*` action and BEFORE the Trigger contract's Ask gate fires for any new-work request, establish the session's **dispatch mode**. **The default is sub-agent mode** — adopt it silently, with no live pick, unless the user explicitly chooses agent-team for this session or has pre-authorized agent-team in CLAUDE.md / saved preferences. This mirrors the read-side default in `scripts/dispatch.py::resolve_dispatch_mode` (env override → marker → `subagent` default).

@@ -1369,13 +1369,15 @@ def build_cli_poll_fn(
 
 def _host_model_for(
     env: Mapping[str, str] | None,
+    posture: str | None = None,
 ) -> Callable[[Mapping[str, Any], int], str]:
     """Build the host-path ``model_for(task, attempt) -> tier`` seam.
 
     REUSES ``atelier_entrypoint._default_model_for`` (the bridge's
     recommend-backed closure) so the tier precedence — explicit override > env
     ``ATELIER_MODEL_TIER`` > (reserved) difficulty > PHASE_TIER > DEFAULT_TIER,
-    then ROLE_FLOOR raise-only — is byte-for-byte the SAME policy as the bridge.
+    then the R-MODE posture transform, then ROLE_FLOOR raise-only — is byte-for-byte
+    the SAME policy as the bridge.
 
     The only difference is the INPUT SOURCING: a host-path task carries its OWN
     ``phase`` and the planner's ``assigned_persona`` (vs the bridge's single cycle
@@ -1384,6 +1386,14 @@ def _host_model_for(
     whose ``assigned_to`` is the planner persona (so the role-floor + role signal
     flow exactly as ``_default_model_for`` expects). ``recommend`` never raises, so
     this never raises; a task with no phase / persona simply omits that signal.
+
+    ``posture`` (M6b-2 R-MODE) — the resolved RunMode's per-task posture
+    (cost-lean / neutral / opus-lean). It is threaded into ``_default_model_for``
+    (→ ``recommend``) so the run-wide cost/quality bias fans out per task. The
+    ``ATELIER_MODEL_TIER`` env pin retains precedence ABOVE the posture (it returns
+    outright in ``recommend``), and the ROLE_FLOOR stays a HARD floor in every
+    posture. ``None`` (== neutral) is byte-identical to the pre-M6b-2 output, so the
+    default host wiring (balanced / no run mode) is a no-op.
     """
     # Lazy import to keep the heavy entrypoint chain off the bare import path
     # (and to avoid any import cycle: atelier_entrypoint imports dispatch which
@@ -1404,8 +1414,9 @@ def _host_model_for(
         if role is None:
             role = task.get("assigned_to")
         task_view = {**task, "assigned_to": role}
-        # Reuse the bridge closure for THIS task's phase — identical policy.
-        picker = _default_model_for(phase, resolved_env)
+        # Reuse the bridge closure for THIS task's phase — identical policy, plus
+        # the run-wide posture (None == neutral == no-op).
+        picker = _default_model_for(phase, resolved_env, posture)
         return picker(task_view, attempt)
 
     return model_for
@@ -1488,6 +1499,7 @@ def build_cli_dispatch_for_project(
     disallowed_tools: Sequence[str] = DEFAULT_DISALLOWED_TOOLS,
     allowed_tools: Sequence[str] | None = None,
     sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
+    run_mode: Any = None,
 ) -> CliDispatchTools:
     """Build the production ``CliDispatchTools`` for the host/CLI transport (M6a).
 
@@ -1527,10 +1539,35 @@ def build_cli_dispatch_for_project(
       it sets BOTH ``--model`` AND the seeding — which is exactly why the model_for
       flow above is the shared bridge policy, not a separate one).
 
+    * ``run_mode`` — the resolved R-MODE :class:`~scripts.run_mode.RunMode`
+      (M6b-2). When no explicit ``model_for`` is given, the run mode's ``posture``
+      (cost-lean / neutral / opus-lean) is threaded into the default
+      :func:`_host_model_for` so the leaf/parallel-façade path biases tiers exactly
+      like the ``run_host_pipeline_for_project`` barrier-free path. **POSTURE PARITY
+      with the host entrypoint:** ``run_mode=None`` is AUTO-RESOLVED via
+      ``resolve_run_mode(env=env)`` (→ the saved-profile default, currently
+      ``cost-lean``) — the SAME None handling as
+      :func:`scripts.host_scheduler.run_host_pipeline_for_project`, so an unthreaded
+      None produces the SAME posture across both sibling constructors (no
+      transport-shape divergence). Only the POSTURE lever is honored here — this
+      factory does NOT own the BudgetPool / fleet-width levers (those are the host
+      entrypoint's), so a non-neutral mode's budget/fleet narrowing is NOT applied by
+      the factory; that is by design (the leaf is a per-task adapter, not the run
+      scheduler). An EXPLICITLY-NEUTRAL ``balanced`` run mode is a posture no-op.
+
     Use as a context manager (``with build_cli_dispatch_for_project(...) as tools:``)
     when the factory owns the event loop, so the loop is closed deterministically.
     """
-    pick_model = model_for if model_for is not None else _host_model_for(env)
+    # POSTURE PARITY (FIX 5): auto-resolve a None run_mode the SAME way the host
+    # entrypoint does (resolve_run_mode → saved-profile default), so the same None
+    # yields the same posture regardless of which sibling constructor is used. Only
+    # posture is achievable here (the factory does not own budget/fleet). An
+    # EXPLICIT run mode is used as-is. Lazy import (run_mode pulls recommended_settings;
+    # keep the heavy chain off the bare module-import path, parity with _host_model_for).
+    from scripts.run_mode import resolve_run_mode
+
+    eff_run_mode = run_mode if run_mode is not None else resolve_run_mode(env=env)
+    pick_model = model_for if model_for is not None else _host_model_for(env, eff_run_mode.posture)
     brief = (
         briefing_for
         if briefing_for is not None

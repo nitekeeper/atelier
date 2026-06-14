@@ -1726,6 +1726,7 @@ async def run_host_pipeline_for_project(
     escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
     max_budget_usd: float | None = None,
     review_pairing: Mapping[str, str] | None = None,
+    run_mode: Any = None,
 ) -> list[dict[str, Any]]:
     """Drive the deterministic host pipeline for a project (M6a production caller).
 
@@ -1758,6 +1759,32 @@ async def run_host_pipeline_for_project(
     ``native_sandbox_wrap(clone)`` for a confined real run). Tests inject a
     ``FakeCliRunner`` (exempt from the sandbox gate — no real process).
 
+    **M6b-2 — R-MODE (``run_mode``).** The resolved per-run cost/quality posture
+    (:class:`~scripts.run_mode.RunMode`). ``None`` ⇒ ``resolve_run_mode()`` auto-
+    resolves the saved-profile default (env ``ATELIER_RUN_MODE`` → DEFAULT_PROFILE's
+    mode; currently ``cost-effective`` → ``cost-lean``, a NON-neutral mode; NEVER
+    blocks). The mode fans out to FOUR levers, ALL gated so that an EXPLICITLY-NEUTRAL
+    run mode (``balanced`` / a lever-neutral mode) is a byte-for-byte no-op vs the
+    pre-M6b-2 wiring. NOTE: ``run_mode=None`` is NOT a no-op by default — it auto-
+    resolves to the saved ``cost-lean`` posture (down-biased tiers + a narrowed
+    budget/fleet); only ``balanced`` leaves every lever untouched:
+
+    * (a) ``run_mode.posture`` → ``_host_model_for(env, posture)`` (per-task tier
+      bias; ``neutral`` is no-op). An explicit ``model_for`` override bypasses this.
+    * (b) the BudgetPool — UPSTREAM SIZING. When the mode is NON-neutral, a NEW pool
+      is constructed from the passed pool's total scaled by
+      ``run_mode.budget_ceiling_factor`` with ``run_mode.budget_headroom``; the
+      passed pool is used UNCHANGED for a neutral mode (the no-op — no rebuild, no
+      lost charges). The entrypoint never owns budget construction for the neutral
+      path; it only re-sizes when a mode explicitly asks for a different ceiling.
+    * (c) ``run_mode.max_workers`` caps ``max_workers`` (it only ever NARROWS; the
+      ``min`` keeps it from widening past the caller's cap). ``None`` ⇒ unchanged.
+    * (d) ``run_mode.orchestrator_model`` is ADVISORY-ONLY — surfaced by the SKILL,
+      NEVER written to settings.json (R-MODE is transient/per-run; the once-per-
+      version settings-rec flow is the SOLE settings.json writer).
+
+    R-MODE NEVER calls ``apply_profile`` / writes ``~/.claude/settings.json`` here.
+
     Returns the per-task validated envelope (or failed-attempt sentinel) in the
     deterministic ``(parallel_group, task_id)`` order :func:`pipeline` produces.
     """
@@ -1769,9 +1796,44 @@ async def run_host_pipeline_for_project(
         real_cli_runner,
     )
     from scripts.dag import compute_dag_proof
+    from scripts.run_mode import resolve_run_mode
 
     resolved_env: Mapping[str, str] = env if env is not None else os.environ
     task_list = list(tasks)
+
+    # M6b-2 — resolve the R-MODE run posture. None ⇒ resolve_run_mode() auto-resolves
+    # the saved-profile default (env ATELIER_RUN_MODE → DEFAULT_PROFILE's mode;
+    # currently cost-effective → cost-lean, which is NON-neutral; never blocks).
+    # resolve_run_mode is PURE — it reads PROFILES + env only and NEVER writes
+    # settings.json (the orchestrator model is advisory; the once-per-version
+    # settings-rec flow is the sole writer). Only an EXPLICITLY-NEUTRAL run mode
+    # (balanced / a lever-neutral mode) keeps every lever a byte-for-byte no-op;
+    # an un-threaded run_mode=None auto-resolves to cost-lean, which IS non-neutral.
+    eff_run_mode = run_mode if run_mode is not None else resolve_run_mode(env=resolved_env)
+    # (a) the per-task posture lever — neutral ⇒ None ⇒ recommend() is byte-identical.
+    posture = None if eff_run_mode.is_neutral else eff_run_mode.posture
+    # (b) the BudgetPool lever — UPSTREAM SIZING. Re-size ONLY for a non-neutral
+    # mode (a neutral mode reuses the passed pool UNCHANGED — no rebuild, no lost
+    # charges, so the neutral no-op path is byte-identical). A non-neutral mode
+    # constructs a fresh pool from the passed pool's total scaled by the mode's
+    # ceiling factor, with the mode's headroom.
+    #
+    # PRECONDITION: the passed `budget` MUST be a fresh, un-charged TOP-OF-RUN pool —
+    # the non-neutral rebuild reads `budget.total_tokens` (the BASE, NOT remaining())
+    # and starts a NEW pool, so any prior charges / parent linkage on the passed pool
+    # are intentionally NOT carried over. Every production caller passes a fresh pool
+    # at run start, so this is safe today; documenting it pins the contract.
+    eff_budget = budget
+    if not eff_run_mode.is_neutral:
+        eff_budget = BudgetPool(
+            total_tokens=eff_run_mode.budget_total_for(budget.total_tokens),
+            headroom=eff_run_mode.budget_headroom,
+        )
+    # (c) the fleet-width lever — cap max_workers (NARROWS only; min keeps the
+    # caller's cap as the ceiling). None ⇒ unchanged (neutral no-op).
+    eff_max_workers = max_workers
+    if eff_run_mode.max_workers is not None:
+        eff_max_workers = min(max_workers, eff_run_mode.max_workers)
 
     # The DAG proof: fail-closed over the SAME existing-files set the planner gate
     # used. `compute_dag_proof` validates the DAG first and raises on an invalid
@@ -1799,7 +1861,7 @@ async def run_host_pipeline_for_project(
     # the seam callables DIRECTLY (it constructs each `run_attempt` itself — it does
     # NOT take a CliDispatchTools), so we build the seams here and pass them through.
     # A caller-supplied `model_for` / `briefing_for` overrides the default seam.
-    pick_model = model_for if model_for is not None else _host_model_for(resolved_env)
+    pick_model = model_for if model_for is not None else _host_model_for(resolved_env, posture)
     brief = (
         briefing_for
         if briefing_for is not None
@@ -1818,7 +1880,8 @@ async def run_host_pipeline_for_project(
     eff_sandbox = sandbox_wrap if sandbox_wrap is not None else identity_sandbox_wrap
 
     pipeline_kwargs: dict[str, Any] = {
-        "budget": budget,
+        # The R-MODE-sized pool (b) — eff_budget IS budget for a neutral mode.
+        "budget": eff_budget,
         "journal": journal,
         "dag_proof": dag_proof,
         "model_for": pick_model,
@@ -1830,7 +1893,8 @@ async def run_host_pipeline_for_project(
         # sets BOTH the --model argv AND the per-tier fleet/budget seeding from one
         # source (a wrong tier compounds; one policy avoids the divergence).
         "est_for": _default_est_for,
-        "max_workers": max_workers,
+        # The R-MODE-capped fan-out (c) — eff_max_workers IS max_workers for neutral.
+        "max_workers": eff_max_workers,
         "wall_clock_s": wall_clock_s,
         "sandbox_wrap": eff_sandbox,
     }

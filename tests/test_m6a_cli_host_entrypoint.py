@@ -576,3 +576,320 @@ def test_factory_builds_tools_with_recommend_backed_model_for(tmp_path):
         # apostrophe-free phrase from THIS persona's seed body).
         brief = tools.briefing_for(doc, 1)
         assert "PhD in Computer Science, MIT. 24 years building production backend" in brief
+
+
+def test_factory_none_run_mode_posture_matches_host_entrypoint(tmp_path):
+    """FIX 5 — sibling None-divergence closed: build_cli_dispatch_for_project with
+    run_mode=None auto-resolves the posture the SAME way the host entrypoint does
+    (resolve_run_mode → saved-profile default = cost-lean), so the SAME None yields
+    the SAME posture across both sibling constructors — no transport-shape drift.
+
+    Probe: a qa task (base sonnet) renders haiku under BOTH the factory's default-None
+    model_for AND the host entrypoint's default-None path. A pre-FIX-5 factory (which
+    treated None as neutral) would have left it sonnet — mismatching the host's
+    cost-lean haiku."""
+    from scripts.result_journal import ResultJournal
+    from scripts.run_mode import resolve_run_mode
+
+    env = {}  # no ATELIER_RUN_MODE pin → saved-profile default = cost-lean
+    saved = resolve_run_mode(env=env)
+    assert saved.mode_id == "cost-lean"  # the fixed saved default
+
+    qa = {
+        "task_id": "QA",
+        "parallel_group": 0,
+        "phase": "qa",
+        "assigned_persona": "backend-engineer-1",
+    }
+    # Factory: run_mode OMITTED (None) → auto-resolves cost-lean posture.
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    with build_cli_dispatch_for_project(
+        clone_dir=str(clone),
+        budget=BudgetPool(total_tokens=1_000_000),
+        journal=ResultJournal(),
+        runner=FakeCliRunner(structured_output=_echo_envelope),
+        env=env,
+    ) as tools:
+        factory_tier = tools.model_for(qa, 1)
+
+    # Host entrypoint: run_mode OMITTED (None) → same cost-lean posture, observed via argv.
+    host_runner = _ConcurrencyRunner()
+    clone2 = tmp_path / "host"
+    clone2.mkdir()
+    asyncio.run(
+        run_host_pipeline_for_project(
+            [qa],
+            clone_dir=str(clone2),
+            budget=BudgetPool(total_tokens=1_000_000),
+            journal=ResultJournal(),
+            runner=host_runner,
+            env=env,
+            max_workers=5,
+        )
+    )
+    host_tier = _val(_argv_for_task(host_runner, "QA"), "--model")
+
+    # PARITY: both default-None siblings produce the cost-lean-biased haiku (NOT the
+    # neutral sonnet a pre-FIX-5 factory would have left).
+    assert factory_tier == host_tier == "haiku"
+
+
+# ── M6b-2 R-MODE: the four levers fan out from run_host_pipeline_for_project ──
+
+
+class _ConcurrencyRunner(FakeCliRunner):
+    """FakeCliRunner that records max in-flight concurrency (for the fleet lever)
+    and echoes a valid envelope. Inherits the FAIL-CLOSED fake markers (no real
+    process → sandbox-gate exempt)."""
+
+    def __init__(self):
+        super().__init__(structured_output=_echo_envelope)
+        self._live = 0
+        self.max_concurrency = 0
+        self._lock = asyncio.Lock()
+
+    async def __call__(self, argv, cwd):
+        async with self._lock:
+            self._live += 1
+            self.max_concurrency = max(self.max_concurrency, self._live)
+        await asyncio.sleep(0.05)
+        try:
+            return await super().__call__(argv, cwd)
+        finally:
+            async with self._lock:
+                self._live -= 1
+
+
+def _run_host_mode(tasks, runner, tmp_path, *, run_mode, budget_tokens, max_workers=5):
+    """Drive the host entrypoint with an explicit run_mode + budget, returning
+    (results, runner) so the caller can inspect argv + concurrency."""
+    from scripts.result_journal import ResultJournal
+
+    clone = tmp_path / "experiment" / "o-r"
+    clone.mkdir(parents=True, exist_ok=True)
+    asyncio.run(
+        run_host_pipeline_for_project(
+            tasks,
+            clone_dir=str(clone),
+            budget=BudgetPool(total_tokens=budget_tokens),
+            journal=ResultJournal(),
+            runner=runner,
+            env={"CI": "1"},  # non-interactive: no prompt, no block
+            run_mode=run_mode,
+            max_workers=max_workers,
+        )
+    )
+    return runner
+
+
+def _disjoint_tasks(n):
+    """n same-wave, write-disjoint qa-phase tasks (so they CAN run concurrently —
+    the fleet lever is what limits them)."""
+    return [
+        {
+            "task_id": f"t{i}",
+            "parallel_group": 0,
+            "writes": [f"f{i}"],
+            "assigned_persona": "backend-engineer-1",
+            "phase": "qa",
+        }
+        for i in range(n)
+    ]
+
+
+def test_run_mode_threads_budget_and_fleet(tmp_path):
+    """The THREE modes produce DIFFERENT budget/fleet numbers through the REAL
+    entrypoint: cost-lean → narrower static_fleet_width (tighter pool + smaller
+    max_workers cap) than balanced than quality-lean. Asserts DISTINCT observed
+    concurrency across the three, AND distinct posture-driven --model tiers.
+
+    RED pre-fix: run_host_pipeline_for_project has no ``run_mode`` kwarg →
+    TypeError, so the test is RED until the kwarg + budget/fleet fan-out exist."""
+    from scripts.run_mode import resolve_run_mode
+
+    ci = {"CI": "1"}
+    cost = resolve_run_mode(explicit="cost-lean", env=ci)
+    balanced = resolve_run_mode(explicit="balanced", env=ci)
+    quality = resolve_run_mode(explicit="quality-lean", env=ci)
+
+    # The LEVER VALUES themselves differ across the three modes (the inputs the
+    # entrypoint fans out) — un-fakeable by a constant.
+    assert cost.max_workers < (quality.max_workers or 99)
+    assert (
+        cost.budget_ceiling_factor < balanced.budget_ceiling_factor < quality.budget_ceiling_factor
+    )
+    assert cost.budget_headroom < balanced.budget_headroom < quality.budget_headroom
+
+    # Observe the fleet lever end to end: 5 independent qa tasks, a budget tuned so
+    # cost-lean's smaller pool + max_workers=2 cap serializes harder than quality-
+    # lean's bigger pool + wider cap. Use a budget big enough that the POOL is not
+    # the binding constraint for quality-lean but the max_workers cap differs.
+    tasks = _disjoint_tasks(5)
+    cost_runner = _run_host_mode(
+        tasks, _ConcurrencyRunner(), tmp_path, run_mode=cost, budget_tokens=10_000_000
+    )
+    quality_runner = _run_host_mode(
+        tasks, _ConcurrencyRunner(), tmp_path, run_mode=quality, budget_tokens=10_000_000
+    )
+    # cost-lean caps fan-out at 2; quality-lean allows up to 5 → strictly wider.
+    assert cost_runner.max_concurrency <= 2
+    assert quality_runner.max_concurrency > cost_runner.max_concurrency
+
+    # The posture lever also flows: a security role under quality-lean stays opus;
+    # under cost-lean it STILL stays opus (hard floor) — but a plain qa task differs.
+    qa_cost = _run_host_mode(
+        [_two_task_dag()[0] | {"phase": "qa", "task_id": "QA"}],
+        _ConcurrencyRunner(),
+        tmp_path,
+        run_mode=cost,
+        budget_tokens=10_000_000,
+    )
+    qa_quality = _run_host_mode(
+        [_two_task_dag()[0] | {"phase": "qa", "task_id": "QA"}],
+        _ConcurrencyRunner(),
+        tmp_path,
+        run_mode=quality,
+        budget_tokens=10_000_000,
+    )
+    # qa base = sonnet: cost-lean → haiku, quality-lean → opus (distinct tiers).
+    assert _val(_argv_for_task(qa_cost, "QA"), "--model") == "haiku"
+    assert _val(_argv_for_task(qa_quality, "QA"), "--model") == "opus"
+
+
+def test_rmode_neutral_mode_is_noop(tmp_path):
+    """An EXPLICITLY-NEUTRAL run mode (balanced) produces byte-identical dispatch
+    (--model + --max-budget-usd argv) to the pre-M6b-2 path. Confirms the neutral
+    posture == today's recommend output — the byte-identity mechanism the no-op
+    rests on.
+
+    NOTE (FIX 3): this proves the NEUTRAL-mode no-op only. It deliberately does NOT
+    test run_mode=None — the real default-None path resolves to cost-lean (the saved
+    profile), which is NON-neutral; that observed behavior is asserted separately by
+    ``test_rmode_default_none_resolves_cost_lean_not_noop``."""
+    from scripts.run_mode import resolve_run_mode
+
+    balanced = resolve_run_mode(explicit="balanced", env={"CI": "1"})
+    assert balanced.is_neutral is True  # the mechanism under test is the neutral one
+
+    tasks = _two_task_dag()
+    base_runner = FakeCliRunner(structured_output=_echo_envelope)
+    _run_host_mode(tasks, base_runner, tmp_path, run_mode=balanced, budget_tokens=10_000_000)
+
+    # Reference: the bridge-identical recommend output (posture=None == neutral).
+    from scripts.model_tier import recommend
+
+    for tid, expect in (("DOC", "haiku"), ("SEC", "opus")):
+        argv = _argv_for_task(base_runner, tid)
+        # neutral balanced posture == today's recommend (no posture).
+        persona = next(t for t in tasks if t["task_id"] == tid)["assigned_persona"]
+        assert _val(argv, "--model") == recommend(phase="doc", role_id=persona, posture="neutral")
+        assert _val(argv, "--model") == recommend(phase="doc", role_id=persona)  # == no posture
+        assert _val(argv, "--model") == expect
+        # --max-budget-usd is est-derived (pool-independent) → tracks the tier only.
+        assert (
+            _val(argv, "--max-budget-usd")
+            == f"{max_budget_usd_for(_cli_default_est_for(expect)):.2f}"
+        )
+
+
+def test_rmode_default_none_resolves_cost_lean_not_noop(tmp_path):
+    """FIX 3 — the REAL default-None path: run_host_pipeline_for_project called with
+    NO run_mode (the unthreaded default) auto-resolves to the saved-profile default
+    (cost-effective → cost-lean), which is NON-neutral. This documents that
+    run_mode=None is NOT a no-op — it narrows the BudgetPool ceiling AND caps
+    concurrency at 2 (cost-lean's max_workers), AND down-biases tiers.
+
+    Un-fakeable: 5 independent qa tasks on a budget large enough that a NEUTRAL run
+    would fan out wider than 2, but the cost-lean default caps it at <=2 — so the
+    observed concurrency is strictly the cost-lean lever, not a pool coincidence."""
+    from scripts.model_tier import recommend
+    from scripts.run_mode import default_mode_id, resolve_run_mode
+
+    # Sanity: the saved-profile default IS cost-lean (the fixed maintainer decision).
+    assert default_mode_id() == "cost-lean"
+    assert resolve_run_mode(env={"CI": "1"}).mode_id == "cost-lean"  # no higher rung
+
+    tasks = _disjoint_tasks(5)
+
+    # (1) DEFAULT-NONE run: do NOT thread run_mode at all → auto-resolves cost-lean.
+    from scripts.result_journal import ResultJournal
+
+    clone = tmp_path / "experiment" / "none"
+    clone.mkdir(parents=True, exist_ok=True)
+    none_runner = _ConcurrencyRunner()
+    asyncio.run(
+        run_host_pipeline_for_project(
+            tasks,
+            clone_dir=str(clone),
+            budget=BudgetPool(total_tokens=10_000_000),
+            journal=ResultJournal(),
+            runner=none_runner,
+            env={"CI": "1"},  # non-interactive; no ATELIER_RUN_MODE pin
+            # run_mode intentionally OMITTED — exercises the real default-None path.
+            max_workers=5,
+        )
+    )
+    # (2) NEUTRAL (balanced) run on the SAME tasks+budget → wider fan-out.
+    balanced = resolve_run_mode(explicit="balanced", env={"CI": "1"})
+    neutral_runner = _run_host_mode(
+        tasks, _ConcurrencyRunner(), tmp_path, run_mode=balanced, budget_tokens=10_000_000
+    )
+
+    # THE COST-LEAN-DEFAULT ASSERTION: the unthreaded default narrows concurrency to
+    # cost-lean's max_workers cap (2), strictly tighter than the neutral run. A
+    # genuine no-op would have matched the neutral run's wider fan-out.
+    assert none_runner.max_concurrency <= 2, (
+        "default-None must auto-resolve cost-lean (max_workers=2) — NOT a neutral no-op"
+    )
+    assert neutral_runner.max_concurrency > none_runner.max_concurrency, (
+        "the NEUTRAL run fans out wider than the cost-lean default — proving "
+        "default-None is the narrowed cost-lean posture, not a no-op"
+    )
+
+    # The posture lever also bites on the default-None path: a qa task (base sonnet)
+    # is down-biased to haiku under the cost-lean default.
+    qa_default = _ConcurrencyRunner()
+    clone2 = tmp_path / "experiment" / "none-qa"
+    clone2.mkdir(parents=True, exist_ok=True)
+    asyncio.run(
+        run_host_pipeline_for_project(
+            [_disjoint_tasks(1)[0]],
+            clone_dir=str(clone2),
+            budget=BudgetPool(total_tokens=10_000_000),
+            journal=ResultJournal(),
+            runner=qa_default,
+            env={"CI": "1"},
+            max_workers=5,
+        )
+    )
+    # qa base = sonnet; cost-lean default biases DOWN to haiku (NOT the neutral sonnet).
+    assert _val(_argv_for_task(qa_default, "t0"), "--model") == "haiku"
+    assert recommend(phase="qa", posture="cost-lean") == "haiku" != recommend(phase="qa")
+
+
+def test_rmode_never_writes_settings_json(tmp_path, monkeypatch):
+    """Resolving + applying a RunMode for a run does NOT call apply_profile / write
+    ~/.claude/settings.json. The orchestrator model is ADVISORY only. Spy the
+    writer + the apply path; assert ZERO writes.
+
+    RED pre-fix: scripts.run_mode does not exist (ImportError)."""
+    import scripts.recommended_settings as rs_mod
+    from scripts.run_mode import resolve_run_mode
+
+    apply_calls = []
+    write_calls = []
+    monkeypatch.setattr(rs_mod, "apply_profile", lambda *a, **k: apply_calls.append((a, k)))
+    monkeypatch.setattr(rs_mod, "apply_recommended", lambda *a, **k: apply_calls.append((a, k)))
+    monkeypatch.setattr(rs_mod, "_atomic_write_json", lambda *a, **k: write_calls.append((a, k)))
+
+    # Resolve a quality-lean mode (which has an advisory opus orchestrator model)
+    # and drive a real run through the host entrypoint with it.
+    rmode = resolve_run_mode(explicit="quality-lean", env={"CI": "1"})
+    assert rmode.orchestrator_model == "opus"  # ADVISORY value present...
+    runner = FakeCliRunner(structured_output=_echo_envelope)
+    _run_host_mode(_two_task_dag(), runner, tmp_path, run_mode=rmode, budget_tokens=10_000_000)
+
+    # ...but NOTHING wrote settings.json — R-MODE is transient/per-run.
+    assert apply_calls == [], "R-MODE must NOT call apply_profile (advisory only)"
+    assert write_calls == [], "R-MODE must NOT write settings.json"

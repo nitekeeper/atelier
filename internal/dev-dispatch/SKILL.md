@@ -122,6 +122,29 @@ per-wave summaries → advance phase
        tolerates a leading `dev:` namespace prefix (the phase-GROUP form
        `dev:review` / `dev:tdd`), so whichever of the two this orchestrator hands
        it, the policy reads the same base — the two sides cannot drift.
+     - **R-MODE posture (host/CLI transport).** The run mode picked at run START
+       (see `skills/run/SKILL.md` → "Run mode selection — R-MODE") biases this
+       per-task tier policy run-wide. On the host/CLI transport
+       (`ATELIER_TRANSPORT=cli` → `scripts/host_scheduler.py::run_host_pipeline_for_project`),
+       thread the resolved `RunMode` so its posture (cost-lean / neutral /
+       opus-lean), BudgetPool ceiling/headroom, and fleet-width cap all fan out:
+       ```python
+       from scripts.run_mode import resolve_run_mode
+       run_mode = resolve_run_mode(interactive_choice=<answer or None>)  # never blocks; CI → saved default
+       await run_host_pipeline_for_project(..., run_mode=run_mode)
+       ```
+       The posture is applied to the BASE tier AFTER phase/difficulty and BEFORE
+       the ROLE_FLOOR, so a review/security/architect/safety role STAYS opus even
+       under cost-lean (the floor is HARD in every posture), and the
+       `ATELIER_MODEL_TIER` env pin still outranks the posture. An EXPLICITLY-NEUTRAL
+       run mode (`balanced`) is a byte-for-byte no-op vs the pre-R-MODE host wiring.
+       **`run_mode=None` is NOT a no-op:** the entrypoint auto-resolves None to the
+       saved-profile default (currently `cost-effective` → `cost-lean`, a
+       NON-neutral mode that down-biases tiers and narrows the budget/fleet) — so
+       leave `run_mode` unthreaded only if you intend the saved cost-lean default.
+       R-MODE is per-run/transient and NEVER writes `~/.claude/settings.json`; the
+       `run_mode.orchestrator_model` is ADVISORY only (surfaced, never applied — the
+       once-per-version settings-rec flow is the sole settings.json writer).
 
 3b. **Loom team-chat kickoff (MANDATORY when Loom is available).** Before the
    first wave dispatches, probe the **loom-agent-chat** plugin and, if available,

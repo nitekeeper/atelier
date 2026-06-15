@@ -1,6 +1,68 @@
 # Changelog
 
-## Unreleased
+## v1.10.0 — 2026-06-15
+
+**M7 — the bridge dispatch QUEUE is retired and the `bridge_requests` table is
+dropped.** The deterministic host/CLI transport (made the default in v1.9.0) is
+now the SOLE dispatch path. This is the final code milestone of the v2
+deterministic-host migration. The inter-agent message **WIRE**
+(`bridge_messages` / `bridge_send` / `bridge_read` / `bridge_payloads`,
+`team_meeting`, `status`) is unaffected — only the dispatch queue is removed. The
+§17 resume feature is unaffected (it reads `team_audit_log` + `tasks` only).
+
+### Removed
+- The bridge dispatch QUEUE: `QueueBridgeDispatchTools`, `build_spawn_fn`,
+  `build_poll_fn`, and the `BRIDGE_*` tunables (`scripts/dispatch.py`); the
+  `build_wave_dispatcher` / `build_wave_dispatcher_for_project` agent-team
+  dispatcher factories (`scripts/atelier_entrypoint.py`); the per-turn servicer
+  SKILL `internal/bridge-poll/SKILL.md`.
+- The harness-team lifecycle that the queue fed — `scripts/sweep_leaked_teams.py`
+  and `scripts/team_teardown.py` — which has no producer once the agent-team
+  dispatcher is gone (the `teams` table is never written in production).
+- The `bridge_requests` table, via forward-only migration
+  `013_drop_bridge_requests.sql`.
+- `ATELIER_TRANSPORT=bridge` is no longer accepted — it now raises
+  `UnknownTransportError` (the queue it selected is gone; `cli` is the only
+  transport).
+
+### Changed
+- `scripts/abort.py` is stripped to a transport-agnostic recorder: it writes the
+  durable postmortem + the `'aborted'` `team_audit_log` event (the resume signal)
+  + applies the worktree policy; it no longer enqueues a `team_delete` row or
+  resolves team_id from the queue.
+- The Memex bootstrap path now reconciles shared migrations on every run
+  (`memex_stores.migrate`) — previously `create_store` applied migrations only on
+  first provision, so an existing store would never receive a new migration.
+- The dispatch SKILLs (`dev-dispatch`, `dev-finish`, `abort`, `run`,
+  `plan-wave-1`, `pm-dispatch`, `status`) are purged of the legacy bridge recipe
+  and queue references; the host-drive path is now THE path.
+
+### Fixed
+- Four host-path defects found in live validation: the envelope schema `task_id`
+  union → single `"string"` (claude `--json-schema` ajv strictTypes); a
+  `MIN_BUDGET_USD` floor in `max_budget_usd_for` (tiny derived ceilings aborted
+  large tasks); `DEFAULT_ALLOWED_TOOLS` defaulted at the argv sites; and a
+  per-writer worktree sandbox (`native_sandbox_wrap(write_root=…)`) so a writer's
+  output is confined to (and lands in) its own worktree.
+- The engine-level false-`done` guard no longer mis-fires on a **journal
+  replay** (a replayed `done` does not re-write its already-merged file); it is
+  skipped on a journal hit, and a rejected fresh `done` now invalidates its
+  journal entry (`ResultJournal.delete`) so a retry re-executes instead of
+  replaying the rejected result.
+
+### Added
+- `tests/test_no_bridge_residue.py` — a guard that fails loud if any deleted
+  queue/dispatcher/lifecycle symbol returns to the live source, asserts
+  `bridge_requests` appears only in migration history, and proves at the DB level
+  that a full migration run leaves no `bridge_requests` table.
+
+### Housekeeping
+- Clarifying comments on the `model_tier` `('review','opus')` ROLE_FLOOR
+  (intentional future-proofing; floored via `PHASE_TIER` today) and a stale
+  `bridge_send.py` TODO comment; a new `abort.py` missing-`teams`-row regression
+  test; `TODO.md` reconciled (R-MODE marked delivered).
+
+## v1.9.0 — 2026-06-14
 
 **Settings recommendation is now a two-profile choice.** The first-session,
 once-per-version settings offer is upgraded from a binary `y/N` to a

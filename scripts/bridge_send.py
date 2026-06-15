@@ -80,7 +80,7 @@ from scripts import bridge_payloads
 
 # Triple-pinned against:
 #   * migrations/shared/003_team_mode.sql tail (PRAGMA user_version = 1)
-#   * scripts/bridge_read.py  (TODO: same constant once implemented)
+#   * scripts/bridge_read.py  (carries the same SCHEMA_VERSION constant)
 #   * internal/team-mode-rules/SKILL.md
 # Bump requires a CHANGELOG entry and a new migration. Do not edit in place.
 SCHEMA_VERSION = 1

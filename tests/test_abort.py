@@ -443,6 +443,80 @@ def test_explicit_team_id_drives_status_and_audit(workspace, monkeypatch):
     assert len(audits) == 1
 
 
+def test_abort_with_missing_teams_row(workspace, monkeypatch):
+    """An explicit --team-id that names NO row in `teams` makes the 'aborted'
+    team_audit_log write FK-fail (team_audit_log.team_id REFERENCES teams,
+    PRAGMA foreign_keys=ON in backend_local._conn) with sqlite3.IntegrityError.
+    abort.py catches that as BEST-EFFORT (teardown bookkeeping already
+    succeeded) and continues, so:
+
+      (1) abort.main still returns 0 (no exception propagates),
+      (2) the durable abort-report doc is still written (AC#2),
+      (3) the audit-write failure is handled GRACEFULLY — the report's
+          "what was torn down" records the 'aborted' event was SKIPPED because
+          the audit write failed, and NO 'aborted' audit row actually lands.
+
+    This pins the IntegrityError-catch branch in `_do_abort` (the production
+    `teams` table is never populated, so this FK miss is the real-world path).
+
+    NON-VACUITY: this test reaches the try/except by passing an explicit
+    --team-id that misses `teams` (NOT None — None short-circuits to the
+    `team_id is None` skip branch BEFORE the write is attempted, a different
+    code path). If the IntegrityError catch were removed, the unhandled
+    sqlite3.IntegrityError would propagate out of abort.main and BOTH the
+    `rc == 0` assertion AND the "report still written" assertion (the final
+    report is written AFTER the audit step) would go RED.
+    """
+    monkeypatch.setattr(abort, "_worktree_is_dirty", lambda cwd: True)  # preserve
+    monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: True)
+
+    missing_team_id = "team-does-not-exist"
+    # Sanity: the chosen team_id is genuinely absent from `teams`, so the FK
+    # constraint will fire (the catch branch is reached, not bypassed).
+    assert _team_status(workspace["db"], missing_team_id) is None
+
+    # Spy on write_document so we can read the final report's BODY markdown (the
+    # torn_down note lives in the body, which is written to disk via `filename`,
+    # not into a project_documents column) while still landing the real doc.
+    bodies: list[str] = []
+    real_write_document = backend.write_document
+
+    def _spy(**kwargs):
+        if kwargs.get("domain") == "postmortem" and kwargs.get("subdomain") == "abort":
+            bodies.append(kwargs["body"])
+        return real_write_document(**kwargs)
+
+    monkeypatch.setattr(abort.backend, "write_document", _spy)
+
+    rc = abort.main(["--team-pk", TEAM_PK, "--team-id", missing_team_id])
+    # (1) Exit 0 — the IntegrityError was caught, nothing propagated.
+    assert rc == 0
+
+    db = workspace["db"]
+
+    # (3a) No 'aborted' audit row landed for the bogus team_id — the FK-failing
+    # write was swallowed, not retried/forced.
+    assert backend.list_team_audit(team_id=missing_team_id, event_type="aborted") == []
+    # And the seeded (real) team got no spurious audit event either.
+    assert backend.list_team_audit(team_id=TEAM_ID, event_type="aborted") == []
+
+    # (2) The durable abort-report doc STILL persisted (AC#2 holds even though
+    # the audit write FK-failed). Readable back via the project_documents store.
+    docs = _abort_report_docs(db)
+    assert len(docs) >= 1
+    final_meta = json.loads(docs[-1]["metadata"])
+    assert final_meta["mode"] == "soft"
+    assert final_meta["team_id"] == missing_team_id
+
+    # (3b) The audit-write failure was handled GRACEFULLY: the final report's
+    # body records the 'aborted' event was SKIPPED due to the failed audit write
+    # (the IntegrityError-catch branch's torn_down note), not silently dropped.
+    assert bodies, "abort-report write_document was never called"
+    final_body = bodies[-1]
+    assert "team_audit_log: 'aborted' event SKIPPED" in final_body
+    assert "audit write failed" in final_body
+
+
 def test_missing_team_id_skips_audit_but_still_reports(workspace, monkeypatch):
     """With no --team-id the abort still completes (exit 0), flips teams.status
     only for a resolvable team (here it is a no-op — no team_id to target), and

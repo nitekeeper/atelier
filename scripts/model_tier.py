@@ -139,6 +139,11 @@ VALID_POSTURES: frozenset[str] = frozenset({POSTURE_COST_LEAN, POSTURE_NEUTRAL, 
 #: the ``security`` floor). Order is irrelevant (the floor is the max over all
 #: matches), but listed most-specific-intent-first for readability. TUNABLE.
 ROLE_FLOOR: list[tuple[str, str]] = [
+    # Intentional future-proofing: matches NO seeded agent_id today (no roster
+    # agent_id contains the substring "review"; review WORK is floored via
+    # PHASE_TIER["review"] = "opus"). It auto-floors any future reviewer-STYLE
+    # role (e.g. a hypothetical "code-reviewer-1") to opus the moment one is
+    # seeded — kept so the floor never has to be retro-added.
     ("review", "opus"),
     ("security", "opus"),
     ("architect", "opus"),

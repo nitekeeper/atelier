@@ -552,8 +552,8 @@ def _run_bootstrap_memex() -> dict:
         # Provision the atelier store via the public registry + stores
         # API. `registry.json` is a flat `{name: record}` map per
         # memex/scripts/registry.py.
+        atelier_plugin_root = Path(__file__).resolve().parents[1]
         if memex_registry.get_store("atelier") is None:
-            atelier_plugin_root = Path(__file__).resolve().parents[1]
             atelier_db_path = str(memex_home / "atelier.db")
             memex_stores.create_store(
                 name="atelier",
@@ -563,6 +563,16 @@ def _run_bootstrap_memex() -> dict:
                 # migrations idempotently through its own `migrations`
                 # table.
             )
+
+        # Apply any shared migrations added AFTER the store was first provisioned
+        # (create_store only runs on first provision). memex_stores.migrate is
+        # idempotent — it skips files already recorded in the store's `migrations`
+        # table — so this is a no-op on an up-to-date store and applies deltas
+        # (e.g. the 013 dispatch-queue-drop migration) to an existing one.
+        memex_stores.migrate(
+            "atelier",
+            str(atelier_plugin_root / "migrations" / "shared"),
+        )
 
         # Write the marker LAST — any earlier failure leaves the marker
         # absent so the next invocation retries from the failing step.

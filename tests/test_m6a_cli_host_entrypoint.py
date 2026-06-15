@@ -27,6 +27,7 @@ import pytest
 
 from scripts.budget_pool import BudgetPool
 from scripts.cli_dispatch import (
+    MIN_BUDGET_USD,
     FakeCliRunner,
     build_cli_dispatch_for_project,
     is_failed_attempt,
@@ -36,7 +37,6 @@ from scripts.cli_dispatch import (
     _default_est_for as _cli_default_est_for,
 )
 from scripts.dispatch import (
-    TRANSPORT_BRIDGE,
     TRANSPORT_CLI,
     UnknownTransportError,
     dispatch_host_pipeline,
@@ -161,8 +161,14 @@ def test_cli_host_dispatch_emits_model_tier_per_call(tmp_path):
     un-satisfiable by a constant model_for.
 
     Also locks the per-tier BUDGET COMPOUNDING through the real host wiring: the
-    --max-budget-usd argv tracks the chosen tier (a wrong tier sets BOTH --model
-    AND the budget ceiling), so haiku's ceiling < opus's ceiling (FIX 6)."""
+    --max-budget-usd argv is derived per task via max_budget_usd_for(est_for(tier))
+    (a wrong tier sets BOTH --model AND the budget ceiling) (FIX 6). NOTE (M7
+    PR-B): max_budget_usd_for now applies a MIN_BUDGET_USD floor, so at the default
+    per-tier ests (haiku 2k / opus 12k — both below the ~70k crossover) BOTH tiers
+    floor to the same ceiling; the strict haiku<opus inequality no longer holds at
+    these sizes (proportionate scaling above the crossover is covered by
+    test_cli_dispatch.py). The load-bearing guard here is that each ceiling is
+    EXACTLY max_budget_usd_for(est_for(tier)) — the real est→ceiling path."""
     runner = FakeCliRunner(structured_output=_echo_envelope)
     results = _run_host(_two_task_dag(), runner, tmp_path)
 
@@ -187,12 +193,16 @@ def test_cli_host_dispatch_emits_model_tier_per_call(tmp_path):
     assert _val(doc_argv, "--model") != _val(sec_argv, "--model")
 
     # FIX 6 — per-tier budget compounding through the REAL host wiring. The
-    # --max-budget-usd ceiling derives from est_for(tier), so the cheaper tier
-    # carries a strictly smaller ceiling. Pin the concrete values so a constant
-    # est_for (mutation L) cannot satisfy both.
+    # --max-budget-usd ceiling derives from max_budget_usd_for(est_for(tier)).
+    # M7 PR-B: the MIN_BUDGET_USD floor clamps both default per-tier ests (both
+    # below the ~70k crossover) to the floor, so the two ceilings are now EQUAL at
+    # the floor rather than haiku<opus. The mutation guard is the exact-value pin:
+    # each ceiling must equal max_budget_usd_for(_cli_default_est_for(tier)).
     haiku_budget = float(_val(doc_argv, "--max-budget-usd"))
     opus_budget = float(_val(sec_argv, "--max-budget-usd"))
-    assert haiku_budget < opus_budget, "per-tier budget ceiling must track the tier"
+    assert haiku_budget == opus_budget == MIN_BUDGET_USD, (
+        "at default per-tier ests both ceilings floor to MIN_BUDGET_USD"
+    )
     assert (
         _val(doc_argv, "--max-budget-usd")
         == f"{max_budget_usd_for(_cli_default_est_for('haiku')):.2f}"
@@ -470,30 +480,34 @@ def test_loom_structural_backstop_can_fail_on_a_leaked_loom_briefing(tmp_path):
     )
 
 
-# ── Default-transport guard: unset/default selects CLI (host) since M7 ────────
+# ── Default-transport guard: unset/default selects CLI (host); bridge raises ──
 
 
 def test_default_transport_is_cli_routes_to_host():
-    """M7 flip: ATELIER_TRANSPORT unset / empty / whitespace resolves to cli, and
+    """ATELIER_TRANSPORT unset / empty / whitespace resolves to cli, and
     is_host_transport is True — the default path IS routed through the host
-    pipeline. ATELIER_TRANSPORT=bridge is the explicit escape hatch."""
+    pipeline. Since the M7 bridge-queue removal, cli is the ONLY transport: the
+    retired ATELIER_TRANSPORT=bridge value fails loud."""
     assert resolve_transport(env={}) == TRANSPORT_CLI
     assert resolve_transport(env={"ATELIER_TRANSPORT": ""}) == TRANSPORT_CLI
     assert resolve_transport(env={"ATELIER_TRANSPORT": "  "}) == TRANSPORT_CLI
     assert is_host_transport(env={}) is True
     assert is_host_transport(env={"ATELIER_TRANSPORT": ""}) is True
-    # Escape hatch: an explicit bridge override still selects the legacy path.
-    assert resolve_transport(env={"ATELIER_TRANSPORT": "bridge"}) == TRANSPORT_BRIDGE
-    assert is_host_transport(env={"ATELIER_TRANSPORT": "bridge"}) is False
+    # The retired bridge value no longer selects a transport — it fails loud.
+    with pytest.raises(UnknownTransportError):
+        resolve_transport(env={"ATELIER_TRANSPORT": "bridge"})
+    with pytest.raises(UnknownTransportError):
+        is_host_transport(env={"ATELIER_TRANSPORT": "bridge"})
 
 
 def test_cli_transport_routes_to_host():
     """ATELIER_TRANSPORT=cli selects the host path (is_host_transport True). The
-    M7 default (env unset) ALSO selects the host path; only an explicit
-    ATELIER_TRANSPORT=bridge override falls back to the bridge."""
+    M7 default (env unset) ALSO selects the host path; the retired bridge value
+    fails loud rather than falling back."""
     assert resolve_transport(env={"ATELIER_TRANSPORT": "cli"}) == TRANSPORT_CLI
     assert is_host_transport(env={"ATELIER_TRANSPORT": "cli"}) is True
-    assert is_host_transport(env={"ATELIER_TRANSPORT": "bridge"}) is False
+    with pytest.raises(UnknownTransportError):
+        is_host_transport(env={"ATELIER_TRANSPORT": "bridge"})
 
 
 def test_dispatch_host_pipeline_routes_through_real_pipeline(tmp_path):
@@ -504,12 +518,14 @@ def test_dispatch_host_pipeline_routes_through_real_pipeline(tmp_path):
     make this RED — it does not just forward, it must actually dispatch.)
 
     Also asserts the M7 default (env={}) SELECTS this host path
-    (is_host_transport True) and only an explicit bridge override does not — the
-    SKILL routes the default through dispatch_host_pipeline."""
-    # Routing predicate: cli AND the M7 default → host path; explicit bridge → not.
+    (is_host_transport True), and the retired bridge value fails loud — the SKILL
+    routes the default through dispatch_host_pipeline."""
+    # Routing predicate: cli AND the default → host path; the retired bridge value
+    # raises (the dispatch queue it named was removed in M7).
     assert is_host_transport(env={"ATELIER_TRANSPORT": "cli"}) is True
     assert is_host_transport(env={}) is True
-    assert is_host_transport(env={"ATELIER_TRANSPORT": "bridge"}) is False
+    with pytest.raises(UnknownTransportError):
+        is_host_transport(env={"ATELIER_TRANSPORT": "bridge"})
 
     from scripts.result_journal import ResultJournal
 

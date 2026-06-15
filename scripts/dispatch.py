@@ -82,8 +82,7 @@ import os
 import re
 import sqlite3
 import sys
-import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -150,10 +149,9 @@ _TERSE_OUTPUT_RULE = (
 # The HONEST mechanism (read this before assuming the hooks cover you): atelier's
 # PostToolUse nudge (``hooks/context_budget.py``, 125k) and PreCompact snapshot
 # (``hooks/pre_compact.py``) fire ONLY in the ORCHESTRATOR's interactive session,
-# scoped to ``.ai/active_project`` presence. A worker spawned one-shot via the
-# bridge-poll ``Agent(...)`` servicer (``build_spawn_fn`` → ``briefing_for`` →
-# ``compose_briefing`` → ``dispatch_task`` → ``spawn_subagent``/``spawn_teammate``)
-# does NOT inherit those hooks — its working context is independent and is NOT
+# scoped to ``.ai/active_project`` presence. A worker the deterministic host
+# spawns one-shot (``compose_briefing`` → a ``claude -p`` CLI subprocess) does
+# NOT inherit those hooks — its working context is independent and is NOT
 # auto-managed by atelier. So the ONLY context-budget signal that reaches a
 # worker is THIS briefing text. This rule is that signal: it tells the worker to
 # checkpoint-then-wind-down near the threshold so a subagent does not silently
@@ -189,32 +187,32 @@ _CONTEXT_BUDGET_RULE = (
     "return; do not just keep going."
 )
 
-# ── ATELIER_TRANSPORT — bridge (default) | cli (M3 deterministic host) ──────
+# ── ATELIER_TRANSPORT — cli (the deterministic host; the ONLY transport) ────
 #
-# The transport selector for the deterministic-host migration (M3). `bridge`
-# (the default) is the production SQLite-bridge path — UNCHANGED. `cli` is the
-# M3 `CliDispatchTools` path: each attempt is one metered `claude -p
-# --json-schema` subprocess whose terminal `structured_output` IS the reply
-# envelope (no bridge wire, no `bridge_send.py`). This env read changes NO
-# default behavior — it only re-points `compose_briefing`'s CHANNELS /
-# REPLY-CONTRACT guidance when the operator explicitly opts into `cli`.
+# The transport selector. Since M7 PR-B the SQLite-bridge dispatch QUEUE is
+# DELETED, so ``cli`` (the deterministic host) is the only valid transport: each
+# attempt is one metered ``claude -p --json-schema`` subprocess whose terminal
+# ``structured_output`` IS the reply envelope (no bridge wire, no
+# ``bridge_send.py``). The legacy ``ATELIER_TRANSPORT=bridge`` escape hatch is
+# GONE — selecting it (or any other value) now fails loud via
+# :class:`UnknownTransportError`. (Note: the inter-agent message WIRE —
+# ``bridge_messages`` / ``bridge_send.py`` / ``bridge_read.py`` / ``team_meeting``
+# / ``status`` — is unrelated to this dispatch-transport selector and STAYS; only
+# the dispatch QUEUE was removed.)
 TRANSPORT_ENV_VAR = "ATELIER_TRANSPORT"
-TRANSPORT_BRIDGE = "bridge"
 TRANSPORT_CLI = "cli"
-VALID_TRANSPORTS: frozenset[str] = frozenset({TRANSPORT_BRIDGE, TRANSPORT_CLI})
+VALID_TRANSPORTS: frozenset[str] = frozenset({TRANSPORT_CLI})
 
 
 def resolve_transport(env: Mapping[str, str] = os.environ) -> str:
     """Resolve the dispatch transport: ``ATELIER_TRANSPORT`` env → ``cli``.
 
-    Returns ``"cli"`` (the production default since M7 — the deterministic-host
-    pipeline) unless ``ATELIER_TRANSPORT`` is explicitly set. The env override is
-    consulted FIRST (highest precedence) and is preserved untouched:
-    ``ATELIER_TRANSPORT=bridge`` is the explicit ESCAPE HATCH back to the legacy
-    SQLite-bridge WaveDispatcher path (kept live during the M7 soak; deleted in
-    PR-B). An UNKNOWN value raises :class:`UnknownTransportError` (fail-loud — a
-    typo must not silently select a transport the operator did not mean). Empty /
-    unset → ``cli``.
+    Returns ``"cli"`` (the deterministic-host pipeline — the ONLY transport since
+    the M7 bridge-queue removal) when ``ATELIER_TRANSPORT`` is unset / empty /
+    whitespace. Any explicit value OTHER than ``cli`` — including the retired
+    ``bridge`` escape hatch — raises :class:`UnknownTransportError` (fail-loud: a
+    typo, or a stale ``ATELIER_TRANSPORT=bridge`` in someone's shell, must not
+    silently select a transport that no longer exists).
     """
     raw = (env.get(TRANSPORT_ENV_VAR) or "").strip()
     if not raw:
@@ -224,47 +222,26 @@ def resolve_transport(env: Mapping[str, str] = os.environ) -> str:
     return raw
 
 
-# ── M6a: the transport ROUTING branch (bridge factory | host pipeline) ───────
+# ── The transport ROUTING predicate (deterministic host) ─────────────────────
 #
-# Before M6a, `resolve_transport` re-pointed only the BRIEFING TEXT (the CLI
-# CHANNELS/REPLY-CONTRACT addendum in `compose_briefing`). It did NOT route the
-# actual DISPATCH: there was no production code path that, on
-# `ATELIER_TRANSPORT=cli`, drove the M5 host `pipeline()` instead of building the
-# bridge `WaveDispatcher`. This is that routing branch — additive and fail-loud.
-#
-# The PRODUCTION entrypoint is a SKILL recipe the orchestrator drives
-# (`internal/dev-dispatch/SKILL.md` → `build_wave_dispatcher_for_project`), not a
-# single Python `dispatch()` function. This function is the Python-layer routing
-# the recipe (and any production caller) invokes so that flipping
-# `ATELIER_TRANSPORT=cli` actually selects the host pipeline. The default
-# (`bridge`) branch is BYTE-FOR-BYTE the existing path: it returns exactly the
-# `build_wave_dispatcher_for_project(...)` WaveDispatcher the recipe already used
-# (no behavior change). Only the new `cli` branch is added.
-#
-# DELIBERATELY NOT in M6a (M6b): the host-path review-fix loop, the dispatch-time
-# reviewer-disjointness re-check, and R-MODE. And M7's default-FLIP (making `cli`
-# the default + retiring the bridge) is out of scope — `bridge` stays the default
-# here and the SKILL recipe still calls the bridge factory directly today; this
-# function is the seam M7 flips the recipe onto.
-#
-# M7 PLANNING NOTE (estimate aid, not M6a work): activating this on the host path
-# is a NEW host-drive SKILL section, NOT just a Python branch flip. The host
-# entrypoint is an AWAITED coroutine that returns a FLAT `list[dict]` of envelopes
-# in one shot — so the recipe must consume that list DIRECTLY (no per-turn
-# bridge-poll servicer loop), and the Loom-kickoff + abandonment/escalation-
-# surfacing steps must be relocated/replaced for the awaited-coroutine model
-# (they currently hang off the bridge poll turns). I.e. M7 rewrites the
-# orchestration recipe's control flow, not only the `is_host_transport` switch.
+# `resolve_transport` re-points the BRIEFING TEXT (the CLI CHANNELS/REPLY-CONTRACT
+# addendum in `compose_briefing`) AND gates the dispatch path. Since the M7
+# bridge-queue removal there is only one path: the M5 host `pipeline()`. The
+# PRODUCTION entrypoint is a SKILL recipe the orchestrator drives
+# (`internal/dev-dispatch/SKILL.md`); :func:`is_host_transport` is the predicate
+# that recipe (and tests) consult, and :func:`dispatch_host_pipeline` is the thin
+# Python seam it routes through. There is no longer a bridge `WaveDispatcher`
+# factory branch — the host pipeline is unconditional.
 
 
 def is_host_transport(env: Mapping[str, str] = os.environ) -> bool:
     """True iff the resolved transport is the M5/M6 deterministic-host (CLI) path.
 
     A tiny, side-effect-free predicate the orchestrator recipe (and tests) use to
-    branch dispatch construction: ``cli`` (the M7 default) →
-    :func:`scripts.host_scheduler.run_host_pipeline_for_project`; ``bridge`` (the
-    explicit escape hatch) → the legacy WaveDispatcher factory. Fail-loud on an
-    unknown transport (delegates to :func:`resolve_transport`).
+    confirm the dispatch path: ``cli`` (the only transport since the M7
+    bridge-queue removal) → :func:`scripts.host_scheduler.run_host_pipeline_for_project`.
+    Fail-loud on an unknown transport (delegates to :func:`resolve_transport`,
+    which now rejects the retired ``bridge`` value).
     """
     return resolve_transport(env) == TRANSPORT_CLI
 
@@ -285,8 +262,8 @@ async def dispatch_host_pipeline(
     production caller that composes the recommend-backed CLI dispatch factory with
     the M5 ``pipeline()`` scheduler). Kept here so the transport-selection logic
     lives next to :func:`resolve_transport`; lazy-imports ``host_scheduler`` to
-    keep its (heavy) chain off the bare import path. The bridge path NEVER reaches
-    this — it builds the WaveDispatcher via ``build_wave_dispatcher_for_project``.
+    keep its (heavy) chain off the bare import path. This is now the ONLY dispatch
+    path — the legacy bridge WaveDispatcher factory was removed in M7 PR-B.
     """
     from scripts.host_scheduler import run_host_pipeline_for_project
 
@@ -295,17 +272,19 @@ async def dispatch_host_pipeline(
     )
 
 
-# ── CLI-mode CHANNELS / REPLY-CONTRACT addendum (M3) ───────────────────────
+# ── CLI-mode CHANNELS / REPLY-CONTRACT addendum ────────────────────────────
 #
-# In `cli` transport the worker is a one-shot `claude -p --json-schema` call:
-# there is NO bridge, NO `bridge_send.py`, NO peer wire. Its terminal
+# In `cli` transport (the only transport since the M7 bridge-queue removal) the
+# worker is a one-shot `claude -p --json-schema` call: there is NO dispatch
+# bridge, NO `bridge_send.py` reply, NO peer wire. Its terminal
 # `structured_output` (matching ENVELOPE_SCHEMA) IS its reply. This addendum
-# re-points the bridge CHANNELS/REPLY-CONTRACT guidance accordingly. It is
+# re-points the template's CHANNELS/REPLY-CONTRACT guidance accordingly. It is
 # APPENDED to the rendered briefing (same discipline as `_TERSE_OUTPUT_RULE` /
 # `_CONTEXT_BUDGET_RULE`: opens with "\n\n", its own heading, OUTSIDE the
-# template's untrusted TASK fence) ONLY when `compose_briefing` is called in
-# `cli` transport. The bridge path appends nothing — its briefing is byte-stable
-# (the template's bridge CHANNELS block stands as the single source of truth).
+# template's untrusted TASK fence). The template still renders its historical
+# bridge CHANNELS block first (the inter-agent message wire still exists); this
+# addendum tells the one-shot CLI worker to IGNORE it and return structured
+# output instead.
 _CLI_TRANSPORT_RULE = (
     "\n\n# TRANSPORT OVERRIDE — CLI MODE (read last; SUPERSEDES the CHANNELS + "
     "REPLY CONTRACT sections above)\n\n"
@@ -397,14 +376,25 @@ class UnknownTransportError(DispatchError):
     A :class:`DispatchError` subclass (operator-facing fail-loud), mirroring
     :class:`UnknownDispatchModeError`: a bad transport is a configuration error
     to fix at source, not a worker outcome to absorb. A typo must fail loud, it
-    must not silently select the default.
+    must not silently select the default. Since M7 PR-B the only valid transport
+    is ``cli`` — the legacy ``bridge`` value is REMOVED and lands here too, so a
+    stale ``ATELIER_TRANSPORT=bridge`` surfaces loudly rather than selecting a
+    dispatch queue that no longer exists.
     """
 
     def __init__(self, transport: Any) -> None:
         self.transport = transport
+        bridge_hint = (
+            " The 'bridge' dispatch queue was removed in M7 — 'cli' (the "
+            "deterministic host) is the only transport; unset ATELIER_TRANSPORT "
+            "to use it."
+            if str(transport) == "bridge"
+            else ""
+        )
         super().__init__(
             f"unknown transport {transport!r}; expected one of "
             f"{sorted(VALID_TRANSPORTS)} (env var {TRANSPORT_ENV_VAR})."
+            f"{bridge_hint}"
         )
 
 
@@ -594,15 +584,17 @@ def compose_briefing(
     UNAFFECTED in either case — Loom never carries the control-plane
     (``task_result`` / TM-006 always rides the bridge).
 
-    ``transport`` selects the dispatch transport (M3). ``None`` (the default)
-    resolves ``ATELIER_TRANSPORT`` from the environment via
-    :func:`resolve_transport` (→ ``"bridge"`` unless explicitly ``"cli"``). The
-    bridge path is BYTE-STABLE — nothing is appended, the template's bridge
-    CHANNELS block stands. In ``"cli"`` transport a CLI CHANNELS/REPLY-CONTRACT
-    addendum (:data:`_CLI_TRANSPORT_RULE`) is appended AFTER the terse +
-    context-budget rules, re-pointing "use bridge_send.py" → "return your result
-    as the structured final message matching the json-schema". The
-    ``team_chat`` / loom wiring is independent of this and untouched.
+    ``transport`` selects the dispatch transport. ``None`` (the default) resolves
+    ``ATELIER_TRANSPORT`` from the environment via :func:`resolve_transport`,
+    which → ``"cli"`` (the only transport since the M7 bridge-queue removal). In
+    ``"cli"`` transport a CLI CHANNELS/REPLY-CONTRACT addendum
+    (:data:`_CLI_TRANSPORT_RULE`) is appended AFTER the terse + context-budget
+    rules, re-pointing "use bridge_send.py" → "return your result as the
+    structured final message matching the json-schema". Any value other than
+    ``"cli"`` (including the retired ``"bridge"``) raises
+    :class:`UnknownTransportError`. The ``team_chat`` / loom wiring is independent
+    of this and untouched (the inter-agent message WIRE, distinct from the removed
+    dispatch queue, still rides ``bridge_send.py``/``bridge_read.py``).
 
     Returns the fully-rendered briefing string.
     """
@@ -661,6 +653,10 @@ def compose_briefing(
         # team_chat is ALWAYS a non-None dict: coerce None → bridge fallback so
         # the template's {% if team_chat.transport == 'loom' %} branch is
         # byte-stable for existing callers and validate_render_context passes.
+        # NB: this team_chat.transport is the MESSAGE-WIRE label (loom | bridge),
+        # a DIFFERENT axis from the dispatch transport resolved by
+        # resolve_transport() (cli-only; 'bridge' raises there). The two never
+        # cross — this default is the wire fallback, not a dispatch transport.
         "team_chat": dict(team_chat) if team_chat is not None else {"transport": "bridge"},
     }
 
@@ -682,10 +678,12 @@ def compose_briefing(
     # PostToolUse/PreCompact hooks fire only in the orchestrator session, never in
     # a spawned worker (see `_CONTEXT_BUDGET_RULE`).
     #
-    # CLI-transport addendum (M3) — appended LAST, ONLY in `cli` transport, so
-    # the bridge briefing is byte-identical to before (bridge appends nothing
-    # here). It re-points the CHANNELS/REPLY-CONTRACT guidance to "return the
-    # structured final message" (see `_CLI_TRANSPORT_RULE`).
+    # CLI-transport addendum — appended LAST, in `cli` transport (the only valid
+    # transport since the M7 bridge-queue removal). It re-points the
+    # CHANNELS/REPLY-CONTRACT guidance to "return the structured final message"
+    # (see `_CLI_TRANSPORT_RULE`). The `if` guard is retained as a defensive
+    # belt-and-braces — `transport` is already validated against VALID_TRANSPORTS
+    # above, so it is always TRANSPORT_CLI here.
     body = rendered.rstrip() + _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
     if transport == TRANSPORT_CLI:
         body += _CLI_TRANSPORT_RULE
@@ -824,25 +822,19 @@ def read_heartbeats(db_path: str | Path) -> list[tuple[str, str, str]]:
 # list: a role-id already in ``members`` => already spawned => ``SendMessage``;
 # absent (or a missing/malformed config.json) => first-touch => ``Agent`` spawn.
 #
-# ── SCOPE (deliberate deferral — see #61) ──
-# IN scope here: the mode-branching decision logic, the injected
-# :class:`DispatchTools` Protocol, first-touch detection, the
-# WaveDispatcher-compatible :func:`build_spawn_fn` factory, and the minimal
-# :func:`resolve_dispatch_mode` read-side. This mirrors how #60 shipped
-# WaveDispatcher — a tested seam with the PRODUCTION BINDING DEFERRED.
+# ── SCOPE ──
+# What lives here: the mode-branching decision logic (:func:`dispatch_task`), the
+# injected :class:`DispatchTools` Protocol, first-touch detection, and the
+# :func:`resolve_dispatch_mode` read-side. The PRODUCTION binding of
+# :class:`DispatchTools` is the deterministic host's ``CliDispatchTools``
+# (``scripts/cli_dispatch.py``); the dispatch-mode SELECTION is owned by the
+# /atelier:run skill (env var → persisted ``.ai/atelier.mode`` marker → default).
 #
-# OUT of scope here (a separate follow-up issue owns these — NOT an accidental
-# omission):
-#   * the production queue-bridge transport (a ``bridge_requests`` table, a new
-#     DB migration, an orchestrator polling daemon/skill that turns enqueued
-#     requests into real ``Agent``/``TeamCreate``/``SendMessage`` calls) — the
-#     analog of kaizen's ``QueueBridgeWrapper``;
-#   * the ``poll_fn`` / terminal-reply-envelope read implementation (the read
-#     half of the WaveDispatcher seam — owned by the reply-collection follow-up);
-#   * any LIVE WaveDispatcher production construction — every instantiation today
-#     is in tests, exactly as #60 left it.
-# The authoritative /atelier:run dispatch-mode SELECTION is owned by sibling
-# #62; :func:`resolve_dispatch_mode` here is a tiny env-var stopgap, NOT that UI.
+# REMOVED in M7: the legacy production dispatch-queue transport (its queue table,
+# DB-backed WaveDispatcher seam factories, and queue-servicing wrapper). The
+# deterministic host (``cli`` transport) replaced it. NOTE: the inter-agent
+# message WIRE (``bridge_messages`` / ``bridge_send.py`` / ``bridge_read.py``)
+# is a SEPARATE concern that STAYS — only the dispatch QUEUE was deleted.
 
 
 #: The two canonical dispatch-mode string values. ``"subagent"`` =>
@@ -902,8 +894,8 @@ class DispatchTools(Protocol):
 
     def create_team(self, name: str, members: list[str]) -> str:
         """``TeamCreate`` — create a named team. Returns the ``team_id`` used to
-        route subsequent spawns/sends. Called EXACTLY ONCE per cycle (see
-        :func:`build_spawn_fn`)."""
+        route subsequent spawns/sends. Called EXACTLY ONCE per cycle by the
+        production binding (the deterministic host's ``CliDispatchTools``)."""
         ...
 
     def spawn_teammate(
@@ -1105,9 +1097,8 @@ def dispatch_task(
     * any other ``mode`` => :class:`UnknownDispatchModeError`.
 
     Note the asymmetry vs. ``compose_briefing``: this function does NOT build
-    the briefing — the caller (or :func:`build_spawn_fn`) passes it pre-rendered
-    so the mode-agnostic composer and the mode-specific dispatcher stay cleanly
-    separated.
+    the briefing — the caller passes it pre-rendered so the mode-agnostic
+    composer and the mode-specific dispatcher stay cleanly separated.
 
     ``model`` is the OPTIONAL per-task model-tier alias (``haiku`` | ``sonnet`` |
     ``opus``) selected by ``scripts.model_tier.recommend``. It is threaded into
@@ -1136,200 +1127,13 @@ def dispatch_task(
     raise UnknownDispatchModeError(mode)
 
 
-def build_spawn_fn(
-    mode: str,
-    *,
-    tools: DispatchTools,
-    briefing_for: Callable[[Mapping[str, Any], int], str],
-    members: list[str] | None = None,
-    team_name: str | None = None,
-    teammate_name_for: Callable[[Mapping[str, Any]], str] | None = None,
-    teams_root: Path | str = DEFAULT_TEAMS_ROOT,
-    model_for: Callable[[Mapping[str, Any], int], str | None] | None = None,
-) -> Callable[[Mapping[str, Any], int], None]:
-    """Build a WaveDispatcher-compatible ``spawn_fn(task, attempt) -> None``.
-
-    The returned callable matches ``pm_dispatch.WaveDispatcher``'s ``spawn_fn``
-    seam exactly, so a later production-binding issue can drop it straight in —
-    WITHOUT wiring a live WaveDispatcher here (that construction stays deferred,
-    per #60's precedent and this module's SCOPE note).
-
-    ``briefing_for(task, attempt) -> str`` is the briefing source: production
-    passes a ``compose_briefing`` wrapper (keeping the composer mode-agnostic);
-    tests pass a trivial stub. Each spawn re-renders via this callable so an
-    attempt-specific briefing is possible.
-
-    ``model_for(task, attempt) -> str | None`` is the OPTIONAL per-task
-    model-tier seam (mirrors ``briefing_for``): production wires it to
-    ``scripts.model_tier.recommend`` (phase + role + difficulty → tier alias);
-    tests pass a trivial stub. When ``None`` (the default) NO model is threaded —
-    every spawn inherits the session default, byte-identical to today's behavior.
-    The chosen tier flows into ``dispatch_task(..., model=...)`` and is attached
-    only on the spawn path (``send_message`` is unchanged).
-
-    For ``mode == "agent-team"`` the factory enforces **TeamCreate-once**: it
-    calls ``tools.create_team(team_name, members)`` LAZILY on the FIRST spawn
-    and captures the returned ``team_id`` in the closure; every subsequent spawn
-    reuses that id (so ``create_team`` fires exactly once per cycle regardless of
-    how many tasks/attempts the wave engine dispatches). ``team_name`` and
-    ``members`` are required for agent-team mode. ``teammate_name_for(task) ->
-    str`` maps a task to its teammate role-id (defaults to ``str(task["id"])``).
-
-    For ``mode == "subagent"`` no team is created and ``team_name`` / ``members``
-    are ignored.
-
-    Raises :class:`UnknownDispatchModeError` immediately on an invalid mode (so
-    a misconfiguration fails at factory-build time, not on the first dispatch).
-    """
-    if mode not in VALID_DISPATCH_MODES:
-        raise UnknownDispatchModeError(mode)
-
-    if mode == DISPATCH_MODE_AGENT_TEAM and team_name is None:
-        raise DispatchError(
-            "agent-team mode requires team_name to build the spawn_fn "
-            "(TeamCreate is called once per cycle with it)."
-        )
-
-    name_for = teammate_name_for or (lambda task: str(task[_DISPATCH_TASK_ID_KEY]))
-
-    # Mutable cell capturing the once-per-cycle team_id. A list is the minimal
-    # closure-mutable container; ``team_id_cell[0] is None`` is the "not yet
-    # created" sentinel that gates the single create_team call.
-    team_id_cell: list[str | None] = [None]
-
-    def spawn_fn(task: Mapping[str, Any], attempt: int) -> None:
-        # Per-task model tier (None when no seam → no behavior change vs. today).
-        model = model_for(task, attempt) if model_for else None
-        if mode == DISPATCH_MODE_SUBAGENT:
-            dispatch_task(
-                DISPATCH_MODE_SUBAGENT,
-                tools=tools,
-                task=task,
-                attempt=attempt,
-                briefing=briefing_for(task, attempt),
-                model=model,
-            )
-            return
-        # agent-team — create the team exactly once, lazily, then reuse the id.
-        if team_id_cell[0] is None:
-            team_id_cell[0] = tools.create_team(team_name, list(members or []))
-        dispatch_task(
-            DISPATCH_MODE_AGENT_TEAM,
-            tools=tools,
-            task=task,
-            attempt=attempt,
-            briefing=briefing_for(task, attempt),
-            team_id=team_id_cell[0],
-            teammate_name=name_for(task),
-            teams_root=teams_root,
-            model=model,
-        )
-
-    return spawn_fn
-
-
-# ── Production queue-bridge transport (atelier#81) ──────────────────────────
+# ── _valid_positive_int_env — valid-or-ignore env-int parser ────────────────
 #
-# The PRODUCTION binding of the :class:`DispatchTools` Protocol — the analog of
-# kaizen's ``scripts/cc_tool_bridge.py::QueueBridgeWrapper``. ``dispatch.py`` is
-# pure Python and cannot call the Claude Code harness tools (``Agent`` /
-# ``TeamCreate`` / ``SendMessage``) directly, so this wrapper ENQUEUES a row in
-# the ``bridge_requests`` table (migrations/shared/008) and the orchestrator
-# turn-loop SERVICES it (internal/bridge-poll/SKILL.md): reads the pending row,
-# performs the real tool call, writes ``response_json`` + flips ``status`` to
-# ``ready`` / ``error``.
-#
-# ── always-Local enforced in code ──
-# ``bridge_requests`` lives in shared/ (a SCHEMA home, not a backend choice), but
-# the request-queue is opened on the LOCAL ``.ai/atelier.db`` at RUNTIME — the
-# same handle bridge_send.py / bridge_read.py write the inter-agent message wire
-# through. "always Local" is enforced here by resolving the local DB path
-# explicitly, never routing through the Memex backend.
-#
-# ── WAL + busy_timeout ──
-# The wrapper's blocking create_team poll and the orchestrator servicer both
-# touch the same row, so the connection opens WAL + a busy_timeout so neither
-# deadlocks the other (mirrors kaizen's ``_connect`` PRAGMA bundle).
-
-#: The four DispatchTools method names — string-identical to the kind CHECK enum
-#: in migrations/shared/008_bridge_requests.sql so the servicer maps kind->method
-#: by NAME with zero translation. Re-validated at enqueue time (fail-closed: an
-#: out-of-set kind is rejected before it can reach the SQLite CHECK).
-BRIDGE_REQUEST_KINDS: frozenset[str] = frozenset(
-    {"create_team", "spawn_teammate", "send_message", "spawn_subagent"}
-)
-
-#: The bounded create_team poll budget, seconds. Mirrors kaizen's
-#: ``cc_tool_bridge.PER_CALL_TIMEOUT_S`` discipline (≈600s): on timeout the
-#: poller flips/observes 'error' and RAISES — never an unbounded spin.
-BRIDGE_PER_CALL_TIMEOUT_S: float = 600.0
-
-#: Poll cadence for the blocking create_team wait. SQLite has no notify, so we
-#: poll; cheap (a single indexed SELECT on the row's own id).
-BRIDGE_POLL_INTERVAL_S: float = 0.2
-
-#: SQLite busy_timeout (ms) so the create_team poll and the orchestrator
-#: servicer never spuriously raise ``database is locked`` writing the same row.
-BRIDGE_BUSY_TIMEOUT_MS: int = 5000
-
-# ── Bounded + hardened tool-call path (env-tunable; valid-or-ignore) ─────────
-# Every constant below mirrors model_tier.py's _valid_tier/ENV_TIER_VAR posture:
-# a garbage/blank env value is IGNORED (falls back to the default), never raised
-# — a typo in an env var must not crash or wedge a cycle. The defaults sit ABOVE
-# legitimate MAX_ATTEMPTS-driven traffic so a healthy run never trips them.
-
-#: Sliding-window (ms) within which an IDENTICAL (kind, canonical-args) enqueue is
-#: treated as duplicate noise and DROPPED (idempotent skip). Small by design — a
-#: NOISE guard layered ON TOP of the migration-008 idempotency correctness
-#: guarantee, never a substitute for it. A legitimate WaveDispatcher re-dispatch
-#: carries a different ``attempt`` in args → different key → never debounced.
-BRIDGE_DEBOUNCE_MS_DEFAULT: int = 2000
-BRIDGE_DEBOUNCE_MS_ENV_VAR: str = "ATELIER_BRIDGE_DEBOUNCE_MS"
-
-#: Hard per-kind enqueue ceiling per instance (one instance == one cycle/team_pk,
-#: so it resets naturally). Sits WELL above legitimate traffic (≤ len(tasks) *
-#: MAX_ATTEMPTS spawns of any one kind in a real wave); a breach is a runaway
-#: loop, surfaced fail-loud as :class:`BridgeBudgetExceededError`.
-BRIDGE_KIND_LIMIT_DEFAULT: int = 200
-BRIDGE_KIND_LIMIT_ENV_VAR: str = "ATELIER_BRIDGE_KIND_LIMIT"
-
-#: Bounded create_team enqueue→poll retry count on a transient BridgeDispatchError
-#: (a dead/slow servicer turn). Backoff sleeps use the injected clock/sleep and
-#: stay WITHIN :data:`BRIDGE_PER_CALL_TIMEOUT_S`. A retry here is TRANSPARENT to
-#: the wave loop (one logical dispatch) — it adds NO new re-queue site.
-BRIDGE_SPAWN_RETRIES_DEFAULT: int = 2
-BRIDGE_SPAWN_RETRIES_ENV_VAR: str = "ATELIER_BRIDGE_SPAWN_RETRIES"
-
-#: Per-instance (per-team) circuit-breaker threshold: after this many CONSECUTIVE
-#: create_team/spawn failures the breaker TRIPS and further enqueues short-circuit
-#: with :class:`BridgeBreakerOpenError` instead of re-attempting a dead team. A
-#: success resets the consecutive counter.
-BRIDGE_BREAKER_THRESHOLD_DEFAULT: int = 3
-BRIDGE_BREAKER_THRESHOLD_ENV_VAR: str = "ATELIER_BRIDGE_BREAKER_THRESHOLD"
-
-#: Base backoff (s) for the create_team retry loop; doubled per retry. Kept tiny
-#: so the total backoff budget is a rounding error against PER_CALL_TIMEOUT_S.
-BRIDGE_BACKOFF_BASE_S: float = 0.5
-
-#: Kinds EXEMPT from the debounce noise-guard — every kind whose args do NOT
-#: carry a per-dispatch ``attempt`` to structurally distinguish a legitimate
-#: WaveDispatcher re-dispatch from an accidental duplicate. Debouncing such a
-#: kind could swallow a genuine retry (whose args are byte-identical), so they
-#: are exempt and ALWAYS enqueue a fresh row:
-#:   * ``create_team`` — fires once per cycle; its (d) retry-with-backoff
-#:     re-enqueues byte-identical args and must re-poll a fresh row.
-#:   * ``send_message`` (``{team_id, to, message}``) and ``spawn_teammate``
-#:     (``{team_id, name, prompt[, model]}``) — in agent-team mode a re-dispatch
-#:     to an already-spawned teammate is a fresh briefing send with NO ``attempt``
-#:     in args (``compose_briefing`` takes none), so the key would collide with a
-#:     prior identical send. Exempting them makes the no-swallow guarantee
-#:     STRUCTURAL rather than reliant on the re-dispatch out-pacing the window.
-#: Only ``spawn_subagent`` (whose args carry ``attempt``) is debounced — there a
-#: genuine re-dispatch is a different key and is never dropped, while an accidental
-#: duplicate of the SAME attempt is correctly suppressed.
-BRIDGE_DEBOUNCE_EXEMPT_KINDS: frozenset[str] = frozenset(
-    {"create_team", "send_message", "spawn_teammate"}
-)
+# A shared helper kept here (re-exported to ``scripts.pm_dispatch``) for the
+# valid-or-ignore env-var posture: a blank/garbage/negative value is IGNORED in
+# favor of the default, never raised — a typo in an env var must not crash or
+# wedge a cycle. (It was originally introduced alongside the now-removed
+# bridge-queue tunables; pm_dispatch still imports it, so it stays.)
 
 
 def _valid_positive_int_env(value: str | None, default: int) -> int:
@@ -1345,533 +1149,6 @@ def _valid_positive_int_env(value: str | None, default: int) -> int:
     except (ValueError, AttributeError):
         return default
     return parsed if parsed >= 0 else default
-
-
-#: Repo-relative Local-mode DB path. The request-queue is Local-only at runtime
-#: (cf. the section comment); resolved against the workspace git root the same
-#: way ``scripts.backend_local`` resolves ``.ai/atelier.db``.
-BRIDGE_DB_RELPATH = Path(".ai") / "atelier.db"
-
-
-class BridgeDispatchError(DispatchError):
-    """Raised when a queue-bridge harness call fails — a serviced-but-failed
-    row (``status='error'``), a create_team response missing its ``team_id``,
-    or a create_team poll that exceeds :data:`BRIDGE_PER_CALL_TIMEOUT_S`.
-
-    A :class:`DispatchError` subclass (operator-facing fail-loud) — a failed
-    transport call is a run-level failure, NOT a worker outcome to absorb.
-    """
-
-
-class BridgeTimeoutError(BridgeDispatchError):
-    """Raised when a create_team poll exceeds :data:`BRIDGE_PER_CALL_TIMEOUT_S`
-    WITHOUT the orchestrator ever servicing the row to ``ready``/``error``.
-
-    Distinct from the base (a servicer-REPORTED ``status='error'``) because the
-    two demand opposite handling: a servicer error is a *transient* init blip
-    worth a bounded RETRY (the run-55 pattern), whereas a timeout means *nobody
-    is servicing the queue* — retrying merely re-spends a fresh
-    :data:`BRIDGE_PER_CALL_TIMEOUT_S` budget per attempt and cannot help, so it
-    is FAIL-FAST (never retried). Still a :class:`BridgeDispatchError` so existing
-    ``except BridgeDispatchError`` / ``pytest.raises(BridgeDispatchError)`` callers
-    are unaffected.
-    """
-
-
-class BridgeBudgetExceededError(DispatchError):
-    """Raised when a single instance enqueues more than
-    :data:`BRIDGE_KIND_LIMIT` rows of one ``kind`` — a hard per-kind ceiling.
-
-    A :class:`DispatchError` subclass (operator-facing fail-loud): the ceiling
-    sits well above legitimate ``MAX_ATTEMPTS``-driven traffic, so a breach means
-    a runaway dispatch loop, not normal load. The instance is per-cycle/team_pk so
-    the counter resets naturally on the next cycle.
-    """
-
-
-class BridgeBreakerOpenError(DispatchError):
-    """Raised when the per-team circuit-breaker is OPEN — too many CONSECUTIVE
-    create_team/spawn failures (:data:`BRIDGE_BREAKER_THRESHOLD`).
-
-    A :class:`DispatchError` subclass (operator-facing fail-loud): once a team is
-    declared dead we short-circuit further enqueues rather than re-attempting it,
-    surfacing the failure to the operator. A success resets the counter, so a
-    transient blip that recovers never trips the breaker.
-    """
-
-
-def _resolve_local_bridge_db() -> str:
-    """Resolve the LOCAL ``.ai/atelier.db`` path for the request queue.
-
-    Mirrors ``scripts.backend_local._workspace_root`` (walk to the git root)
-    so the queue always lives on the same Local DB the bridge message wire
-    uses — enforcing "bridge_requests is always Local" in code, never via the
-    Memex backend. Imported lazily to avoid dragging ``backend_local``'s
-    import-time cost (and its tmux-free git-root resolver) into every
-    ``dispatch.py`` import.
-    """
-    from scripts.git_utils import find_git_root
-
-    root = find_git_root(Path.cwd().resolve())
-    if root is None:
-        raise BridgeDispatchError(
-            "cannot resolve the Local bridge DB: not inside a git workspace. "
-            "The production queue-bridge transport requires CWD under the "
-            "atelier workspace (the same .ai/atelier.db the message wire uses)."
-        )
-    db = root / BRIDGE_DB_RELPATH
-    db.parent.mkdir(parents=True, exist_ok=True)
-    return str(db)
-
-
-def _open_bridge_db(db_path: str) -> sqlite3.Connection:
-    """Open the Local bridge DB with WAL + busy_timeout.
-
-    Both PRAGMAs are connection-scoped in SQLite, so every consumer of the
-    request queue MUST go through this helper (mirrors kaizen's
-    ``cc_tool_bridge._connect`` + ``scripts.backend_local._conn``). The
-    busy_timeout keeps the create_team poll and the orchestrator servicer from
-    deadlocking on the same row.
-    """
-    con = sqlite3.connect(db_path)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.execute(f"PRAGMA busy_timeout={BRIDGE_BUSY_TIMEOUT_MS}")
-    return con
-
-
-class QueueBridgeDispatchTools:
-    """Production :class:`DispatchTools` — enqueue harness calls onto the
-    ``bridge_requests`` queue (migrations/shared/008); the orchestrator
-    turn-loop services them (internal/bridge-poll/SKILL.md). The analog of
-    kaizen's ``scripts/cc_tool_bridge.py::QueueBridgeWrapper``.
-
-    Method ↔ kind mapping is BY NAME (the kind CHECK enum is string-identical
-    to these method names), so the servicer needs zero translation.
-
-    * :meth:`create_team` BLOCKS — enqueue, then poll its OWN row until status
-      is ``ready`` (parse ``response_json`` for the ``team_id`` and return it)
-      or ``error`` (raise). Bounded by :data:`BRIDGE_PER_CALL_TIMEOUT_S`; on
-      timeout it observes 'error' / raises, NEVER an unbounded spin.
-    * :meth:`spawn_teammate` / :meth:`send_message` / :meth:`spawn_subagent`
-      are FIRE-AND-FORGET — enqueue the row and return ``None`` immediately
-      (never poll). The worker's terminal reply is read back through the
-      SEPARATE :func:`build_poll_fn` envelope-poll, never as a return here.
-
-    Idempotency: only ``status='pending'`` rows are picked up by the servicer,
-    so a status flip is the "claimed" key — a re-dispatch never double-spawns.
-
-    ``team_pk`` scopes the queue to one cycle/run (the servicer's pending scan
-    filters on it); ``db_path`` defaults to the resolved Local ``.ai/atelier.db``
-    but is injectable so tests pass a ``tmp_path`` DB.
-    """
-
-    PER_CALL_TIMEOUT_S: float = BRIDGE_PER_CALL_TIMEOUT_S
-    POLL_INTERVAL_S: float = BRIDGE_POLL_INTERVAL_S
-
-    def __init__(
-        self,
-        team_pk: str,
-        *,
-        db_path: str | Path | None = None,
-        clock: Callable[[], float] = time.monotonic,
-        sleep_fn: Callable[[float], None] = time.sleep,
-    ) -> None:
-        self._team_pk = str(team_pk)
-        self._db_path = str(db_path) if db_path is not None else _resolve_local_bridge_db()
-        #: Injectable for deterministic tests (atelier bans argless time.now()).
-        self._clock = clock
-        self._sleep_fn = sleep_fn
-
-        # ── bounded + hardened tool-call path (per-instance == per-cycle) ──
-        # All counters/maps below RESET on a fresh instance — and a fresh
-        # instance is built once per cycle/team_pk — so they are the natural
-        # per-invocation reset boundary the feature requires.
-        self._debounce_ms = _valid_positive_int_env(
-            os.environ.get(BRIDGE_DEBOUNCE_MS_ENV_VAR), BRIDGE_DEBOUNCE_MS_DEFAULT
-        )
-        self._kind_limit = _valid_positive_int_env(
-            os.environ.get(BRIDGE_KIND_LIMIT_ENV_VAR), BRIDGE_KIND_LIMIT_DEFAULT
-        )
-        self._spawn_retries = _valid_positive_int_env(
-            os.environ.get(BRIDGE_SPAWN_RETRIES_ENV_VAR), BRIDGE_SPAWN_RETRIES_DEFAULT
-        )
-        self._breaker_threshold = _valid_positive_int_env(
-            os.environ.get(BRIDGE_BREAKER_THRESHOLD_ENV_VAR), BRIDGE_BREAKER_THRESHOLD_DEFAULT
-        )
-        #: key -> last-seen monotonic time (seconds). key == (kind, canonical args).
-        self._debounce_seen: dict[tuple[str, str], float] = {}
-        #: key -> row id of the accepted enqueue, so a debounced dup returns the
-        #: prior row id (idempotent: caller sees a successful enqueue).
-        self._debounce_last_rowid: dict[tuple[str, str], int] = {}
-        #: kind -> count of rows enqueued by THIS instance (hard ceiling check).
-        self._kind_counts: dict[str, int] = {}
-        #: consecutive create_team/spawn failures; reset to 0 on any success.
-        self._consecutive_failures: int = 0
-
-    # ── enqueue primitive ───────────────────────────────────────────────
-
-    @staticmethod
-    def _canonical_args(args: Mapping[str, Any]) -> str:
-        """Canonical, order-insensitive JSON for the debounce key.
-
-        ``sort_keys=True`` so two logically-identical arg dicts map to the SAME
-        key regardless of insertion order. A legitimate WaveDispatcher
-        re-dispatch carries a different ``attempt`` value → different canonical
-        string → different key → NEVER debounced (idempotency is not weakened).
-        """
-        return json.dumps(dict(args), sort_keys=True)
-
-    def _enqueue(self, kind: str, args: Mapping[str, Any]) -> int:
-        """INSERT one pending ``bridge_requests`` row; return its id.
-
-        Fail-closed: an out-of-enum ``kind`` is rejected HERE (before the
-        SQLite CHECK would also reject it) so a caller bug surfaces as a clear
-        :class:`BridgeDispatchError`, not an opaque IntegrityError. Untrusted
-        input boundary: ``args`` is serialized to JSON as DATA — never executed.
-
-        Three guards layer in FRONT of the INSERT (bounded + hardened path):
-
-        * BREAKER — if the per-team circuit-breaker is OPEN (too many consecutive
-          create_team/spawn failures), short-circuit with
-          :class:`BridgeBreakerOpenError` rather than enqueue onto a dead team.
-        * DEBOUNCE — if an IDENTICAL (kind, canonical-args) call arrived within
-          the sliding window, DROP it (skip the INSERT) and return the prior
-          row id as if enqueued (idempotent noise-suppression). This NEVER
-          swallows a WaveDispatcher retry: those carry a different ``attempt``
-          in ``args`` → different key. It is a NOISE guard layered ON TOP of the
-          migration-008 idempotency guarantee, never a replacement for it.
-          ``create_team`` is EXEMPT (:data:`BRIDGE_DEBOUNCE_EXEMPT_KINDS`): it
-          fires once per cycle and its (d) retry re-enqueues byte-identical args,
-          so debouncing it would block the legitimate retry.
-        * COUNT LIMIT — a hard per-kind ceiling; a breach is a runaway loop and
-          raises :class:`BridgeBudgetExceededError` (fail-loud).
-        """
-        if kind not in BRIDGE_REQUEST_KINDS:
-            raise BridgeDispatchError(
-                f"refusing to enqueue out-of-enum bridge kind {kind!r}; "
-                f"expected one of {sorted(BRIDGE_REQUEST_KINDS)}"
-            )
-
-        # BREAKER gate — refuse to enqueue onto a team already declared dead.
-        if self._breaker_threshold and self._consecutive_failures >= self._breaker_threshold:
-            raise BridgeBreakerOpenError(
-                f"bridge circuit-breaker OPEN for team_pk={self._team_pk!r}: "
-                f"{self._consecutive_failures} consecutive create_team/spawn "
-                f"failures >= threshold {self._breaker_threshold}. Refusing to "
-                f"enqueue {kind!r} onto a dead team (set "
-                f"{BRIDGE_BREAKER_THRESHOLD_ENV_VAR} to tune)."
-            )
-
-        key = (kind, self._canonical_args(args))
-
-        # DEBOUNCE — drop a duplicate identical call inside the sliding window.
-        # window_s == 0 disables debounce (valid-or-ignore default never 0).
-        # create_team is EXEMPT: its retry re-enqueues identical args and MUST
-        # always produce a fresh row (never block the single legitimate call).
-        now = self._clock()
-        if self._debounce_ms > 0 and kind not in BRIDGE_DEBOUNCE_EXEMPT_KINDS:
-            window_s = self._debounce_ms / 1000.0
-            last = self._debounce_seen.get(key)
-            if last is not None and (now - last) < window_s:
-                # Idempotent skip: refresh nothing (sliding window anchors on the
-                # FIRST/last accepted call), return the prior row id so the caller
-                # sees a successful enqueue.
-                return self._debounce_last_rowid.get(key, -1)
-
-        # COUNT LIMIT — hard per-kind ceiling (above legitimate traffic).
-        new_count = self._kind_counts.get(kind, 0) + 1
-        if self._kind_limit and new_count > self._kind_limit:
-            raise BridgeBudgetExceededError(
-                f"bridge per-kind enqueue limit exceeded for kind={kind!r} on "
-                f"team_pk={self._team_pk!r}: attempted enqueue #{new_count} > "
-                f"ceiling {self._kind_limit}. This is a runaway dispatch loop "
-                f"(the ceiling sits above MAX_ATTEMPTS-driven traffic); set "
-                f"{BRIDGE_KIND_LIMIT_ENV_VAR} to tune."
-            )
-
-        con = _open_bridge_db(self._db_path)
-        try:
-            cur = con.execute(
-                "INSERT INTO bridge_requests (team_pk, kind, args_json, status) "
-                "VALUES (?, ?, ?, 'pending')",
-                (self._team_pk, kind, json.dumps(dict(args))),
-            )
-            con.commit()
-            row_id = int(cur.lastrowid)
-        finally:
-            con.close()
-
-        # Commit accounting AFTER a successful INSERT so a failed insert neither
-        # advances the counter nor poisons the debounce map.
-        self._kind_counts[kind] = new_count
-        self._debounce_seen[key] = now
-        self._debounce_last_rowid[key] = row_id
-        return row_id
-
-    def _poll_row(self, row_id: int) -> tuple[str, str | None, str | None]:
-        """Return ``(status, response_json, error_text)`` for ``row_id``.
-
-        A vanished row is treated as a remote error (mirrors kaizen's
-        ``QueueBridgeWrapper._poll``) so the create_team poller raises rather
-        than spinning on a row the servicer deleted out from under it.
-        """
-        con = _open_bridge_db(self._db_path)
-        try:
-            row = con.execute(
-                "SELECT status, response_json, error_text FROM bridge_requests WHERE id = ?",
-                (row_id,),
-            ).fetchone()
-            if row is None:
-                return ("error", None, f"row {row_id} disappeared from the bridge queue")
-            return (row[0], row[1], row[2])
-        finally:
-            con.close()
-
-    # ── DispatchTools Protocol surface ──────────────────────────────────
-
-    def create_team(self, name: str, members: list[str]) -> str:
-        """``TeamCreate`` — BLOCKS until the servicer resolves the row.
-
-        Enqueue → poll our OWN row until ``ready`` (parse ``response_json`` for
-        the ``team_id`` string and return it) or ``error`` (raise). Bounded by
-        :data:`PER_CALL_TIMEOUT_S`: on timeout we raise
-        :class:`BridgeDispatchError` rather than spin forever.
-
-        HARDENING (bounded + hardened path):
-
-        * RETRY + BACKOFF — a transient :class:`BridgeDispatchError` (dead/slow
-          servicer turn) is retried up to :data:`BRIDGE_SPAWN_RETRIES` times with
-          exponential backoff sized to stay WITHIN :data:`PER_CALL_TIMEOUT_S`
-          (the backoff sleeps use the injected ``_sleep_fn``/``_clock`` so tests
-          are deterministic). A retry here is TRANSPARENT to the wave loop — it
-          is one LOGICAL dispatch, adding NO new re-queue site (the termination
-          proof's single re-queue site stays :meth:`pm_dispatch._handle_failed_attempt`).
-        * CIRCUIT-BREAKER — each create_team failure increments the per-team
-          consecutive-failure counter; once it reaches
-          :data:`BRIDGE_BREAKER_THRESHOLD` the breaker trips and the NEXT
-          enqueue short-circuits with :class:`BridgeBreakerOpenError`. A success
-          resets the counter to 0.
-        """
-        last_exc: BridgeDispatchError | None = None
-        # attempts == 1 initial try + N retries.
-        for retry in range(self._spawn_retries + 1):
-            try:
-                team_id = self._create_team_once(name, members)
-            except BridgeTimeoutError:
-                # Nobody is servicing the queue — a retry just re-spends another
-                # full PER_CALL_TIMEOUT_S budget and cannot help (and would spin a
-                # constant-clock test forever as the deadline is recomputed each
-                # attempt). FAIL-FAST; still count it toward the breaker.
-                self._consecutive_failures += 1
-                raise
-            except BridgeDispatchError as exc:
-                # Servicer-REPORTED transient error (the run-55 init blip) — retry.
-                last_exc = exc
-                if retry < self._spawn_retries:
-                    self._backoff_sleep(retry)
-                    continue
-                # Retries exhausted → ONE logical create_team failure. Count it
-                # toward the breaker HERE (not per retry iteration) so the breaker
-                # threshold counts CONSECUTIVE LOGICAL create_team failures, not
-                # the internal retries of a single dispatch — otherwise one fully
-                # failed create_team (1 + N retries) could trip a threshold of N+1
-                # on its own. _enqueue's breaker gate short-circuits the NEXT
-                # enqueue once the threshold is crossed.
-                self._consecutive_failures += 1
-                raise
-            else:
-                # Success resets the breaker — a recovered blip never trips it.
-                self._consecutive_failures = 0
-                return team_id
-        # Unreachable (the loop returns or raises), but keep mypy/readers honest.
-        raise last_exc  # type: ignore[misc]  # pragma: no cover
-
-    def _create_team_once(self, name: str, members: list[str]) -> str:
-        """One enqueue→poll create_team attempt (no retry/breaker accounting)."""
-        # Anchor the deadline at the TRUE attempt start, BEFORE _enqueue — the
-        # enqueue path reads self._clock() internally (the debounce sliding
-        # window), so anchoring after it would charge those reads against the
-        # budget and (with a non-advancing test clock) push the deadline forever
-        # ahead of the clock → an unbounded spin. The budget starts when the
-        # attempt starts, not after the row lands.
-        deadline = self._clock() + self.PER_CALL_TIMEOUT_S
-        row_id = self._enqueue("create_team", {"name": name, "members": list(members)})
-        while True:
-            status, response_json, error_text = self._poll_row(row_id)
-            if status == "ready":
-                return self._extract_team_id(row_id, response_json)
-            if status == "error":
-                raise BridgeDispatchError(
-                    f"create_team row {row_id} failed: {error_text or '(no error_text)'}"
-                )
-            # status == 'pending' — bounded wait (NEVER unbounded).
-            if self._clock() >= deadline:
-                raise BridgeTimeoutError(
-                    f"create_team row {row_id} timed out after {self.PER_CALL_TIMEOUT_S}s "
-                    "(orchestrator never serviced it to 'ready'/'error')"
-                )
-            self._sleep_fn(self.POLL_INTERVAL_S)
-
-    def _backoff_sleep(self, retry: int) -> None:
-        """Sleep an exponential backoff for retry index ``retry`` (0-based).
-
-        Capped so the cumulative backoff stays a rounding error against
-        :data:`PER_CALL_TIMEOUT_S` (a retry must not blow the per-call budget).
-        Uses the injected ``_sleep_fn`` so tests advance a fake clock instead of
-        wall-sleeping.
-        """
-        delay = BRIDGE_BACKOFF_BASE_S * (2**retry)
-        # Never let backoff approach the per-call poll budget.
-        delay = min(delay, self.PER_CALL_TIMEOUT_S / 10.0)
-        self._sleep_fn(delay)
-
-    @staticmethod
-    def _extract_team_id(row_id: int, response_json: str | None) -> str:
-        """Parse + validate the ``team_id`` out of a ready create_team row."""
-        if not response_json:
-            raise BridgeDispatchError(
-                f"create_team row {row_id} reached 'ready' with an empty response_json"
-            )
-        try:
-            resp = json.loads(response_json)
-        except json.JSONDecodeError as exc:
-            raise BridgeDispatchError(
-                f"create_team row {row_id} response_json is not valid JSON: {exc}"
-            ) from exc
-        team_id = resp.get("team_id") if isinstance(resp, Mapping) else None
-        if not isinstance(team_id, str) or not team_id:
-            raise BridgeDispatchError(
-                f"create_team row {row_id} response missing a non-empty 'team_id' string: {resp!r}"
-            )
-        return team_id
-
-    def spawn_teammate(
-        self, team_id: str, name: str, prompt: str, model: str | None = None
-    ) -> None:
-        """First-touch ``Agent`` spawn — fire-and-forget (enqueue, return None).
-
-        ``model`` (a tier alias from ``scripts.model_tier``) is added to the
-        enqueued ``args_json`` ONLY when it is not ``None``, so a model-less
-        dispatch produces a byte-identical row to today (back-compat). The
-        bridge-poll servicer reads it as ``Agent(prompt=..., model=args.get("model"))``.
-        """
-        args: dict[str, Any] = {"team_id": team_id, "name": name, "prompt": prompt}
-        if model is not None:
-            args["model"] = model
-        self._enqueue("spawn_teammate", args)
-
-    def send_message(self, team_id: str, to: str, message: str) -> None:
-        """``SendMessage`` to an already-spawned teammate — fire-and-forget."""
-        self._enqueue("send_message", {"team_id": team_id, "to": to, "message": message})
-
-    def spawn_subagent(
-        self, task_id: Any, attempt: int, prompt: str, model: str | None = None
-    ) -> None:
-        """Sub-agent mode ``Agent`` spawn — fire-and-forget (enqueue, return None).
-
-        ``model`` (a tier alias) is added to ``args_json`` ONLY when not ``None``
-        — a model-less dispatch is byte-identical to today (back-compat)."""
-        args: dict[str, Any] = {"task_id": task_id, "attempt": attempt, "prompt": prompt}
-        if model is not None:
-            args["model"] = model
-        self._enqueue("spawn_subagent", args)
-
-
-def build_poll_fn(
-    db_path: str | Path,
-    *,
-    team_id: str,
-    role_id_for: Callable[[Mapping[str, Any]], str],
-) -> Callable[[Mapping[str, Any], int], Mapping[str, Any] | None]:
-    """Build a WaveDispatcher-compatible ``poll_fn(task, attempt) -> Mapping | None``.
-
-    The READ half of the WaveDispatcher seam (the write half is
-    :func:`build_spawn_fn` + :class:`QueueBridgeDispatchTools`). Reads the
-    worker's TERMINAL reply envelope from the EXISTING ``bridge_messages`` table
-    (via ``scripts.bridge_read.read_once`` — the inter-agent message wire, NOT
-    the request queue), validates it fail-closed, and returns the parsed
-    envelope Mapping iff the worker has reported a TERMINAL-ONLY closure.
-
-    Contract (matches ``pm_dispatch.WaveDispatcher``'s ``poll_fn`` seam):
-
-    * **Non-blocking.** A single ``read_once`` (which itself is a single
-      indexed SELECT) — the engine polls this; it must never block.
-    * **Returns ``None`` for "not done yet"** — NEVER ``{}``. ``None`` is the
-      seam's sentinel; ``{}`` would validate-fail downstream and be misread as
-      a malformed envelope. We return ``None`` when there is no reply, when the
-      reply fails :func:`scripts.pm_dispatch_envelope.validate_envelope`
-      (fail-closed — a malformed envelope HOLDS the barrier, never advances it),
-      and when the validated status is NON-terminal (``blocked`` /
-      ``needs-input`` also emit replies per 006 — filter on TERMINAL_ONLY).
-    * **Untrusted input.** The envelope is DATA — only parsed / validated /
-      compared, never executed. ``read_once`` fences the payload; we parse the
-      JSON body and hand it to the pure validator.
-
-    ``role_id_for(task) -> str`` maps a task to the teammate role-id whose
-    inbox carries its reply (defaults at the call site to the same
-    ``teammate_name_for`` used by :func:`build_spawn_fn`). ``team_id`` is the
-    cycle's team. ``db_path`` is the Local DB carrying ``bridge_messages``.
-    """
-    # Lazy import: pm_dispatch_envelope imports FROM scripts.dispatch
-    # (RULES_SKILL, TERMINAL_STATUSES), so importing it at module top level here
-    # would be a circular import. bridge_read does NOT import dispatch, but we
-    # keep it lazy for symmetry + cheap module import.
-    from scripts.bridge_read import read_once
-    from scripts.pm_dispatch_envelope import EnvelopeValidationError, validate_envelope
-
-    db_path_str = str(db_path)
-
-    def poll_fn(task: Mapping[str, Any], attempt: int) -> Mapping[str, Any] | None:
-        role_id = role_id_for(task)
-        # Non-blocking read of THIS teammate's inbox. update_cursor=False so a
-        # poll never advances the delivery cursor — the engine may poll the
-        # same attempt many times before it reports, and consuming the row
-        # would hide a later re-read. Heartbeats are excluded by default.
-        try:
-            rows = read_once(
-                db_path_str,
-                team_id=team_id,
-                role_id=role_id,
-                since_seq=0,
-                update_cursor=False,
-            )
-        except Exception:
-            # A read error (team not yet created, schema mismatch mid-setup,
-            # transient lock) is "no terminal reply yet" — HOLD the barrier,
-            # never advance on a read failure. Fail-closed.
-            return None
-
-        # Scan replies newest-first for the first VALID terminal-only envelope
-        # matching this (task, attempt). reply rows are 'kind=reply'; the
-        # bridge_read fence wraps the payload in <untrusted>…</untrusted> for
-        # DISPLAY, but the raw envelope JSON is what a worker sends — we parse
-        # the *inner* payload the worker wrote. read_once returns the fenced
-        # string, so we strip the fence to recover the worker's JSON body.
-        for row in reversed(rows):
-            if row.get("kind") != "reply":
-                continue
-            envelope = _parse_reply_envelope(row.get("payload"))
-            if envelope is None:
-                continue
-            try:
-                validated = validate_envelope(
-                    envelope,
-                    dispatched_task_id=task[_DISPATCH_TASK_ID_KEY],
-                    dispatched_attempt=attempt,
-                )
-            except EnvelopeValidationError:
-                # Fail-closed: a malformed / mismatched envelope is NOT a
-                # terminal closure. Keep scanning; if none validate, return
-                # None (HOLD the barrier) rather than {} ("done with no data").
-                continue
-            if validated.get("status") in TERMINAL_ONLY_STATUSES:
-                return validated
-            # A VALID but NON-terminal envelope (blocked / needs-input) also
-            # holds the barrier — keep scanning for a later terminal reply.
-        return None
-
-    return poll_fn
 
 
 # Recover the worker's JSON envelope from a bridge_read fenced payload. The

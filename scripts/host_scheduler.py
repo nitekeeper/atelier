@@ -70,6 +70,9 @@ from typing import Any
 
 from scripts.budget_pool import BudgetExceeded, BudgetPool
 from scripts.cli_dispatch import (
+    DEFAULT_ALLOWED_TOOLS as _DEFAULT_ALLOWED_TOOLS,
+)
+from scripts.cli_dispatch import (
     DEFAULT_DISALLOWED_TOOLS as _DEFAULT_DISALLOWED_TOOLS,
 )
 from scripts.cli_dispatch import (
@@ -85,6 +88,7 @@ from scripts.cli_dispatch import (
     direct_upstream_hashes,
     identity_sandbox_wrap,
     is_failed_attempt,
+    native_sandbox_wrap,
     real_cli_runner,
     run_attempt,
 )
@@ -193,25 +197,95 @@ def _is_writer(task: Mapping[str, Any]) -> bool:
 
 
 def _missing_declared_writes(task: Mapping[str, Any], write_dir: str | Path) -> list[str]:
-    """Return the declared ``writes`` (repo-relative) that DO NOT EXIST under
-    *write_dir* — the dir the agent actually wrote into (the task's worktree when
-    isolated, else the clone).
+    """Return the declared ``writes`` (repo-relative) that show NO CHANGE vs ``HEAD``
+    in *write_dir* — the git working tree the agent actually wrote into (the task's
+    worktree when isolated, else the clone).
+
+    BUG4b: a plain ``.exists()`` check is NOT sufficient. Every declared write
+    typically ALREADY EXISTS as a committed file at ``HEAD`` (the task EDITS an
+    existing file), so a no-op `done` — a worker that declared `writes` but changed
+    nothing — would have its declared path STILL exist and slip through the
+    false-`done` guard. So the contract is a HEAD-RELATIVE DIFF: a declared write
+    must actually show a change vs ``HEAD`` in its working tree (a new untracked
+    file, a staged/unstaged modification, or a delete). A declared write that is
+    byte-identical to ``HEAD`` (or absent at both) is reported as "missing" so the
+    no-op `done` is correctly flagged.
 
     The declared ``writes`` are repo-relative paths (the same vocabulary the DAG
-    write-disjointness gate uses); each is resolved against *write_dir* with
-    ``Path(write_dir, w)``.  EXISTENCE is the contract — a declared output that is
-    absent means the agent did not produce it.  Content is deliberately NOT
-    over-constrained (a legitimately-empty declared output should not be rejected),
-    so the check is plain ``.exists()``: any present path (file, dir, symlink)
-    satisfies it.  Returns the missing entries in declaration-stable (sorted)
-    order; an empty list means every declared write is present.
+    write-disjointness gate uses). We ask git ONCE for the full set of changed
+    paths via ``git status --porcelain`` in *write_dir* and intersect with the
+    declared set — a path with NO porcelain entry changed nothing vs HEAD and is
+    flagged. Content is deliberately NOT over-constrained beyond "differs from
+    HEAD" (a legitimately-empty-but-new file still shows as untracked, so it is
+    accepted). Returns the missing entries in declaration-stable (sorted) order; an
+    empty list means every declared write actually changed vs HEAD.
     """
-    base = Path(write_dir)
-    missing: list[str] = []
-    for w in sorted(_writes(task)):
-        if not Path(base, w).exists():
-            missing.append(w)
-    return missing
+    declared = sorted(_writes(task))
+    if not declared:
+        return []
+    changed = _changed_paths_vs_head(write_dir)
+    return [w for w in declared if w not in changed]
+
+
+def _changed_paths_vs_head(write_dir: str | Path) -> set[str]:
+    """Return the set of repo-relative paths that differ from ``HEAD`` in the git
+    working tree *write_dir* (modified, added, deleted, renamed, or untracked).
+
+    Parses ``git status --porcelain`` (the stable, scriptable form): each entry's
+    path component is collected. A rename ``R old -> new`` contributes BOTH the new
+    AND the old path (either side is a genuine change touching a declared write).
+    Quoted paths (git quotes names with special chars under the default
+    ``core.quotePath``) are passed through verbatim; declared ``writes`` are plain
+    repo-relative slugs in practice, so the comparison is exact. Best-effort: a git
+    failure (not a repo / detached oddity) returns an empty set, which fail-CLOSED
+    flags every declared write as unchanged (a `done` is rejected rather than
+    wrongly accepted)."""
+    res = _git(["status", "--porcelain"], Path(write_dir), check=False)
+    if res.returncode != 0:
+        return set()
+    changed: set[str] = set()
+    for line in res.stdout.splitlines():
+        if not line:
+            continue
+        # Porcelain v1: "XY <path>" or "XY <old> -> <new>" for renames/copies.
+        entry = line[3:] if len(line) > 3 else line.strip()
+        if " -> " in entry:
+            old, new = entry.split(" -> ", 1)
+            changed.add(old.strip())
+            changed.add(new.strip())
+        else:
+            changed.add(entry.strip())
+    return changed
+
+
+def _sandbox_wrap_for_write_root(
+    base_wrap: SandboxWrap,
+    write_root: str | Path,
+) -> SandboxWrap:
+    """Return the ``sandbox_wrap`` to use for a dispatch whose writes land in
+    *write_root* (the carved worktree for an isolated writer, else the clone).
+
+    BUG4a: a writer runs in a per-writer git worktree under
+    ``clone_dir/.atelier-worktrees/<id>``, NOT the clone root, so its OS sandbox
+    must confine writes to (and land them in) ITS worktree. The ``sandbox_wrap``
+    threaded into :func:`pipeline` is a single closure built ONCE for the clone, so
+    when it is a NATIVE sandbox (tagged by :func:`~scripts.cli_dispatch.native_sandbox_wrap`)
+    we REBUILD it here with ``write_root`` so the ``allowWrite`` set tracks the
+    worktree. A non-native wrap (identity, a custom external wrapper, or an already
+    worktree-scoped one) is returned UNCHANGED — only a clone-scoped native sandbox
+    is re-pointed, and only when *write_root* actually differs from its current
+    confinement.
+    """
+    clone_dir = getattr(base_wrap, "native_clone_dir", None)
+    if clone_dir is None:
+        # Not a native sandbox (identity / external / custom) — leave it as-is.
+        return base_wrap
+    target = str(Path(write_root).resolve())
+    if getattr(base_wrap, "native_write_root", None) == target:
+        # Already confined to this exact write root (e.g. no worktree carved →
+        # write_root IS the clone) — no rebuild needed.
+        return base_wrap
+    return native_sandbox_wrap(clone_dir, write_root=target)
 
 
 def _sort_key(task: Mapping[str, Any]) -> tuple[int, str]:
@@ -794,7 +868,7 @@ async def pipeline(
     wall_clock_s: float = WALL_CLOCK_S,
     permission_mode: str = _DEFAULT_PERMISSION_MODE,
     disallowed_tools: Sequence[str] = _DEFAULT_DISALLOWED_TOOLS,
-    allowed_tools: Sequence[str] | None = None,
+    allowed_tools: Sequence[str] | None = _DEFAULT_ALLOWED_TOOLS,
     sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
     escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
     max_budget_usd: float | None = None,
@@ -1100,6 +1174,18 @@ async def pipeline(
                         briefing=briefing,
                         upstream_envelope_hashes=up_hashes,
                     )
+                    # A journal HIT means run_attempt will REPLAY a previously-validated
+                    # result at $0 WITHOUT re-executing — so the worktree is not
+                    # re-materialized and the declared writes legitimately already live
+                    # in HEAD (merged by the original run), unchanged. The false-`done`
+                    # guard below (a diff-vs-HEAD check) is for catching a LYING FRESH
+                    # `done`, not for re-checking a replay; skip it on a hit.
+                    was_journal_hit = journal.lookup(jkey) is not None
+                    # BUG4a: confine a native OS sandbox's writes to the dir the
+                    # agent actually writes into — the carved worktree for an
+                    # isolated writer, else the clone (`run_cwd` is whichever). A
+                    # non-native / identity wrap is returned unchanged.
+                    eff_sandbox_wrap = _sandbox_wrap_for_write_root(sandbox_wrap, run_cwd)
                     result = await run_attempt(
                         the_task,
                         attempt,
@@ -1117,7 +1203,7 @@ async def pipeline(
                         permission_mode=permission_mode,
                         disallowed_tools=disallowed_tools,
                         allowed_tools=allowed_tools,
-                        sandbox_wrap=sandbox_wrap,
+                        sandbox_wrap=eff_sandbox_wrap,
                         max_budget_usd=max_budget_usd,
                     )
                     # FALSE-`done` GUARD (engine-level): a `done` writer that produced
@@ -1129,6 +1215,7 @@ async def pipeline(
                         and isinstance(result, Mapping)
                         and result.get("status") == "done"
                         and _is_writer(the_task)
+                        and not was_journal_hit
                     ):
                         missing = _missing_declared_writes(the_task, run_cwd)
                         if missing:
@@ -1142,6 +1229,14 @@ async def pipeline(
                                 run_cwd,
                             )
                             result = FAILED_ATTEMPT
+                            # Invalidate the cached (rejected) envelope so a retry
+                            # RE-EXECUTES rather than replaying this false-`done`:
+                            # run_attempt journaled the validated `done` BEFORE this
+                            # guard saw it, and `attempt` is not part of the journal
+                            # key, so without this delete the next attempt would be a
+                            # journal HIT (skipping the guard above) and resurrect the
+                            # rejected `done` as success.
+                            journal.delete(jkey)
                     success = True
         except BudgetExceeded as exc:
             # M5 (3): a per-task budget exhaustion is a PER-TASK abandon — NOT a
@@ -1721,7 +1816,7 @@ async def run_host_pipeline_for_project(
     wall_clock_s: float = WALL_CLOCK_S,
     permission_mode: str | None = None,
     disallowed_tools: Sequence[str] | None = None,
-    allowed_tools: Sequence[str] | None = None,
+    allowed_tools: Sequence[str] | None = _DEFAULT_ALLOWED_TOOLS,
     sandbox_wrap: SandboxWrap | None = None,
     escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
     max_budget_usd: float | None = None,
@@ -1741,8 +1836,8 @@ async def run_host_pipeline_for_project(
     instance would be an unused leaf (and an unused owned event loop). The factory
     (T1) is the sibling ``CliDispatchTools`` constructor for the ``parallel()``
     façade / a future leaf-owning caller. This function is the host/CLI transport's
-    analog of the bridge's ``build_wave_dispatcher_for_project`` + per-turn poll
-    servicer.
+    single-await dispatch entry point — it replaced the removed legacy dispatch
+    queue + its per-turn poll servicer.
 
     The model-tier seam is the SHARED bridge policy (override > env
     ``ATELIER_MODEL_TIER`` > difficulty > PHASE_TIER > DEFAULT, then ROLE_FLOOR

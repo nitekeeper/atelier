@@ -67,11 +67,12 @@ PM MUST ask the human VERBATIM — substituting `abort_phase` and `incomplete_co
      ```
      python3 scripts/workflow.py <db_path> force-phase <project_rowid> <abort_phase>
      ```
-  3. **Re-enter `build_wave_dispatcher_for_project`**, whose `partition_waves`
-     re-runs over the SAME `tasks` rows and dispatches ONLY the non-terminal ones
-     (terminal `complete`/`abandoned` rows are dropped — the persisted
-     tasks/envelopes are reused verbatim). The force-phase is the ONLY new write
-     the resume performs.
+  3. **Re-enter the host dispatch path** (`internal/dev-dispatch/SKILL.md` →
+     "Host-drive section"). The host pipeline re-partitions the SAME persisted
+     `tasks` rows and dispatches ONLY the non-terminal ones (terminal
+     `complete`/`abandoned` rows are dropped — the persisted tasks/envelopes are
+     reused verbatim; no re-plan). The force-phase is the ONLY new write the
+     resume performs.
 - **On `new`:** leave the aborted arc intact (§13.1.3) and proceed as a fresh
   project — do not delete or rewrite the prior arc's rows.
 
@@ -237,8 +238,7 @@ Bypass entries are recorded in the `phase_bypasses` table and surfaced by `inter
 | `plan:open` | Continue refining the plan with the user. | `internal/dev-plan/SKILL.md` |
 | `plan:approved` | Write the first failing test (single-agent). | `internal/dev-tdd/SKILL.md` |
 | `plan:approved` (parallel tasks, **sub-agent** mode) | Dispatch fresh subagents per task with two-stage review instead of implementing directly. | `internal/dev-subagent/SKILL.md` |
-| `plan:approved` (parallel tasks, **agent-team** mode, **cli transport** — the M7 default) | Drive the deterministic-host pipeline: the plan-phase meeting (over the kept `bridge_messages` wire) then the single `await dispatch_host_pipeline(...)` with an injected escalate_fn collector + explicit `run_mode`; post-await, surface the collected escalations + the flat envelope list. | `internal/dev-dispatch/SKILL.md` → "Host-drive section" |
-| `plan:approved` (parallel tasks, **agent-team** mode, `ATELIER_TRANSPORT=bridge` — escape hatch) | Drive the legacy wave engine: `build_wave_dispatcher_for_project` + per-turn bridge-poll servicer; surfaces the meeting / side-query / roster / persona-gap-escalation behaviors. | `internal/dev-dispatch/SKILL.md` → "Legacy bridge recipe" |
+| `plan:approved` (parallel tasks, **agent-team** mode) | Drive the deterministic-host pipeline: the plan-phase meeting (over the kept `bridge_messages` wire) then the single `await dispatch_host_pipeline(...)` with an injected escalate_fn collector + explicit `run_mode`; post-await, surface the collected escalations + the flat envelope list. | `internal/dev-dispatch/SKILL.md` → "Host-drive section" |
 | `tdd:red` | Write minimal implementation to make tests pass. | `internal/dev-tdd/SKILL.md` |
 | `tdd:green` | Verify tests pass (vacuity check, full output read), then refactor with tests still passing. | `internal/dev-verify/SKILL.md`, then `internal/dev-tdd/SKILL.md` |
 | `tdd:clean` | Verify suite is clean, then continue TDD (new test) or advance to review. | `internal/dev-verify/SKILL.md`, then `internal/dev-tdd/SKILL.md` or `internal/dev-review/SKILL.md` |

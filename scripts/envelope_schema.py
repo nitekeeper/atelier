@@ -10,7 +10,9 @@ set are derived directly from what
 :func:`scripts.pm_dispatch_envelope.validate_envelope` checks:
 
 * ``type`` — fixed ``"task_result"`` discriminator (validator check 1).
-* ``task_id`` — string or integer (validator check 2; string-normalized compare).
+* ``task_id`` — string (validator check 2; string-normalized compare). A single
+  type, NOT a union: claude's ``--json-schema`` (ajv ``strictTypes``) rejects
+  union types, and a worker always echoes the string task_id we hand it.
 * ``attempt`` — integer (validator check 3; string-normalized compare).
 * ``status`` — one of :data:`scripts.dispatch.TERMINAL_STATUSES` (validator
   check 4). The enum is BUILT from that frozenset (sorted for determinism), NOT
@@ -54,9 +56,11 @@ ENVELOPE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "type": {"type": "string", "const": "task_result"},
-        # task_id may be a bare int or a stringified id (the SKILL permits both;
-        # validate_envelope string-normalizes before comparing).
-        "task_id": {"type": ["string", "integer"]},
+        # task_id is a string: claude's --json-schema (ajv strictTypes) REJECTS
+        # union types, so a single type is required. A worker echoes the task_id
+        # we hand it (always a string), and validate_envelope string-normalizes
+        # before comparing, so string-only stays consistent with the validator.
+        "task_id": {"type": "string"},
         "attempt": {"type": "integer"},
         "status": {"type": "string", "enum": sorted(TERMINAL_STATUSES)},
         "artifacts": {"type": "array", "items": {"type": "object"}},

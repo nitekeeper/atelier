@@ -691,9 +691,9 @@ class WaveDispatcher:
                     # no validated terminal envelope) is soft-killed and charged.
                     # The decision keys on a REAL signal (presence of a validated
                     # terminal envelope), never on elapsed time alone. The
-                    # confirming read is non-consuming (production build_poll_fn
-                    # passes update_cursor=False), so it cannot hide the row from
-                    # the real consumer or be attempt-laundered.
+                    # confirming read is non-consuming (the production host poll_fn
+                    # reads the envelope without consuming it), so it cannot hide
+                    # the row from the real consumer or be attempt-laundered.
                     del in_flight[tid]
                     final = self._observe_before_kill(infl)
                     if final is not None:
@@ -724,8 +724,8 @@ class WaveDispatcher:
 
         This is the engine-side GO-OBSERVE gate (kaizen F15): a fired wall-clock
         is a trigger to OBSERVE the worker's final state, not an auto-kill. The
-        production ``poll_fn`` (:func:`scripts.dispatch.build_poll_fn`) reads the
-        bridge with ``update_cursor=False`` (idempotent — consumes nothing, so a
+        production host ``poll_fn`` (:func:`scripts.cli_dispatch.build_cli_poll_fn`)
+        reads the worker's terminal envelope without consuming it (idempotent — a
         real consumer can still see the row) and binds ``validate_envelope`` to
         the dispatched ``(task_id, attempt)`` (anti-spoof / anti-attempt-laundering),
         returning a TERMINAL-ONLY envelope or ``None``. So this re-read is a
@@ -733,8 +733,8 @@ class WaveDispatcher:
         worker's terminal reply landed between the last in-flight scan and the
         deadline (done-but-silent); ``None`` means genuinely stalled.
 
-        Fail-closed: any exception is swallowed to ``None`` (mirrors poll_fn's own
-        except at ``dispatch.py``) — a read error is "no terminal reply", which
+        Fail-closed: any exception is swallowed to ``None`` (mirrors the host
+        ``poll_fn``'s own except) — a read error is "no terminal reply", which
         HOLDS the GO-OBSERVE gate closed and charges the soft-kill, never silently
         advancing on a read failure."""
         try:

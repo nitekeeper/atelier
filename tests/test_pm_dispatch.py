@@ -969,11 +969,11 @@ def test_blocked_confirming_read_is_not_captured_as_success(workspace):
     bare non-None `final` straight to complete_task) — that mutation flips the
     assertions to status=='complete' / attempts==1.
 
-    Defensive-depth note: the PRODUCTION `build_poll_fn` (scripts/dispatch.py) filters
-    non-terminal envelopes to None before the engine ever sees them, so this arm is
-    not reachable on the shipped poll_fn. The test pins the ENGINE's own defensive
-    routing so the contract holds if that upstream filter is ever loosened — the
-    engine never trusts the poll_fn to have pre-gated terminality."""
+    Defensive-depth note: the PRODUCTION host `poll_fn` (scripts/cli_dispatch.py)
+    filters non-terminal envelopes to None before the engine ever sees them, so this
+    arm is not reachable on the shipped poll_fn. The test pins the ENGINE's own
+    defensive routing so the contract holds if that upstream filter is ever loosened
+    — the engine never trusts the poll_fn to have pre-gated terminality."""
     tid = _seed_task(workspace, title="blocked-confirming", parallel_group=0)
 
     clock = FakeClock()

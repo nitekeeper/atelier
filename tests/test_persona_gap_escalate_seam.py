@@ -8,9 +8,9 @@ nothing in a live run wired it to the ``WaveDispatcher.escalate_fn`` seam, so a
 wave abandonment never surfaced a persona gap to the human.
 
 #87 supplies ``build_persona_gap_escalate_fn``: an ``escalate_fn`` the
-orchestrator passes to :func:`scripts.atelier_entrypoint.build_wave_dispatcher_for_project`.
-On every abandonment escalation the engine emits (guaranteed — consensus item 8)
-it:
+orchestrator passes to the wave engine's ``escalate_fn`` seam (the host pipeline
+since the M7 bridge-queue removal). On every abandonment escalation the engine
+emits (guaranteed — consensus item 8) it:
 
   * ALWAYS calls the guaranteed-emitting base sink (the default WARNING log, or a
     caller-supplied one) — escalation is NEVER silenced;
@@ -20,9 +20,9 @@ it:
 
 These tests use a real Local ``team_audit_log`` (the latch counts LEDGER rows,
 not in-memory mentions) — mirroring ``tests/test_team_meeting.py``'s DB-backed
-escalation tests. The bridge transport itself is not exercised (escalation is a
+escalation tests. The dispatch transport itself is not exercised (escalation is a
 LEDGER write); the orchestrator's surfacing of the ledger row to the human is a
-documented procedural deferral (the bridge-poll/dev-dispatch SKILL recipe).
+documented procedural deferral (the dev-dispatch SKILL recipe).
 """
 
 from __future__ import annotations

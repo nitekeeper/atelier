@@ -36,9 +36,9 @@ Design risks this module is built to avoid (see /tmp/atelier-66-design.md):
   ``merge_worktrees`` targets the ``atelier/<slug>`` FEATURE branch and KEEPS
   it for the PR.
 * The git/PR ops are inherently Local-path operations (worktrees only exist for
-  a live Local team-mode run) but they are NOT team-STATE mutators, so they do
-  NOT inherit ``team_teardown``'s Local-only mode-gate. Only the durable retro
-  write crosses modes, and it does so symmetrically via the facade.
+  a live Local team-mode run) but they are NOT team-STATE mutators, so they are
+  NOT gated to Local-only the way team-state mutations are. Only the durable
+  retro write crosses modes, and it does so symmetrically via the facade.
 
 All product DB writes route through :mod:`scripts.backend` (A2). No raw SQL
 lives in this module.

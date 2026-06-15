@@ -4,7 +4,7 @@ The user's measured pain: subagents frequently blow a single task past ~150k
 tokens. The atelier PostToolUse 125k nudge (``hooks/context_budget.py``) and
 PreCompact snapshot (``hooks/pre_compact.py``) fire ONLY in the orchestrator's
 interactive session (scoped to ``.ai/active_project``) — they do NOT reach a
-one-shot worker spawned via the bridge-poll ``Agent(...)`` servicer. So the ONLY
+one-shot worker spawned by the host dispatch pipeline. So the ONLY
 context-budget signal that reaches a worker is its BRIEFING:
 
 * AI-1 — the always-on ``_CONTEXT_BUDGET_RULE`` appended by
@@ -33,7 +33,6 @@ from scripts.dispatch import (
     _CLI_TRANSPORT_RULE,
     _CONTEXT_BUDGET_RULE,
     _TERSE_OUTPUT_RULE,
-    TRANSPORT_BRIDGE,
     TRANSPORT_CLI,
     compose_briefing,
 )
@@ -50,12 +49,12 @@ _DEV_SUBAGENT_PROMPTS = (
 def _compose_kwargs(**overrides):
     """Minimal valid kwarg set for compose_briefing (real on-disk sources).
 
-    Pins ``transport=TRANSPORT_BRIDGE`` so the AI-1 budget-rule ORDER invariants
-    (the budget rule is the briefing TAIL) hold deterministically. Since the M7
-    flip the env default transport is ``cli``, which appends ``_CLI_TRANSPORT_RULE``
-    AFTER the budget rule; this context-budget lever's order contract is defined
-    against the byte-stable bridge briefing, so the fixture pins bridge explicitly
-    (a test that needs the cli addendum overrides ``transport``).
+    Pins ``transport=TRANSPORT_CLI`` (the only transport since the M7 bridge-queue
+    removal) so the AI-1 budget-rule ORDER invariants hold deterministically
+    regardless of the runner's ambient ``ATELIER_TRANSPORT``. On the cli path the
+    order is terse → context-budget → cli-transport addendum, so the budget rule
+    is NOT the literal tail (the cli addendum is) — the ORDER assertions below key
+    off relative position, not the tail.
     """
     rules = (REPO_ROOT / "internal" / "team-mode-rules" / "SKILL.md").read_text(encoding="utf-8")
     base = {
@@ -69,7 +68,7 @@ def _compose_kwargs(**overrides):
         "wave_id": "wave-1",
         "wave_phase": "implement",
         "deadline_iso": "2026-06-07T22:00:00Z",
-        "transport": TRANSPORT_BRIDGE,
+        "transport": TRANSPORT_CLI,
     }
     assert rules, "rules SKILL.md is empty — fixture broken"
     base.update(overrides)
@@ -114,32 +113,18 @@ def test_ai1_context_budget_rule_does_not_claim_silent_automation():
 # ── AI-1 — LIVE: the rule reaches the rendered briefing, outside the fence ──
 
 
-def test_ai1_context_budget_rule_present_in_composed_briefing():
-    """LIVE proof: compose_briefing's returned briefing CONTAINS the budget
-    rule. NEUTER: if the ``+ _CONTEXT_BUDGET_RULE`` append were removed, this
-    distinctive substring would be absent and the test goes RED."""
-    body = compose_briefing(**_compose_kwargs())
-    assert _CONTEXT_BUDGET_RULE in body
-    # It is the briefing's FINAL guidance section (appended after the terse rule).
-    assert body.rstrip().endswith(_CONTEXT_BUDGET_RULE.rstrip())
-
-
 def test_ai1_context_budget_rule_present_in_cli_default_briefing():
-    """LIVE proof on the CLI/host transport — the M7 PRODUCTION DEFAULT. The
-    bridge-pinned liveness test above cannot catch a cli-only drop of the budget
-    rule (the cli branch appends `_CLI_TRANSPORT_RULE` after the budget rule, so
-    the budget rule is no longer the literal tail). This asserts the rule survives
-    on the cli path and its position is the STABLE
-    terse → context-budget → cli-transport order. NEUTER: dropping the
-    `+ _CONTEXT_BUDGET_RULE` append on the cli branch makes this RED."""
-    # _compose_kwargs(transport=TRANSPORT_CLI) sets transport in the kwargs (the
-    # base pins bridge; this override flips it to cli for this test).
+    """LIVE proof on the CLI/host transport — the M7 PRODUCTION DEFAULT (and, since
+    the bridge-queue removal, the ONLY transport). Asserts the rule survives and
+    its position is the STABLE terse → context-budget → cli-transport order. The
+    cli branch appends `_CLI_TRANSPORT_RULE` after the budget rule, so the budget
+    rule is NOT the literal tail. NEUTER: dropping the `+ _CONTEXT_BUDGET_RULE`
+    append makes this RED."""
     body = compose_briefing(**_compose_kwargs(transport=TRANSPORT_CLI))
     # (a) the budget rule reaches the cli-default briefing.
     assert _CONTEXT_BUDGET_RULE in body
     # (b) stable order: terse < context-budget < cli-transport addendum (the cli
-    #     addendum is the tail on this path, so the budget rule is NOT the tail —
-    #     hence the bridge-pinned `endswith` test above does not cover this).
+    #     addendum is the tail on this path, so the budget rule is NOT the tail).
     terse_at = body.find(_TERSE_OUTPUT_RULE)
     budget_at = body.find(_CONTEXT_BUDGET_RULE)
     cli_at = body.find(_CLI_TRANSPORT_RULE)
@@ -181,8 +166,8 @@ def test_ai1_budget_rule_after_untrusted_fence_and_after_terse_rule():
 
 def test_ai1_tm006_reply_contract_present_and_precedes_budget_rule():
     """The B1/AI-1 append must not disturb the TM-006 reply contract: the
-    ``"type": "task_result"`` payload survives and appears BEFORE the budget
-    rule (the envelope is unmodified, the budget rule is the briefing tail)."""
+    ``"type": "task_result"`` payload survives and appears BEFORE the appended
+    budget rule (the envelope is unmodified by the tail appends)."""
     body = compose_briefing(**_compose_kwargs())
     assert '"type": "task_result"' in body
     assert body.index('"type": "task_result"') < body.index(_CONTEXT_BUDGET_RULE)

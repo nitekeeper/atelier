@@ -108,8 +108,29 @@ def test_argv_is_exact_list_no_shell(tmp_path):
     assert "--disallowedTools" in argv
     di = argv.index("--disallowedTools")
     assert argv[di + 1 : di + 4] == ["Bash", "WebFetch", "WebSearch"]
-    # No --allowedTools by default (allowlist is opt-in).
-    assert "--allowedTools" not in argv
+    # BUG3: --allowedTools is present BY DEFAULT (a headless -p worker must be
+    # granted Read/Edit/… up-front or it hits "haven't granted it yet"). It carries
+    # exactly DEFAULT_ALLOWED_TOOLS and OMITS the three deny-floor tools (deny wins).
+    from scripts.cli_dispatch import DEFAULT_ALLOWED_TOOLS
+
+    assert "--allowedTools" in argv
+    ai = argv.index("--allowedTools")
+    allowed = argv[ai + 1 : ai + 1 + len(DEFAULT_ALLOWED_TOOLS)]
+    assert allowed == list(DEFAULT_ALLOWED_TOOLS)
+    assert allowed == [
+        "Read",
+        "Edit",
+        "Write",
+        "MultiEdit",
+        "Grep",
+        "Glob",
+        "LS",
+        "Task",
+        "NotebookEdit",
+        "TodoWrite",
+    ]
+    # The deny-floor tools are NOT in the allowlist (deny wins; defense-in-depth).
+    assert not (set(allowed) & {"Bash", "WebFetch", "WebSearch"})
     # cwd is the clone.
     assert call["cwd"] == str(clone)
 
@@ -591,34 +612,94 @@ def test_run_attempt_max_budget_usd_in_argv(tmp_path):
     assert "--max-budget-usd" in argv, f"--max-budget-usd missing from argv: {argv}"
     bi = argv.index("--max-budget-usd")
     got = argv[bi + 1]
-    # FIX 3 (Obi-V1) — PIN the exact value from FIRST-PRINCIPLES constants, NOT by
-    # re-calling max_budget_usd_for (that round-trip stays green if the derivation
-    # is halved). opus est = 12_000 output tokens:
+    # BUG2 — the raw FIRST-PRINCIPLES derivation for an opus est = 12_000 output
+    # tokens is:
     #   (12000*25/1e6  output  +  12000*5.0*5/1e6  input  ) * (1/0.70 headroom)
-    #   = (0.30 + 0.30) * 1.428571…  = 0.857142…  → "0.86"
-    assert got == "0.86", f"argv value {got!r} != first-principles 0.86 for opus est 12000"
-    # Cross-check the production fn produces the SAME float we pinned (so the pin
-    # and the constants can't silently drift apart without one of them going RED).
-    assert f"{max_budget_usd_for(12_000):.2f}" == "0.86"
+    #   = (0.30 + 0.30) * 1.428571…  = 0.857142…
+    # …which is far too tight for a big real task (it would abort `claude exited 1`
+    # mid-run). The DOLLAR FLOOR clamps the ceiling UP to MIN_BUDGET_USD = 5.0, so
+    # the argv carries "5.00". (The wall-clock kill remains the real terminator;
+    # the dollar lever is a defense-in-depth backstop that must not fall below a
+    # workable amount.)
+    from scripts.cli_dispatch import MIN_BUDGET_USD
+
+    assert MIN_BUDGET_USD == 5.0
+    assert got == "5.00", f"argv value {got!r} != floored 5.00 (MIN_BUDGET_USD) for opus est 12000"
+    # Cross-check the production fn produces the SAME floored float we pinned (so
+    # the pin and the floor can't silently drift apart without one going RED).
+    assert max_budget_usd_for(12_000) == 5.0
+    assert f"{max_budget_usd_for(12_000):.2f}" == "5.00"
 
 
 def test_max_budget_usd_for_derivation_scales_with_estimate():
-    """FIX 3 (Obi-V1) — concrete pinned points (not a loose floor): the derivation
-    is monotone and matches first-principles arithmetic at known token estimates.
+    """BUG2 — the derivation is FLOORED at MIN_BUDGET_USD = 5.0 and otherwise
+    matches first-principles arithmetic above the floor.
 
     Per-token rates: output $25/1M, input $5/1M; input allowance = 5x the output
-    estimate; headroom = 1/0.70. So for est E tokens:
-        usd(E) = (E*25/1e6 + E*5*5/1e6) * (1/0.70) = E * 50/1e6 / 0.70
-    haiku est 2_000  → 0.1428571…   opus est 12_000 → 0.8571428…"""
+    estimate; headroom = 1/0.70. So the RAW derivation for est E tokens is:
+        raw(E) = (E*25/1e6 + E*5*5/1e6) * (1/0.70) = E * 50/1e6 / 0.70
+    and max_budget_usd_for(E) = max(raw(E), 5.0). raw crosses 5.0 at
+    E = 5.0 * 0.70 * 1e6 / 50 = 70_000 tokens, so:
+      * the roster tiers (haiku 2k / sonnet 6k / opus 12k) all sit BELOW the floor
+        → every one is clamped UP to exactly 5.0 (the defence-in-depth backstop);
+      * a genuinely-large task ABOVE 70k tokens keeps the larger, proportionate
+        derived ceiling (the floor only raises small estimates; it never caps big
+        ones, so the lever stays proportionate, not unbounded)."""
     import pytest as _pytest
 
-    from scripts.cli_dispatch import max_budget_usd_for
+    from scripts.cli_dispatch import MIN_BUDGET_USD, max_budget_usd_for
 
-    small = max_budget_usd_for(2_000)  # haiku-ish
-    big = max_budget_usd_for(12_000)  # opus-ish
-    assert big > small > 0.0  # monotone
-    # Concrete pins (catch a halved/doubled derivation that a loose floor misses).
-    assert small == _pytest.approx(0.14285714285714288, rel=0, abs=1e-9)
-    assert big == _pytest.approx(0.8571428571428571, rel=0, abs=1e-9)
-    # First-principles closed form for an arbitrary third point (sonnet est 6_000).
-    assert max_budget_usd_for(6_000) == _pytest.approx(6_000 * 50 / 1e6 / 0.70, abs=1e-9)
+    assert MIN_BUDGET_USD == 5.0
+    # All roster tiers derive < 5.0 raw → clamped UP to exactly the floor.
+    assert max_budget_usd_for(2_000) == 5.0  # haiku-ish (raw ≈ 0.143)
+    assert max_budget_usd_for(6_000) == 5.0  # sonnet-ish (raw ≈ 0.429)
+    assert max_budget_usd_for(12_000) == 5.0  # opus-ish (raw ≈ 0.857)
+    # At the crossover the floor and the raw derivation coincide.
+    assert max_budget_usd_for(70_000) == _pytest.approx(5.0, abs=1e-9)
+    # ABOVE the crossover the proportionate derivation dominates (floor does NOT
+    # cap it — the ceiling scales with the task, monotone and bounded).
+    big = max_budget_usd_for(140_000)
+    assert big == _pytest.approx(140_000 * 50 / 1e6 / 0.70, abs=1e-9)
+    assert big > 5.0  # the floor did not clamp a genuinely-large task
+    # First-principles closed form for an arbitrary point well above the floor.
+    assert max_budget_usd_for(100_000) == _pytest.approx(100_000 * 50 / 1e6 / 0.70, abs=1e-9)
+
+
+# ── BUG4a: native_sandbox_wrap write_root confinement ───────────────────────
+
+
+def test_native_sandbox_wrap_write_root_confines_allowwrite(tmp_path):
+    """BUG4a — ``native_sandbox_wrap(clone, write_root=wt)`` injects ``--settings``
+    whose ``filesystem.allowWrite`` is the WRITE_ROOT (the carved worktree), not the
+    clone root; with no ``write_root`` it defaults to the clone (back-compat)."""
+    from scripts.cli_dispatch import native_sandbox_wrap
+
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    wt = clone / ".atelier-worktrees" / "task-1"
+    wt.mkdir(parents=True)
+
+    def settings_of(wrap):
+        out = wrap(["claude", "-p", "x"])
+        assert out[:3] == ["claude", "-p", "x"]
+        assert "--settings" in out
+        return json.loads(out[out.index("--settings") + 1])
+
+    # (1) write_root supplied → allowWrite is the WORKTREE.
+    wt_settings = settings_of(native_sandbox_wrap(clone, write_root=wt))
+    assert wt_settings["sandbox"]["filesystem"]["allowWrite"] == [str(wt.resolve())]
+    assert wt_settings["sandbox"]["failIfUnavailable"] is True
+    assert wt_settings["sandbox"]["network"]["allowedDomains"] == []
+
+    # (2) no write_root → allowWrite defaults to the CLONE (back-compat unchanged).
+    clone_settings = settings_of(native_sandbox_wrap(clone))
+    assert clone_settings["sandbox"]["filesystem"]["allowWrite"] == [str(clone.resolve())]
+
+    # The closures carry the introspection tags host_scheduler keys on to rebuild a
+    # per-writer sandbox (BUG4a wiring): the resolved clone + current write root.
+    wrap_clone = native_sandbox_wrap(clone)
+    assert wrap_clone.native_clone_dir == str(clone.resolve())
+    assert wrap_clone.native_write_root == str(clone.resolve())
+    wrap_wt = native_sandbox_wrap(clone, write_root=wt)
+    assert wrap_wt.native_clone_dir == str(clone.resolve())
+    assert wrap_wt.native_write_root == str(wt.resolve())

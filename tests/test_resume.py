@@ -9,10 +9,13 @@ only happens AFTER the human types 'continue' (§3 non-goal / §13 never-silent)
 The resumable MARKER is built entirely from existing always-Local state (no
 migration):
 
-  * team_audit_log LATEST *lifecycle* event_type == 'aborted' (NOT 'completed')
-    — the DISCRIMINATOR. teams.status='closed' is reached by BOTH a hard abort
-    AND a clean finish (team_teardown), so it false-positives; the latest
-    lifecycle audit event is the authoritative signal.
+  * team_audit_log LATEST *lifecycle* event_type == 'aborted' — the
+    DISCRIMINATOR. teams.status='closed' is reached by a hard abort (and would be
+    by any clean finish), so it can false-positive; the latest lifecycle audit
+    event is the authoritative signal. ('completed' is no longer written — its
+    team-teardown writer was retired in the host-engine migration — but the query
+    keys on the LATEST lifecycle event per team, so an aborted arc's latest is,
+    correctly, 'aborted'.)
   * >= 1 non-terminal task (tasks.status NOT IN ('complete','abandoned') —
     pm_dispatch._DB_TERMINAL_STATUSES), scoped to the team's team_pk so
     concurrent cycles are not conflated.
@@ -22,7 +25,7 @@ migration):
 
 MODE GATE: find_resumable_arc gates detect_mode()=='local' and returns None in
 non-local mode — there is no Local team-mode dispatch state to resume outside
-Local mode (mirrors abort/team_teardown's non-local skip). §17.
+Local mode (mirrors abort's non-local skip). §17.
 
 The Iron-Law test is `test_resume_never_auto_continues`: it asserts the detector
 returns an OFFER token and leaves phase/tasks/dispatch untouched. An

@@ -193,132 +193,16 @@ def startup_check() -> dict:
     return memex_result
 
 
-# ── Live WaveDispatcher wiring (atelier#81, AI-4) ───────────────────────────
-#
-# The production construction of `pm_dispatch.WaveDispatcher` — the binding #60
-# deferred ("every instantiation today is in tests"). This is the single
-# orchestrator-entry factory that wires the mode-agnostic wave engine to the
-# REAL queue-bridge transport: it selects the dispatch mode via
-# `resolve_dispatch_mode`, builds a `spawn_fn` over the production
-# `QueueBridgeDispatchTools`, builds the terminal-envelope `poll_fn`, and passes
-# `escalate_fn` straight through. The engine, barrier, budget, and wall-clock
-# are unchanged — this only supplies the three seams (#60/#61 own the rest).
-
-
-def build_wave_dispatcher(
-    db_path: str,
-    *,
-    team_pk: str,
-    team_id: str,
-    briefing_for: Callable[[Mapping[str, Any], int], str],
-    members: list[str] | None = None,
-    team_name: str | None = None,
-    teammate_name_for: Callable[[Mapping[str, Any]], str] | None = None,
-    escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
-    env: Mapping[str, str] | None = None,
-    root: str | Path = ".",
-    model_for: Callable[[Mapping[str, Any], int], str | None] | None = None,
-    summarize_fn: Callable[[list[Mapping[str, Any]]], str] | None = None,
-):
-    """Construct a live, mode-selected ``WaveDispatcher`` bound to the
-    production queue-bridge transport (atelier#81).
-
-    Resolution + wiring:
-
-    1. ``mode = resolve_dispatch_mode(env, root)`` — env override → persisted
-       marker → ``subagent`` default (atelier#62 precedence; unchanged here).
-    2. ``tools = QueueBridgeDispatchTools(team_pk, db_path=db_path)`` — the
-       production :class:`~scripts.dispatch.DispatchTools` binding: enqueues
-       harness calls onto ``bridge_requests`` for the orchestrator turn-loop to
-       service (``internal/bridge-poll/SKILL.md``).
-    3. ``spawn_fn = build_spawn_fn(mode, tools=tools, ...)`` — the #61 factory
-       (TeamCreate-once + first-touch handled inside; mode-branching internal).
-    4. ``poll_fn = build_poll_fn(db_path, team_id=team_id, role_id_for=...)`` —
-       the terminal-reply-envelope read over ``bridge_messages`` (fail-closed
-       validation; ``None`` HOLDS the barrier).
-    5. ``WaveDispatcher(db_path, spawn_fn=, poll_fn=, escalate_fn=)``.
-
-    ``escalate_fn`` is threaded through as the **single unconditional path** —
-    when ``None`` the engine's own guaranteed-emitting default
-    (``pm_dispatch._default_escalate``) is used. No conditional escalation
-    branches are added (consensus item 8: escalation is guaranteed-emitted).
-
-    ``model_for(task, attempt) -> str | None`` is the OPTIONAL per-task
-    model-tier seam (additive, back-compatible). It is threaded straight into
-    :func:`scripts.dispatch.build_spawn_fn`; ``None`` (the default here) means no
-    model is attached to any spawn — byte-identical to the pre-policy behavior.
-    The orchestrator-facing factory :func:`build_wave_dispatcher_for_project`
-    builds a ``scripts.model_tier``-backed default; this lower-level factory
-    leaves it unset unless the caller injects one.
-
-    ``teammate_name_for`` maps a task to the teammate role-id; it is reused as
-    the poll-side ``role_id_for`` so a worker's reply inbox and its spawn
-    identity stay in lock-step. ``team_id`` is the cycle's team identity (the
-    inbox the workers reply into); in agent-team mode it is the id ``create_team``
-    returns — the orchestrator threads the same value here.
-
-    Lazy imports keep ``pm_dispatch`` (which imports ``scripts.tasks`` and a
-    chain of backend modules) out of the bare ``startup_check`` import path.
-    """
-    from scripts.dispatch import (
-        QueueBridgeDispatchTools,
-        build_poll_fn,
-        build_spawn_fn,
-        resolve_dispatch_mode,
-    )
-    from scripts.pm_dispatch import WaveDispatcher
-
-    # Only forward `env` when the caller supplied one; otherwise let
-    # resolve_dispatch_mode use its os.environ default (passing None would be a
-    # non-Mapping and break the lookup).
-    if env is not None:
-        mode = resolve_dispatch_mode(env=env, root=root)
-    else:
-        mode = resolve_dispatch_mode(root=root)
-
-    tools = QueueBridgeDispatchTools(team_pk, db_path=db_path)
-
-    name_for = teammate_name_for or (lambda task: str(task["id"]))
-
-    spawn_fn = build_spawn_fn(
-        mode,
-        tools=tools,
-        briefing_for=briefing_for,
-        members=members,
-        team_name=team_name,
-        teammate_name_for=name_for,
-        model_for=model_for,
-    )
-    poll_fn = build_poll_fn(db_path, team_id=team_id, role_id_for=name_for)
-
-    # escalate_fn is the single unconditional path: pass it through when given,
-    # else fall back to the engine's guaranteed-emitting default (no branch).
-    # summarize_fn (wave-summary context compression) + env are threaded as
-    # additive, back-compatible kwargs: `None` summarize_fn → the engine's
-    # deterministic `default_wave_digest`; env carries ATELIER_COMPRESS_THRESHOLD.
-    wd_kwargs: dict[str, Any] = {
-        "spawn_fn": spawn_fn,
-        "poll_fn": poll_fn,
-        "summarize_fn": summarize_fn,
-    }
-    if escalate_fn is not None:
-        wd_kwargs["escalate_fn"] = escalate_fn
-    # Fall back to os.environ (mirrors build_spawn_fn_for_project) so a shell-set
-    # ATELIER_COMPRESS_THRESHOLD still wins in the production caller, which passes
-    # env=None. WaveDispatcher's own env=None default stays default-only, so
-    # direct-construction unit tests remain isolated from the ambient shell.
-    wd_kwargs["env"] = env if env is not None else os.environ
-    return WaveDispatcher(db_path, **wd_kwargs)
-
-
 # ── Default per-task model-tier seam (atelier model-tier selection) ─────────
 #
 # The production `model_for` seam: it binds `scripts.model_tier.recommend` to the
-# orchestrator/task context the wave engine has. Phase is a per-CYCLE value (the
-# tasks table has no `phase` column), so it is closed over from the factory's
-# `phase` arg; role is the task's `assigned_to`; difficulty is read from an
-# OPTIONAL per-task `difficulty` field when the planner sets one. The
-# `ATELIER_MODEL_TIER` env pin is honored via the resolved env mapping.
+# orchestrator/task context. Phase is a per-CYCLE value (the tasks table has no
+# `phase` column), so it is closed over from the caller's `phase` arg; role is
+# the task's `assigned_to`; difficulty is read from an OPTIONAL per-task
+# `difficulty` field when the planner sets one. The `ATELIER_MODEL_TIER` env pin
+# is honored via the resolved env mapping. REUSED by the deterministic host's
+# `cli_dispatch._host_model_for` (the only consumer since the M7 bridge-queue
+# removal deleted the WaveDispatcher factories that previously called it).
 
 
 def _default_model_for(
@@ -337,10 +221,9 @@ def _default_model_for(
 
     ``posture`` (M6b-2 R-MODE) — an OPTIONAL one-rung cost↔quality bias threaded
     into ``recommend`` (cost-lean / neutral / opus-lean). It defaults to ``None``
-    (== neutral == NO transform), so the BRIDGE path — which never supplies a
-    posture — is byte-identical to its pre-M6b-2 tier output. The HOST path
-    (``cli_dispatch._host_model_for``) passes the resolved RunMode's posture here so
-    the run-wide posture fans out per task while reusing this ONE shared policy.
+    (== neutral == NO transform). The HOST path (``cli_dispatch._host_model_for``)
+    passes the resolved RunMode's posture here so the run-wide posture fans out
+    per task while reusing this ONE shared policy.
 
     Defensive: a task without ``assigned_to`` / ``difficulty`` simply omits that
     signal; ``recommend`` always returns a valid tier (never raises).
@@ -361,137 +244,3 @@ def _default_model_for(
         )
 
     return model_for
-
-
-# ── Live orchestrator-entry call site (atelier#85) ──────────────────────────
-#
-# #81 (PR #84) shipped `build_wave_dispatcher` above as a tested-but-DORMANT
-# factory: it was never invoked from a live `/atelier:run` orchestrator path.
-# This is the missing call site — the function the orchestrator turn-loop
-# (`internal/dev-dispatch/SKILL.md`, routed from `skills/run/SKILL.md`) calls to
-# obtain the live dispatcher for the current cycle. It composes the SAME #81
-# production seams (`QueueBridgeDispatchTools` + `build_spawn_fn` +
-# `build_poll_fn`) but exposes the orchestrator-context knobs `build_wave_dispatcher`
-# hard-wires (a distinct reply-inbox `role_id_for`, a `teams_root` override for
-# first-touch detection, and a `sleep_fn` for the poll cadence) plus a safe
-# default `briefing_for`. It does NOT modify the #81 internals — it reuses them.
-
-
-def build_wave_dispatcher_for_project(
-    *,
-    db_path: str,
-    team_pk: str,
-    team_id: str,
-    briefing_for: Callable[[Mapping[str, Any], int], str] | None = None,
-    members: list[str] | None = None,
-    team_name: str | None = None,
-    teammate_name_for: Callable[[Mapping[str, Any]], str] | None = None,
-    role_id_for: Callable[[Mapping[str, Any]], str] | None = None,
-    escalate_fn: Callable[[Mapping[str, Any]], None] | None = None,
-    teams_root: str | Path | None = None,
-    env: Mapping[str, str] | None = None,
-    root: str | Path = ".",
-    sleep_fn: Callable[[float], None] | None = None,
-    phase: str | None = None,
-    model_for: Callable[[Mapping[str, Any], int], str | None] | None = None,
-    summarize_fn: Callable[[list[Mapping[str, Any]]], str] | None = None,
-):
-    """Build the live, mode-selected ``WaveDispatcher`` for one cycle from an
-    orchestrator/project context (atelier#85 — the missing #81 call site).
-
-    Resolution + wiring mirrors :func:`build_wave_dispatcher` (env override →
-    persisted ``.ai/atelier.mode`` marker → ``subagent`` default; production
-    queue-bridge seams) but exposes the knobs the orchestrator turn-loop needs:
-
-    * ``briefing_for(task, attempt) -> str`` — the spawn-prompt source. Defaults
-      to a deterministic per-task stub so the dispatcher is constructible from a
-      minimal call site; a real ``/atelier:run`` passes a
-      :func:`scripts.dispatch.compose_briefing` wrapper (keeping the composer the
-      single source of prompt text — it stays mode-agnostic per #61).
-    * ``teammate_name_for(task) -> str`` — task → spawn-identity role-id
-      (agent-team mode). Defaults to ``str(task["id"])``.
-    * ``role_id_for(task) -> str`` — task → the inbox role-id whose
-      ``bridge_messages`` channel carries the worker's terminal reply. Defaults to
-      ``teammate_name_for`` so spawn-identity and reply-inbox stay in lock-step
-      (the #81 default); the orchestrator overrides it when all replies land in a
-      single PM inbox.
-    * ``escalate_fn`` — threaded straight through (``None`` → the engine's
-      guaranteed-emitting default; #87 binds the persona-gap escalation seam here
-      via :func:`scripts.team_meeting.build_persona_gap_escalate_fn`).
-    * ``teams_root`` / ``sleep_fn`` — first-touch config root + poll cadence
-      (both injectable for deterministic tests).
-    * ``phase`` — the cycle's CURRENT dev-arc phase (e.g. ``"review"``,
-      ``"doc"``, ``"tdd:green"``). It is the per-cycle model-tier signal: the
-      orchestrator turn-loop passes the wave's phase here the SAME way it sources
-      the briefing context (the cycle phase is a wave-level value, not a per-task
-      column). Used only by the default ``model_for`` seam.
-    * ``model_for(task, attempt) -> str | None`` — the per-task model-tier seam
-      (atelier model-tier selection). **Defaults** to a
-      :func:`scripts.model_tier.recommend`-backed function that selects a tier
-      alias (``haiku`` | ``sonnet`` | ``opus``) from the cycle ``phase`` + the
-      task's assigned role (``task["assigned_to"]``) + an optional per-task
-      ``difficulty`` field (honoring the ``ATELIER_MODEL_TIER`` env pin). Callers
-      / tests may inject their own; pass an explicit lambda returning ``None`` to
-      force the pre-policy (session-default) behavior. The chosen tier flows into
-      the enqueued ``args_json`` and the bridge-poll servicer passes it to
-      ``Agent(model=...)``.
-
-    Lazy imports keep ``scripts.dispatch`` / ``pm_dispatch`` (and their backend
-    chains) out of the bare ``startup_check`` import path.
-    """
-    from scripts.dispatch import (
-        DEFAULT_TEAMS_ROOT,
-        QueueBridgeDispatchTools,
-        build_poll_fn,
-        build_spawn_fn,
-        resolve_dispatch_mode,
-    )
-    from scripts.pm_dispatch import WaveDispatcher
-
-    if env is not None:
-        mode = resolve_dispatch_mode(env=env, root=root)
-    else:
-        mode = resolve_dispatch_mode(root=root)
-
-    name_for = teammate_name_for or (lambda task: str(task["id"]))
-    # role_id_for falls back to the spawn-identity mapper (the #81 default):
-    # spawn identity and reply inbox stay in lock-step unless the orchestrator
-    # routes all replies into a single PM inbox.
-    reply_for = role_id_for or name_for
-    brief_for = briefing_for or (lambda task, attempt: f"task {task['id']} (attempt {attempt})")
-    resolved_teams_root = teams_root if teams_root is not None else DEFAULT_TEAMS_ROOT
-
-    # Per-task model-tier seam (atelier model-tier selection). Default it to a
-    # scripts.model_tier.recommend-backed function; a caller may inject its own
-    # (or a `lambda task, attempt: None` to force session-default spawns). The
-    # default reads the cycle `phase`, the task's assigned role, and an optional
-    # per-task `difficulty` field, honoring the ATELIER_MODEL_TIER env pin.
-    pick_model = model_for if model_for is not None else _default_model_for(phase, env)
-
-    tools = QueueBridgeDispatchTools(team_pk, db_path=db_path)
-    spawn_fn = build_spawn_fn(
-        mode,
-        tools=tools,
-        briefing_for=brief_for,
-        members=members,
-        team_name=team_name,
-        teammate_name_for=name_for,
-        teams_root=resolved_teams_root,
-        model_for=pick_model,
-    )
-    poll_fn = build_poll_fn(db_path, team_id=team_id, role_id_for=reply_for)
-
-    kwargs: dict[str, Any] = {"spawn_fn": spawn_fn, "poll_fn": poll_fn}
-    if escalate_fn is not None:
-        kwargs["escalate_fn"] = escalate_fn
-    if sleep_fn is not None:
-        kwargs["sleep_fn"] = sleep_fn
-    # Wave-summary context compression seam (additive, back-compatible). `None`
-    # → the engine's deterministic `default_wave_digest` (no LLM dependency); a
-    # caller may inject a real summarizer later through this same seam. `env` is
-    # threaded so the ATELIER_COMPRESS_THRESHOLD override is honored.
-    kwargs["summarize_fn"] = summarize_fn
-    # Fall back to os.environ so a shell-set ATELIER_COMPRESS_THRESHOLD wins in the
-    # production caller (which passes env=None) — mirrors build_spawn_fn_for_project.
-    kwargs["env"] = env if env is not None else os.environ
-    return WaveDispatcher(db_path, **kwargs)

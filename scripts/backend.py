@@ -670,8 +670,8 @@ def find_or_create_role(*, name: str, description: str) -> dict:
 #
 # The team-mode runtime tables (teams, team_members, bridge_messages,
 # team_audit_log) live on the LOCAL `.ai/atelier.db` regardless of detected
-# mode — the same DB the bridge message wire (bridge_send/bridge_read) and the
-# bridge_requests queue write through. "always Local" is enforced here by
+# mode — the same DB the bridge message wire (bridge_send/bridge_read) writes
+# through. "always Local" is enforced here by
 # binding directly to `backend_local`, NEVER `_backend()`: the Memex backend
 # has no team-mode tables, so a mode-dispatched route would fail. This mirrors
 # scripts/dispatch.py's explicit Local-bridge-DB resolution. Callers still go

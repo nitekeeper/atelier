@@ -1,14 +1,20 @@
 ---
-description: Use when tearing down a live agent-team — a graceful (soft) or forced (--hard) abort that records a durable abort-report, sets the team status, and enqueues the TeamDelete the live session then services.
+description: Use when tearing down a live agent-team — a graceful (soft) or forced (--hard) abort that records a durable abort-report postmortem, writes the 'aborted' audit event (the resume signal), sets the team status, and applies the worktree policy.
 ---
 
 # abort
 
-Team-mode lifecycle teardown. Records a durable abort-report, transitions `teams.status`, and enqueues a `team_delete` bridge row for the current team. Python cannot call the session-scoped `TeamDelete` harness tool, so the LIVE orchestrator session finishes the teardown on its bridge-poll loop after this script returns.
+Team-mode lifecycle teardown. Under the host engine the workers are reaped by the
+engine itself — there is no harness team to `TeamDelete`. Abort is therefore a
+**recorder, not a reaper**: it writes a durable abort-report postmortem, an
+`'aborted'` `team_audit_log` event (the authoritative resume signal), transitions
+`teams.status`, and applies the worktree policy.
 
 ## When to use
 
-Call `abort` to deliberately tear down the CURRENT agent-team — the user wants to stop the cycle, or the team has stalled past recovery. (For LEAKED teams from a prior, dead session, use `scripts/sweep_leaked_teams.py` instead; this skill is the in-session teardown.)
+Call `abort` to deliberately tear down the CURRENT agent-team cycle — the user
+wants to stop the cycle, or the team has stalled past recovery. This skill is the
+in-session teardown recorder.
 
 ## Pre-flight (always first)
 
@@ -28,16 +34,21 @@ Branch on the returned `action`:
 
 ## Procedure
 
-### 1. Identify the team_pk
+### 1. Identify the team_pk and team_id
 
-The `--team-pk` is the run/cycle correlation id that scopes the team's bridge queue — the same value passed to `create_team` when the cycle started. The team_id is resolved for you from that cycle's `create_team` bridge row (its `response_json.$.team_id`); pass `--team-id` explicitly only if you already hold it or resolution would fail.
+The `--team-pk` is the run/cycle correlation id that scopes the cycle's records —
+the same value used when the cycle started. The `--team-id` is the team's TEXT id;
+it is **required for the `'aborted'` audit event** (`team_audit_log.team_id`
+references `teams(team_id)`). Pass `--team-id` whenever you hold it — without it
+the audit event is SKIPPED and resume detection cannot find the arc (the
+abort-report is still written).
 
 ### 2. Run the abort script
 
 From the target project root:
 
 ```
-PYTHONPATH=. python3 -m scripts.abort --team-pk <pk> --project-id <teams.project_id> --phase <projects.phase> [--hard] [--reason "<why>"]
+PYTHONPATH=. python3 -m scripts.abort --team-pk <pk> [--team-id <id>] --project-id <teams.project_id> --phase <projects.phase> [--hard] [--reason "<why>"]
 ```
 
 - **soft (default)** — graceful teardown: `teams.status -> 'shutting_down'`.
@@ -47,39 +58,30 @@ PYTHONPATH=. python3 -m scripts.abort --team-pk <pk> --project-id <teams.project
 - `--clean-worktree` — soft path only; remove the worktree iff it is clean (see step 4).
 - **`--project-id <teams.project_id>`** and **`--phase <projects.phase>`** — the #66 resume hooks. The orchestrator already holds the cycle's textual `teams.project_id` correlation string and the live `projects.phase` (the phase the arc is being aborted AT), so pass them BOTH. They are folded into the `aborted` audit payload (the authoritative resume signal) and the abort-report metadata so the NEXT `/atelier:run` pre-flight (`scripts.resume.find_resumable_arc`) can OFFER to continue FROM this abort point (AC3) and force-phase AT it (AC4). **Omitting them is silently degenerate:** `abort_phase`/`project_id` default to `None`, so the resume prompt renders "aborted arc was found at phase `None`" and there is no phase to continue at — the offer still fires (never-silent holds) but its CONTENT is unusable. Always thread both on a live abort.
 
-The script is mode-aware: in **Local mode** it performs the full teardown; in **non-local** mode the state mutators raise `NotImplementedError`, so it WARNs, skips the DB mutations, still writes the report where possible, and returns 0.
+The script is mode-aware: in **Local mode** it performs the full teardown; in **non-local** mode the state mutators are skipped (team-state mutation is Local-only), so it WARNs, writes the report where possible, and returns 0.
 
-### 3. What the script does — and what it CANNOT do
+### 3. What the script does
 
-In Local mode `abort.py` performs three durable writes (the shared core, run by BOTH paths):
+In Local mode `abort.py` performs the durable writes (the shared core, run by BOTH paths):
 
-1. **Abort-report** — `backend.write_document(domain='postmortem', subdomain='abort', ...)`, a durable markdown postmortem. On `--hard` this is written FIRST so the report survives even if a later step fails.
+1. **Abort-report** — `backend.write_document(domain='postmortem', subdomain='abort', ...)`, a durable markdown postmortem. On `--hard` this is written FIRST so the report survives even if a later step fails. (The workspace-less Memex write now persists in non-local mode too — #90 part-3 — so the report holds cross-mode.)
 2. **`teams.status`** — set to `shutting_down` (soft) or `closed` (hard).
-3. **One `team_delete` bridge row** — `kind='team_delete'`, `status='pending'`, scoped to `team_pk`, carrying `args_json={"team_id": ...}`. This both INSTRUCTS the live session to reap the team AND records the teardown — the symmetric subtractor that closes the sweep's orphan-join. A `team_audit_log` `aborted` event is written alongside, carrying the #66 resume hooks (`project_id`, `abort_phase`, `incomplete_task_ids`) threaded from `--project-id` / `--phase` (step 2) — this payload is the AUTHORITATIVE resume signal `scripts.resume.find_resumable_arc` reads on the next pre-flight.
+3. **`'aborted'` `team_audit_log` event** — `backend.write_team_audit(event_type='aborted', ...)`, carrying the #66 resume hooks (`project_id`, `abort_phase`, `incomplete_task_ids`) threaded from `--project-id` / `--phase` (step 2). This payload is the AUTHORITATIVE resume signal `scripts.resume.find_resumable_arc` reads on the next pre-flight (it joins `team_audit_log.team_id -> teams.project_id`, since the workspace-less abort doc carries `project_id=None` at the column level). The event is SKIPPED when `--team-id` is unresolved (the FK to `teams` needs it); the report still records the abort.
+4. **Worktree policy** — applied per step 4. NEVER destroys uncommitted work.
 
-**What the script CANNOT do:** Python cannot call the session-scoped `TeamDelete` harness tool. The script only ENQUEUES the `team_delete` row. The LIVE orchestrator session must finish the teardown ON ITS NEXT TURN:
-
-- **soft** — drive the TM-005 `shutdown_req` / `shutdown_resp` graceful handshake on the `bridge_messages` wire first (each teammate echoes the `request_id` within one turn; see `internal/team-mode-rules/SKILL.md` TM-005). Only AFTER every teammate has acknowledged (or its grace window elapsed) do you service the `team_delete` row by calling `TeamDelete` for that `team_id`.
-- **hard** — skip the handshake. Service the `team_delete` row IMMEDIATELY: call `TeamDelete` per `team_id` on the next turn.
-
-**Servicing is HANDLED HERE, not by the WaveDispatcher's `bridge-poll` servicer.** The `team_delete` / `aborted` lifecycle kinds are NOT in `internal/bridge-poll/SKILL.md`'s closed-enum switch (which services only the four `create_team` / `spawn_teammate` / `send_message` / `spawn_subagent` dispatch kinds and treats anything else as out-of-enum). This abort SKILL is the authority for the lifecycle kinds: after you call `TeamDelete` for a `team_delete` row, mark it serviced yourself so it is not re-picked-up:
-
-```sql
-UPDATE bridge_requests
-SET status = 'ready',
-    completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-WHERE id = :team_delete_row_id;
-```
-
-Flipping the row to `status='ready'` is also what lets `scripts/sweep_leaked_teams.py`'s orphan-join subtract the team (filter (i) matches `team_delete` rows with `status='ready'`). Until you flip it, a soft-aborted team (whose `teams.status` is `shutting_down`, not `closed`) may be re-reported by a later sweep — which is SAFE because TeamDelete is idempotent, but flipping the row promptly closes the window. Any cross-session team config directory left on disk by a crashed prior run is filesystem-only cleanup: `rm -rf ~/.claude/teams/<team_id>/`.
+There is no `team_delete` row to enqueue and no `TeamDelete` handshake to drive — the host engine already reaps the workers. Abort's job is purely the durable record above.
 
 ### 4. Worktree preservation
 
 The script NEVER destroys uncommitted work. If the current worktree is dirty (or its state cannot be read), it is ALWAYS preserved — on `--hard` it is preserved with a warning. A CLEAN worktree is auto-removed only on `--hard`, or on the soft path only when you pass `--clean-worktree`. The actual worktree decision is folded into the report's "what was torn down" section.
 
+### 5. Graceful stop (soft path) — the TM-005 handshake (optional)
+
+The soft path is graceful. If live teammates are still mid-task, the orchestrator MAY drive the TM-005 `shutdown_req` / `shutdown_resp` handshake on the **kept** `bridge_messages` wire first (each teammate echoes the `request_id` within one turn; see `internal/team-mode-rules/SKILL.md` TM-005) so workers wind down cleanly before the cycle stops. This handshake rides the message WIRE only — it is NOT tied to any dispatch-queue row, and abort no longer enqueues one. The `--hard` path skips the handshake entirely.
+
 ## Hard rules
 
-- Never assume `abort.py` deleted the team — it only enqueued the request. The LIVE session MUST service the `team_delete` row, or the team leaks.
-- soft path: complete the TM-005 handshake BEFORE servicing `team_delete`; never reap teammates out-of-band on the graceful path.
+- Abort is a recorder: it writes the postmortem + the `'aborted'` audit event + the status transition. The host engine reaps the workers — there is no team-delete step for the live session to service.
+- Pass `--team-id` whenever you hold it; without it the `'aborted'` audit event (and thus resume detection) is SKIPPED.
 - Never destroy a dirty worktree to force a clean teardown — preservation is intentional.
 - `--db` defaults to `.ai/atelier.db`; pass no db path unless overriding the target.

@@ -1,32 +1,31 @@
 # Aborted-arc resume DETECTOR — atelier#66 [S2] (epic #39 closer, AC3/AC4).
 #
-# Companion to scripts/abort.py (the teardown writer) and
-# scripts/sweep_leaked_teams.py (the orphan finder): where abort.py RECORDS an
-# aborted arc and sweep DISCOVERS leaked team handles, resume.py DETECTS an
-# aborted-but-incomplete arc on the NEXT /atelier:run pre-flight and OFFERS the
-# human a choice (new run vs continue). It is a pure READ — never silent, never
-# mutating.
+# Companion to scripts/abort.py (the abort recorder): where abort.py RECORDS an
+# aborted arc (a postmortem doc + an 'aborted' team_audit_log event), resume.py
+# DETECTS an aborted-but-incomplete arc on the NEXT /atelier:run pre-flight and
+# OFFERS the human a choice (new run vs continue). It is a pure READ — never
+# silent, never mutating.
 #
 # Invoked from scripts/atelier_entrypoint.startup_check() (Local branch only)
 # and surfaced by skills/run/SKILL.md's 'Resume detection' section.
 
 """Never-silent aborted-arc resume DETECTOR for atelier's team lifecycle (#66).
 
-``find_resumable_arc(db_path, *, project_id=None) -> ResumeOffer | None`` mirrors
-``sweep_leaked_teams.py``'s static-JSON1 + bootstrap-safe shape:
+``find_resumable_arc(db_path, *, project_id=None) -> ResumeOffer | None`` is a
+static-JSON1 + bootstrap-safe read:
 
   (0) MODE GATE — ``detect_mode() != 'local'`` returns ``None``. There is no
       Local team-mode dispatch state to resume outside Local mode (mirrors
-      abort/team_teardown's non-local skip), so a Memex-mode pre-flight must NOT
-      surface a resume offer. §17: team-mode dispatch state is Local-only.
+      abort's non-local skip), so a Memex-mode pre-flight must NOT surface a
+      resume offer. §17: team-mode dispatch state is Local-only.
 
   (1) ``apply_migrations`` first (bootstrap-safe — the read must work against a
       fresh DB; the migration registry's UNIQUE filename gate makes this
       idempotent, the analog of kaizen's bridge_db.bootstrap).
 
   (2) Detect an aborted-but-incomplete arc: a team whose LATEST *lifecycle*
-      audit event is ``'aborted'`` (NOT ``'completed'``) AND which has >= 1
-      non-terminal task scoped to its ``team_pk``.
+      audit event is ``'aborted'`` AND which has >= 1 non-terminal task scoped to
+      its ``team_pk``.
 
   (3) Read ``project_id`` + ``abort_phase`` + ``incomplete_task_ids`` from the
       ``'aborted'`` audit payload (``json_extract``) so the SKILL can resume AT
@@ -34,16 +33,21 @@
 
 THE DISCRIMINATOR — latest LIFECYCLE event, NOT teams.status
 ------------------------------------------------------------
-``teams.status='closed'`` is reached by BOTH a hard abort AND a clean finish
-(``team_teardown.record_team_teardown``), so detecting 'aborted' via
-``teams.status`` alone FALSE-POSITIVES on cleanly-finished arcs. The
-authoritative signal is the latest *lifecycle* ``team_audit_log`` event:
-``abort.py`` writes ``event_type='aborted'`` and ``team_teardown.py`` writes
-``event_type='completed'``. We compare ONLY those two terminal lifecycle events
-— ``team_audit_log`` also carries many NON-lifecycle events (``side_query``,
-``roster_consent``, ``persona_gap_escalation``, dispatch/wave rows), and one of
-those landing AFTER an abort must NOT mask it. So the query keys on the latest
-row whose ``event_type IN ('aborted','completed')``, not the absolute latest row.
+``teams.status='closed'`` is reached by a hard abort AND would be by any clean
+finish, so detecting 'aborted' via ``teams.status`` alone could FALSE-POSITIVE.
+The authoritative signal is the latest *lifecycle* ``team_audit_log`` event:
+``abort.py`` writes ``event_type='aborted'``. (The 'completed' lifecycle event
+is no longer written — its writer, the team-teardown recorder, was retired in
+the host-engine migration — so today every latest-lifecycle row is an 'aborted'
+one; the query still keys on the LATEST lifecycle event per team so an aborted
+arc's latest is, correctly, 'aborted'.) We compare ONLY the terminal lifecycle
+events — ``team_audit_log`` also carries many NON-lifecycle events
+(``side_query``, ``roster_consent``, ``persona_gap_escalation``, dispatch/wave
+rows), and one of those landing AFTER an abort must NOT mask it. So the query
+keys on the latest row whose ``event_type IN ('aborted','completed')``, not the
+absolute latest row. ('completed' is kept in the discrimination set so a
+historical 'completed' row from before the retirement still correctly suppresses
+a resume offer.)
 
 WHY join the project via the audit row, NOT the abort doc
 ---------------------------------------------------------
@@ -75,14 +79,16 @@ from scripts.migrate import apply_migrations
 
 # Migrations live under migrations/shared (001-049) + migrations/local-only
 # (050+); apply_migrations is idempotent (the `migrations` UNIQUE filename gate
-# skips already-applied files), so running it on read is the bootstrap-safe
-# analog of sweep_leaked_teams' apply-on-read — it guarantees teams + tasks +
-# team_audit_log exist before the detection query runs.
+# skips already-applied files), so running it on read is bootstrap-safe — it
+# guarantees teams + tasks + team_audit_log exist before the detection query
+# runs.
 _MIGRATIONS_DIR: Path = Path(__file__).parent.parent / "migrations"
 
-# The two TERMINAL LIFECYCLE event_types. abort.py writes 'aborted';
-# team_teardown.py writes 'completed'. These — and ONLY these — discriminate a
-# resumable (aborted) arc from a cleanly-finished one. Every other team_audit_log
+# The TERMINAL LIFECYCLE event_types. abort.py writes 'aborted'. ('completed' is
+# no longer written — the team-teardown recorder that wrote it was retired in the
+# host-engine migration — but it is retained in this set so a historical
+# 'completed' row still discriminates a cleanly-finished arc.) These — and ONLY
+# these — discriminate a resumable (aborted) arc; every other team_audit_log
 # event_type (side_query, roster_consent, persona_gap_escalation, dispatch/wave
 # rows, ...) is NON-lifecycle and must NOT participate in the discrimination, or
 # a post-abort non-lifecycle row would mask the abort.
@@ -203,8 +209,8 @@ def find_resumable_arc(db_path: str | Path, *, project_id: str | None = None) ->
     omitted, it matches every aborted team and returns the first by team_id.
     """
     # (0) MODE GATE — outside Local there is no Local team-mode dispatch state to
-    #     resume; short-circuit BEFORE touching the DB (mirrors abort/team_teardown
-    #     non-local skip; keeps resume Local-gated and avoids false Memex offers).
+    #     resume; short-circuit BEFORE touching the DB (mirrors abort's non-local
+    #     skip; keeps resume Local-gated and avoids false Memex offers).
     if mode_detector.detect_mode() != "local":
         return None
 
@@ -238,9 +244,8 @@ def _connect(db_path: str | Path):
     """Open a SQLite connection with WAL + a 5s busy timeout.
 
     Both PRAGMAs are connection-scoped, so they are re-applied on every open
-    (matches sweep_leaked_teams._connect + abort._connect). Imported lazily-style
-    at call time to keep the module's bare import light, mirroring the sibling
-    teardown scripts' convention."""
+    (matches abort._connect). Imported lazily-style at call time to keep the
+    module's bare import light, mirroring the sibling scripts' convention."""
     import sqlite3
 
     con = sqlite3.connect(str(db_path))

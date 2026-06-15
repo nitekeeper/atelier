@@ -1,35 +1,41 @@
 """pytest suite for the atelier#61 mode-specific dispatch seam in
 ``scripts/dispatch.py``.
 
-#61 turns ``pm_dispatch.WaveDispatcher``'s mode-agnostic ``spawn_fn`` seam
-(which carries zero mode knowledge — its docstring says "atelier#61 owns
-spawning") into the concrete mode-specific tool action:
+#61 turns the mode-agnostic dispatch decision into the concrete mode-specific
+tool action:
 
 * sub-agent mode => one fire-and-forget ``Agent`` spawn per worker attempt;
-* agent-team mode => ``TeamCreate`` once per cycle, then per-task FIRST-TOUCH
-  ``Agent`` spawn / SUBSEQUENT ``SendMessage``.
+* agent-team mode => per-task FIRST-TOUCH ``Agent`` spawn / SUBSEQUENT
+  ``SendMessage``.
 
 ``scripts/dispatch.py`` is pure Python and cannot call the Claude Code harness
 tools directly, so all tool actions route through the injected
-:class:`~scripts.dispatch.DispatchTools` Protocol — production binds a
-queue-bridge wrapper (deferred), TESTS inject the ``_FakeTools`` recorder below.
-This mirrors ``tests/test_pm_dispatch.py``'s style: inject fakes, record calls,
-assert on the recorded sequence — no real subprocesses, no real harness tools.
+:class:`~scripts.dispatch.DispatchTools` Protocol — production binds the
+deterministic host's ``CliDispatchTools``, TESTS inject the ``_FakeTools``
+recorder below. This mirrors ``tests/test_pm_dispatch.py``'s style: inject fakes,
+record calls, assert on the recorded sequence — no real subprocesses, no real
+harness tools.
+
+NOTE (M7): the legacy production dispatch-queue transport (its queue-bridge
+dispatch wrapper, the WaveDispatcher seam factories, the request-queue table, and
+its ``BRIDGE_*`` tunables) was REMOVED. The
+tests that exercised it were deleted; what remains here covers the kept
+mode-seam surface — ``dispatch_task`` (the mode-branching dispatcher),
+``resolve_dispatch_mode`` / ``persist_dispatch_mode`` (mode selection),
+``_team_member_names`` (first-touch detection), and ``_parse_reply_envelope``
+(the kept fence-unescape helper used by ``status.py`` and the host poll).
 
 Matrix covered here:
 
-* sub-agent: ``build_spawn_fn("subagent")(task, attempt)`` records exactly ONE
-  ``spawn_subagent`` with the right ``(task_id, attempt, briefing)`` and NOTHING
-  team-related.
+* sub-agent: ``dispatch_task("subagent", ...)`` records exactly ONE
+  ``spawn_subagent`` and NOTHING team-related.
 * agent-team FIRST-TOUCH (#59 gap): config.json WITHOUT the role's name =>
   ``spawn_teammate`` (an Agent spawn), NOT ``send_message``.
 * agent-team SUBSEQUENT: config.json WITH the role's name => ``send_message``,
   NOT ``spawn_teammate``.
 * missing config.json => first-touch (``spawn_teammate``).
-* TeamCreate-once: across multiple ``spawn_fn`` calls, ``create_team`` fires
-  exactly once.
 * unknown mode => raises ``UnknownDispatchModeError`` (a ``DispatchError``).
-* ``resolve_dispatch_mode``: env set vs. default vs. bad value.
+* ``resolve_dispatch_mode``: env set vs. marker vs. default vs. bad value.
 * NON-VACUOUS: a test that would FAIL if first-touch collapsed to always-
   ``SendMessage`` (proves the Agent-spawn-on-first-touch is enforced).
 """
@@ -48,7 +54,6 @@ from scripts.dispatch import (
     DispatchError,
     UnknownDispatchModeError,
     _team_member_names,
-    build_spawn_fn,
     dispatch_task,
     persist_dispatch_mode,
     resolve_dispatch_mode,
@@ -59,7 +64,7 @@ from scripts.dispatch import (
 
 class _FakeTools:
     """Records every DispatchTools call in order. ``create_team`` returns a
-    fixed team_id so the factory's once-per-cycle capture can be asserted."""
+    fixed team_id so a once-per-cycle capture can be asserted."""
 
     def __init__(self, team_id: str = "team-xyz"):
         self._team_id = team_id
@@ -98,12 +103,6 @@ def _write_team_config(teams_root, team_id: str, member_names: list[str]) -> Non
         json.dumps({"members": [{"name": n} for n in member_names]}),
         encoding="utf-8",
     )
-
-
-def _briefing_for(text: str = "BRIEFING"):
-    """A trivial briefing source. Embeds the attempt so attempt-specific
-    re-rendering is observable."""
-    return lambda task, attempt: f"{text}:{task['id']}:{attempt}"
 
 
 # ── resolve_dispatch_mode: env set vs default vs bad ────────────────────────
@@ -227,26 +226,7 @@ def test_team_member_names_tolerates_bad_member_shapes(tmp_path):
     assert _team_member_names("t1", tmp_path) == {"pm-1"}
 
 
-# ── sub-agent path: spawn_subagent fire-and-forget only ─────────────────────
-
-
-def test_subagent_build_spawn_fn_records_one_spawn_subagent(tmp_path):
-    """sub-agent mode: a single spawn_fn call => exactly one spawn_subagent with
-    the correct (task_id, attempt, briefing) and NO team-related calls."""
-    tools = _FakeTools()
-    spawn = build_spawn_fn(
-        DISPATCH_MODE_SUBAGENT,
-        tools=tools,
-        briefing_for=_briefing_for(),
-        teams_root=tmp_path,
-    )
-    spawn({"id": 42}, 3)
-
-    assert tools.calls == [("spawn_subagent", 42, 3, "BRIEFING:42:3")]
-    # NOTHING team-related.
-    assert "create_team" not in tools.names()
-    assert "spawn_teammate" not in tools.names()
-    assert "send_message" not in tools.names()
+# ── sub-agent path: dispatch_task spawn_subagent fire-and-forget only ────────
 
 
 def test_subagent_dispatch_task_ignores_team_args(tmp_path):
@@ -263,6 +243,10 @@ def test_subagent_dispatch_task_ignores_team_args(tmp_path):
         teams_root=tmp_path,
     )
     assert tools.calls == [("spawn_subagent", "t9", 1, "B")]
+    # NOTHING team-related.
+    assert "create_team" not in tools.names()
+    assert "spawn_teammate" not in tools.names()
+    assert "send_message" not in tools.names()
 
 
 # ── agent-team FIRST-TOUCH (#59 gap test) ───────────────────────────────────
@@ -402,67 +386,54 @@ def test_agent_team_dispatch_requires_team_id_and_name(tmp_path):
     assert tools.calls == []  # nothing dispatched on a guard failure
 
 
-# ── TeamCreate-once across multiple spawn_fn calls ──────────────────────────
+# ── model-tier threading through dispatch_task (atelier) ─────────────────────
 
 
-def test_build_spawn_fn_team_create_called_exactly_once(tmp_path):
-    """Across MANY spawn_fn calls in agent-team mode, create_team fires exactly
-    once per cycle; every dispatch reuses the captured team_id."""
-    tools = _FakeTools(team_id="T-CAPTURED")
-    # No member is ever written, so every dispatch is a (first-touch) spawn —
-    # which keeps the assertion focused on the create_team count.
-    spawn = build_spawn_fn(
+def test_dispatch_task_threads_model_into_subagent_spawn(tmp_path):
+    """A non-None model is threaded into the spawn_subagent call (model-tier
+    selection); a model-less dispatch is byte-identical to the pre-policy shape."""
+    tools = _FakeTools()
+    dispatch_task(
+        DISPATCH_MODE_SUBAGENT,
+        tools=tools,
+        task={"id": "t1"},
+        attempt=1,
+        briefing="B",
+        teams_root=tmp_path,
+        model="opus",
+    )
+    assert tools.calls == [("spawn_subagent", "t1", 1, "B", "opus")]
+
+
+def test_dispatch_task_no_model_is_byte_identical(tmp_path):
+    """No model => no trailing model element (back-compat)."""
+    tools = _FakeTools()
+    dispatch_task(
+        DISPATCH_MODE_SUBAGENT,
+        tools=tools,
+        task={"id": "t1"},
+        attempt=1,
+        briefing="B",
+        teams_root=tmp_path,
+    )
+    assert tools.calls == [("spawn_subagent", "t1", 1, "B")]
+
+
+def test_dispatch_task_threads_model_into_first_touch(tmp_path):
+    """In agent-team first-touch the model is threaded into spawn_teammate."""
+    tools = _FakeTools(team_id="T")
+    dispatch_task(
         DISPATCH_MODE_AGENT_TEAM,
         tools=tools,
-        briefing_for=_briefing_for(),
-        members=["pm-1", "sdet-1", "be-1"],
-        team_name="cycle-team",
-        teammate_name_for=lambda task: str(task["id"]),
+        task={"id": "t1"},
+        attempt=1,
+        briefing="B",
+        team_id="T",
+        teammate_name="sdet-1",
         teams_root=tmp_path,
+        model="sonnet",
     )
-
-    for i in range(4):
-        spawn({"id": f"role-{i}"}, 1)
-
-    create_calls = [c for c in tools.calls if c[0] == "create_team"]
-    assert len(create_calls) == 1
-    assert create_calls[0] == ("create_team", "cycle-team", ("pm-1", "sdet-1", "be-1"))
-    # Every spawn reused the SAME captured team_id.
-    spawn_calls = [c for c in tools.calls if c[0] == "spawn_teammate"]
-    assert len(spawn_calls) == 4
-    assert all(c[1] == "T-CAPTURED" for c in spawn_calls)
-
-
-def test_build_spawn_fn_subagent_never_creates_team(tmp_path):
-    """sub-agent mode never touches create_team even across many spawns."""
-    tools = _FakeTools()
-    spawn = build_spawn_fn(
-        DISPATCH_MODE_SUBAGENT,
-        tools=tools,
-        briefing_for=_briefing_for(),
-        teams_root=tmp_path,
-    )
-    for i in range(3):
-        spawn({"id": i}, 1)
-    assert tools.names() == ["spawn_subagent", "spawn_subagent", "spawn_subagent"]
-    assert "create_team" not in tools.names()
-
-
-def test_build_spawn_fn_matches_wavedispatcher_seam(tmp_path):
-    """The returned spawn_fn has the WaveDispatcher seam shape
-    ``spawn_fn(task, attempt) -> None`` (the whole point: a later production
-    issue can drop it into WaveDispatcher unchanged)."""
-    tools = _FakeTools()
-    spawn = build_spawn_fn(
-        DISPATCH_MODE_SUBAGENT,
-        tools=tools,
-        briefing_for=_briefing_for(),
-        teams_root=tmp_path,
-    )
-    # Positional (task, attempt) call, returns None.
-    result = spawn({"id": "x"}, 5)
-    assert result is None
-    assert tools.calls == [("spawn_subagent", "x", 5, "BRIEFING:x:5")]
+    assert tools.calls == [("spawn_teammate", "T", "sdet-1", "B", "sonnet")]
 
 
 # ── unknown mode raises ─────────────────────────────────────────────────────
@@ -484,388 +455,10 @@ def test_dispatch_task_unknown_mode_raises(tmp_path):
     assert tools.calls == []
 
 
-def test_build_spawn_fn_unknown_mode_raises_at_build_time(tmp_path):
-    """A bad mode fails at factory-build time, not on first dispatch."""
-    with pytest.raises(UnknownDispatchModeError):
-        build_spawn_fn(
-            "nonsense",
-            tools=_FakeTools(),
-            briefing_for=_briefing_for(),
-            teams_root=tmp_path,
-        )
-
-
-def test_build_spawn_fn_agent_team_requires_team_name(tmp_path):
-    with pytest.raises(DispatchError):
-        build_spawn_fn(
-            DISPATCH_MODE_AGENT_TEAM,
-            tools=_FakeTools(),
-            briefing_for=_briefing_for(),
-            members=["pm-1"],
-            team_name=None,
-            teams_root=tmp_path,
-        )
-
-
-# ── atelier#81: production queue-bridge transport (QueueBridgeDispatchTools) ──
-#
-# These exercise the LIVE binding of the DispatchTools Protocol against the real
-# bridge_requests table (migrations/shared/008) — no mocks of the queue itself
-# (the orchestrator servicer is the only thing faked, via direct row UPDATEs).
-
-import sqlite3  # noqa: E402 — co-located with the production-wrapper tests below
-from pathlib import Path  # noqa: E402
-
-from scripts.dispatch import (  # noqa: E402
-    BRIDGE_REQUEST_KINDS,
-    BridgeDispatchError,
-    BridgeTimeoutError,
-    QueueBridgeDispatchTools,
-    build_poll_fn,
-)
-from scripts.migrate import apply_migrations  # noqa: E402
-
-_MIGRATIONS_SHARED = Path(__file__).resolve().parent.parent / "migrations" / "shared"
-
-
-@pytest.fixture
-def bridge_db(tmp_path):
-    """A real Local DB with shared/ migrations applied — carries both the
-    bridge_requests request-queue (008) and the bridge_messages wire (003)."""
-    db = tmp_path / "atelier.db"
-    apply_migrations(str(db), _MIGRATIONS_SHARED)
-    return str(db)
-
-
-def _rows(db_path, **where):
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-    try:
-        clause = " AND ".join(f"{k} = ?" for k in where)
-        sql = "SELECT * FROM bridge_requests"
-        if clause:
-            sql += f" WHERE {clause}"
-        sql += " ORDER BY id"
-        return [dict(r) for r in con.execute(sql, tuple(where.values())).fetchall()]
-    finally:
-        con.close()
-
-
-def _service_row(db_path, row_id, *, status, response=None, error=None):
-    """Stand in for the orchestrator servicer: flip a pending row to ready/error."""
-    con = sqlite3.connect(db_path)
-    try:
-        con.execute(
-            "UPDATE bridge_requests SET status = ?, response_json = ?, error_text = ?, "
-            "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
-            (status, json.dumps(response) if response is not None else None, error, row_id),
-        )
-        con.commit()
-    finally:
-        con.close()
-
-
-def test_kind_enum_string_identical_to_protocol_method_names():
-    """The 008 kind enum MUST be string-identical to the DispatchTools method
-    names so the servicer maps kind->method by name with zero translation."""
-    expected = {"create_team", "spawn_teammate", "send_message", "spawn_subagent"}
-    assert expected == BRIDGE_REQUEST_KINDS
-
-
-def test_fire_and_forget_methods_enqueue_and_return_none(bridge_db):
-    """spawn_teammate / send_message / spawn_subagent each enqueue exactly ONE
-    pending row and return None WITHOUT polling (fire-and-forget)."""
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-
-    assert tools.spawn_teammate("T", "sdet-1", "BRIEF") is None
-    assert tools.send_message("T", "be-1", "MSG") is None
-    assert tools.spawn_subagent("task-7", 2, "PROMPT") is None
-
-    rows = _rows(bridge_db)
-    assert [r["kind"] for r in rows] == ["spawn_teammate", "send_message", "spawn_subagent"]
-    # Every fire-and-forget row is DURABLE + still pending (never serviced here).
-    assert all(r["status"] == "pending" for r in rows)
-    assert all(r["team_pk"] == "cycle-1" for r in rows)
-    # args_json round-trips the tool args as DATA.
-    assert json.loads(rows[0]["args_json"]) == {"team_id": "T", "name": "sdet-1", "prompt": "BRIEF"}
-    assert json.loads(rows[2]["args_json"]) == {
-        "task_id": "task-7",
-        "attempt": 2,
-        "prompt": "PROMPT",
-    }
-
-
-def test_create_team_blocks_until_ready_then_returns_team_id(bridge_db):
-    """create_team enqueues, polls its OWN row, and returns the serviced
-    team_id once the row flips to 'ready'. (Servicer flips it after enqueue.)"""
-    ticks = {"n": 0}
-
-    def fake_clock():
-        return float(ticks["n"])
-
-    def fake_sleep(_seconds):
-        # Simulate the orchestrator servicing the row on the 2nd poll.
-        ticks["n"] += 1
-        if ticks["n"] == 2:
-            pending = _rows(bridge_db, kind="create_team", status="pending")
-            _service_row(bridge_db, pending[0]["id"], status="ready", response={"team_id": "T-99"})
-
-    tools = QueueBridgeDispatchTools(
-        "cycle-1", db_path=bridge_db, clock=fake_clock, sleep_fn=fake_sleep
-    )
-    team_id = tools.create_team("cycle-team", ["pm-1", "sdet-1"])
-    assert team_id == "T-99"
-    # The row was enqueued with the right kind + args, then serviced to ready.
-    row = _rows(bridge_db, kind="create_team")[0]
-    assert row["status"] == "ready"
-    assert json.loads(row["args_json"]) == {"name": "cycle-team", "members": ["pm-1", "sdet-1"]}
-
-
-def test_create_team_raises_on_error_status(bridge_db):
-    """A serviced-but-FAILED row (status='error') makes create_team RAISE —
-    the 3-state status is exactly why 'error' exists (no infinite spin)."""
-
-    def fake_sleep(_seconds):
-        pending = _rows(bridge_db, kind="create_team", status="pending")
-        if pending:
-            _service_row(bridge_db, pending[0]["id"], status="error", error="TeamCreate denied")
-
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, sleep_fn=fake_sleep)
-    with pytest.raises(BridgeDispatchError, match="TeamCreate denied"):
-        tools.create_team("cycle-team", ["pm-1"])
-
-
-def test_create_team_times_out_and_raises_never_spins(bridge_db):
-    """If the orchestrator never services the row, create_team RAISES at the
-    bounded PER_CALL_TIMEOUT_S — never an unbounded spin."""
-    ticks = {"n": 0}
-
-    def fake_clock():
-        # Jump straight past the budget on the second reading.
-        ticks["n"] += 1
-        return 0.0 if ticks["n"] == 1 else QueueBridgeDispatchTools.PER_CALL_TIMEOUT_S + 1.0
-
-    tools = QueueBridgeDispatchTools(
-        "cycle-1", db_path=bridge_db, clock=fake_clock, sleep_fn=lambda _s: None
-    )
-    with pytest.raises(BridgeDispatchError, match="timed out"):
-        tools.create_team("cycle-team", ["pm-1"])
-    # The row is still pending (never serviced) — durable, not silently dropped.
-    assert _rows(bridge_db, kind="create_team")[0]["status"] == "pending"
-
-
-def test_create_team_timeout_is_not_retried(bridge_db, monkeypatch):
-    """A timeout (nobody serviced the row) is FAIL-FAST — it must NOT be retried
-    even with retries configured. Retrying a timeout re-spends a fresh
-    PER_CALL_TIMEOUT_S per attempt and (with a non-advancing clock) spins the
-    inner poll forever — the regression that hung the suite. Assert
-    _create_team_once runs EXACTLY ONCE on a timeout regardless of the retry
-    budget. (A servicer-REPORTED 'error' IS still retried — see the e2e test.)"""
-    monkeypatch.setenv("ATELIER_BRIDGE_SPAWN_RETRIES", "3")  # would be 4 attempts if retried
-    # Strictly-advancing clock: each read jumps a full budget, so the deadline is
-    # crossed within the first attempt no matter how many internal reads (debounce
-    # window, poll) precede the check.
-    ticks = {"n": 0}
-
-    def fake_clock():
-        ticks["n"] += 1
-        return ticks["n"] * QueueBridgeDispatchTools.PER_CALL_TIMEOUT_S
-
-    tools = QueueBridgeDispatchTools(
-        "cycle-1", db_path=bridge_db, clock=fake_clock, sleep_fn=lambda _s: None
-    )
-    calls = {"n": 0}
-    real_once = tools._create_team_once
-
-    def counting_once(name, members):
-        calls["n"] += 1
-        return real_once(name, members)
-
-    monkeypatch.setattr(tools, "_create_team_once", counting_once)
-    with pytest.raises(BridgeTimeoutError, match="timed out"):
-        tools.create_team("cycle-team", ["pm-1"])
-    assert calls["n"] == 1  # EXACTLY one attempt — the timeout was not retried.
-
-
-def test_breaker_counts_logical_failures_not_internal_retries(bridge_db, monkeypatch):
-    """A single create_team that FULLY fails (1 initial + N retries) counts as
-    exactly ONE consecutive failure toward the breaker — not N+1. Otherwise one
-    dead-team create_team with retries=2 would trip a threshold-3 breaker on its
-    own. Guards MINOR-3 from the F9 review."""
-    monkeypatch.setenv("ATELIER_BRIDGE_SPAWN_RETRIES", "2")  # 1 initial + 2 retries
-    monkeypatch.setenv("ATELIER_BRIDGE_BREAKER_THRESHOLD", "3")
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, sleep_fn=lambda _s: None)
-
-    def always_servicer_error(name, members):
-        # A retryable servicer-REPORTED error (not a timeout) on every attempt.
-        raise BridgeDispatchError("create_team servicer error (injected)")
-
-    monkeypatch.setattr(tools, "_create_team_once", always_servicer_error)
-    with pytest.raises(BridgeDispatchError, match="servicer error"):
-        tools.create_team("cycle-team", ["pm-1"])
-    # ONE logical failure → counter == 1 (NOT spawn_retries+1 == 3); breaker stays
-    # below its threshold of 3, so a single dead team does not open it on its own.
-    assert tools._consecutive_failures == 1
-
-
-def test_create_team_raises_on_ready_without_team_id(bridge_db):
-    """A 'ready' row whose response_json lacks a team_id string is a contract
-    violation → raise (never return a bogus team_id)."""
-
-    def fake_sleep(_seconds):
-        pending = _rows(bridge_db, kind="create_team", status="pending")
-        if pending:
-            _service_row(bridge_db, pending[0]["id"], status="ready", response={"wrong": "key"})
-
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, sleep_fn=fake_sleep)
-    with pytest.raises(BridgeDispatchError, match="team_id"):
-        tools.create_team("cycle-team", ["pm-1"])
-
-
-def test_enqueue_rejects_out_of_enum_kind(bridge_db):
-    """Fail-closed: an out-of-enum kind is rejected at enqueue BEFORE it can
-    reach the SQLite CHECK (clear BridgeDispatchError, not an IntegrityError)."""
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-    with pytest.raises(BridgeDispatchError, match="out-of-enum"):
-        tools._enqueue("team_delete", {"team_id": "T"})  # not a DispatchTools method
-    # Nothing was enqueued.
-    assert _rows(bridge_db) == []
-
-
-def test_sqlite_check_rejects_out_of_enum_kind(bridge_db):
-    """Defense in depth: even a direct INSERT bypassing the wrapper is rejected
-    by the 008 CHECK constraint (the closed enum is enforced at the DB too)."""
-    con = sqlite3.connect(bridge_db)
-    try:
-        with pytest.raises(sqlite3.IntegrityError):
-            con.execute(
-                "INSERT INTO bridge_requests (team_pk, kind, args_json) VALUES (?, ?, ?)",
-                ("cycle-1", "rm_rf_slash", "{}"),
-            )
-            con.commit()
-    finally:
-        con.close()
-
-
-# ── poll_fn: terminal-reply-envelope read from bridge_messages ──────────────
-
-
-def _seed_team_with_member(db_path, team_id, role_id):
-    """Stand up a team + member + persona snapshot so bridge_read membership
-    passes and a reply row can be seeded."""
-    con = sqlite3.connect(db_path)
-    try:
-        con.execute("PRAGMA foreign_keys=ON")
-        con.execute(
-            "INSERT INTO persona_snapshots (persona_version, persona_blob) VALUES ('v1', '{}')"
-        )
-        con.execute(
-            "INSERT INTO teams (team_id, project_id, lead_role, status) VALUES (?, 'P', ?, 'active')",
-            (team_id, role_id),
-        )
-        con.execute(
-            "INSERT INTO team_members (team_id, role_id, member_name, persona_snapshot_id) "
-            "VALUES (?, ?, ?, 1)",
-            (team_id, role_id, role_id),
-        )
-        con.commit()
-    finally:
-        con.close()
-
-
-def _seed_reply(db_path, team_id, recipient, seq, sender, payload):
-    con = sqlite3.connect(db_path)
-    try:
-        con.execute("PRAGMA foreign_keys=ON")
-        con.execute(
-            "INSERT INTO bridge_messages (team_id, recipient, seq, sender_id, kind, payload, "
-            "persona_snapshot_id) VALUES (?, ?, ?, ?, 'reply', ?, 1)",
-            (team_id, recipient, seq, sender, payload),
-        )
-        con.commit()
-    finally:
-        con.close()
-
-
-def _terminal_envelope(task_id, attempt, status="done"):
-    return json.dumps(
-        {
-            "type": "task_result",
-            "task_id": task_id,
-            "attempt": attempt,
-            "status": status,
-            "artifacts": ["scripts/foo.py"],
-        }
-    )
-
-
-def test_poll_fn_returns_validated_terminal_envelope(bridge_db):
-    """poll_fn reads the worker's terminal reply from bridge_messages, validates
-    it fail-closed, and returns the parsed Mapping."""
-    _seed_team_with_member(bridge_db, "T", "pm-1")
-    # The reply lands in the PM's inbox (recipient='pm-1') from the worker.
-    _seed_reply(bridge_db, "T", "pm-1", 1, "pm-1", _terminal_envelope("task-1", 1, "done"))
-
-    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
-    result = poll({"id": "task-1"}, 1)
-    assert result is not None
-    assert result["status"] == "done"
-    assert result["task_id"] == "task-1"
-
-
-def test_poll_fn_returns_none_when_no_reply(bridge_db):
-    """No reply row yet => None (NOT {}), so the wave barrier HOLDS."""
-    _seed_team_with_member(bridge_db, "T", "pm-1")
-    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
-    assert poll({"id": "task-1"}, 1) is None
-
-
-def test_poll_fn_holds_barrier_on_non_terminal_status(bridge_db):
-    """A VALID but non-terminal (blocked / needs-input) reply => None (the
-    barrier holds; blocked/needs-input also emit replies per 006)."""
-    _seed_team_with_member(bridge_db, "T", "pm-1")
-    blocked = json.dumps(
-        {
-            "type": "task_result",
-            "task_id": "task-1",
-            "attempt": 1,
-            "status": "blocked",
-            "artifacts": [],
-        }
-    )
-    _seed_reply(bridge_db, "T", "pm-1", 1, "pm-1", blocked)
-    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
-    assert poll({"id": "task-1"}, 1) is None
-
-
-def test_poll_fn_fail_closed_on_malformed_envelope(bridge_db):
-    """A malformed / non-JSON reply => None (fail-closed: never a false advance,
-    never a crash)."""
-    _seed_team_with_member(bridge_db, "T", "pm-1")
-    _seed_reply(bridge_db, "T", "pm-1", 1, "pm-1", "this is not a JSON envelope at all")
-    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
-    assert poll({"id": "task-1"}, 1) is None
-
-
-def test_poll_fn_rejects_cross_task_and_attempt_spoof(bridge_db):
-    """A terminal envelope whose task_id/attempt mismatch the dispatch record is
-    rejected by validate_envelope => None (anti cross-task spoof)."""
-    _seed_team_with_member(bridge_db, "T", "pm-1")
-    # Envelope claims task-OTHER / attempt 9, but we dispatched task-1 / attempt 1.
-    _seed_reply(bridge_db, "T", "pm-1", 1, "pm-1", _terminal_envelope("task-OTHER", 9, "done"))
-    poll = build_poll_fn(bridge_db, team_id="T", role_id_for=lambda task: "pm-1")
-    assert poll({"id": "task-1"}, 1) is None
-
-
-def test_poll_fn_returns_none_on_read_error(bridge_db):
-    """If the team does not exist yet (read raises), poll_fn HOLDS the barrier
-    (returns None) rather than crashing or false-advancing."""
-    # No team seeded => bridge_read raises ChannelMissingError internally.
-    poll = build_poll_fn(bridge_db, team_id="GHOST", role_id_for=lambda task: "pm-1")
-    assert poll({"id": "task-1"}, 1) is None
-
-
 # ── fence round-trip: _parse_reply_envelope reverses bridge_read._fence ──────
+#
+# _parse_reply_envelope is KEPT (the message-WIRE fence helper; used by
+# status.py and the host poll). It is unrelated to the removed dispatch queue.
 
 
 def test_parse_reply_envelope_round_trips_real_fence():
@@ -898,421 +491,3 @@ def test_parse_reply_envelope_returns_none_on_non_object():
     assert _parse_reply_envelope("[1, 2, 3]") is None  # JSON array, not an object
     assert _parse_reply_envelope(None) is None
     assert _parse_reply_envelope(b"bytes") is None
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# atelier#66 [S3] AUDIT-NOTES — both-mode parity coverage map for #57-#65
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# #66 (epic #39 closer, AC5/AC6/AC7) requires every mode-dispatched DURABLE
-# write added by #57-#65 to be exercised in BOTH Local and Memex mode. The audit
-# surfaced COVERAGE gaps (not real bugs — no durable write is hard-wired to the
-# wrong mode), each now closed by ONE focused force-Memex test using the
-# canonical hermetic stub set (detect_mode->'memex' + backend._backend +
-# backend._backend_is_memex, spying the backend_memex LEAF; conftest autouse
-# _clear_mode_cache + _stub_singleton_workspace neutralize the registry):
-#
-#   T1  scripts/dispatch.py::_resolve_local_bridge_db   (this file, below)
-#   T2  scripts/backend.py::write_task team_pk fold      (test_backend_dispatch.py)
-#   T3  scripts/planner.py::persist_tasks parallel_group (test_planner.py)
-#   T4  scripts/tasks.py status transitions (#60)        (test_pm_dispatch.py)
-#   T5  scripts/documents.py::write_spec_amendment (#62) (test_spec_versioning.py)
-#   T6  scripts/side_query.py + scripts/roster_extension (test_side_query.py /
-#                                                          test_roster_extension.py)
-#
-# DELIBERATE EXCLUSIONS — these are CORRECTLY NOT both-mode-parity targets; the
-# audit deliverable is documenting WHY, so a future maintainer does not "fix"
-# them by adding a Memex route (which would itself be the §17 bug):
-#
-#   • scripts/dag.py — PURE (no I/O: no backend/sqlite/file imports). Mode is
-#     irrelevant; it operates on in-memory task-graph dicts. No write to route.
-#
-#   • scripts/team_meeting.py — bridge_send (the always-Local message wire) +
-#     backend.write_team_audit ONLY (team_meeting.py:458/478). team_audit_log is
-#     ALWAYS-LOCAL by §17 (backend.write_team_audit binds backend_local directly,
-#     mode-agnostic — backend.py:669-699), and bridge_send rides the same Local
-#     wire. A Memex route here would FAIL (Memex has no team-mode tables) — so
-#     "always-Local" IS the correct posture; parametrizing it over Memex would
-#     assert the bug, not the contract.
-#
-#   • scripts/status.py — explicitly Local-ONLY by gate (status.py:554:
-#     detect_mode() != "local" -> prints a notice + returns 0; covered by
-#     test_status.py). It renders the migration-006 PM dispatch-state columns,
-#     which are Local-only (the same reason tasks._dispatch_state_memex_guard
-#     raises in Memex mode — see T4 in test_pm_dispatch.py). No Memex analog.
-#
-#   • scripts/tasks.py PM dispatch-state mutators (set_abandoned /
-#     increment_attempt / stamp_last_attempt / set_abandoned_ack) — DELIBERATELY
-#     Local-only for now (NotImplementedError guard in Memex mode); a documented
-#     followup, NOT a #66 parity target. Pinned by T4's guard test so a future
-#     Memex-parity landing surfaces as a RED reminder.
-#
-# bridge_db (T1) and team_audit_log are mode-AGNOSTIC by being HARD-WIRED Local;
-# T1's value is asserting that hard-wiring holds (the anti-revert), NOT
-# parametrizing it over Memex.
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-# ── atelier#66 [S3] T1 — §17 bridge_db-is-always-Local pin (AC6) ─────────────
-#
-# `_resolve_local_bridge_db` resolves the request-queue DB to `.ai/atelier.db`
-# under the CWD git root and MUST NEVER consult `mode_detector`: the team-mode
-# bridge queue is Local-only by §17 (the Memex backend has no team-mode tables,
-# so a mode-dispatched route would be the bug). These two tests are the
-# ANTI-REVERT pin for that invariant — (a) proves the resolver ignores Memex
-# mode, (b) proves it fails loud outside a git workspace. Routing the resolver
-# through `detect_mode` (the §17 violation) makes (a) RED; the non-vacuity
-# proof in the review log neuters exactly that path.
-
-
-def test_resolve_local_bridge_db_ignores_mode(tmp_path, monkeypatch):
-    """§17/AC6: `_resolve_local_bridge_db` returns `<git-root>/.ai/atelier.db`
-    even when `detect_mode() == "memex"` — the bridge queue is hard-wired Local
-    and the resolver MUST NOT branch on the durable mode. Anti-revert: a route
-    through `mode_detector` (returning any Memex path in Memex mode) makes this
-    RED."""
-    from scripts import mode_detector
-    from scripts.dispatch import _resolve_local_bridge_db
-
-    # Force the durable mode to Memex — the resolver must ignore it entirely.
-    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
-
-    root = tmp_path / "repo"
-    root.mkdir()
-    (root / ".git").mkdir()
-    monkeypatch.chdir(root)
-
-    resolved = _resolve_local_bridge_db()
-    # Always the Local .ai/atelier.db under the git root — never a Memex path.
-    assert resolved == str(root.resolve() / ".ai" / "atelier.db")
-    # The parent dir is created as a side effect (queue-ready).
-    assert (root / ".ai").is_dir()
-
-
-def test_resolve_local_bridge_db_raises_outside_git(tmp_path, monkeypatch):
-    """Outside any git workspace the resolver fails loud with a
-    `BridgeDispatchError` (operator-facing) rather than silently writing the
-    queue to a stray CWD — the production transport requires CWD under the
-    atelier workspace."""
-    from scripts import mode_detector
-    from scripts.dispatch import _resolve_local_bridge_db
-
-    # Mode is irrelevant to the git-root requirement; pin it Local to show the
-    # raise is about the missing workspace, not the mode.
-    monkeypatch.setattr(mode_detector, "detect_mode", lambda: "local")
-
-    bare = tmp_path / "not-a-repo"
-    bare.mkdir()  # no .git anywhere up the tree (pytest tmp is outside the repo)
-    monkeypatch.chdir(bare)
-
-    with pytest.raises(BridgeDispatchError, match="not inside a git workspace"):
-        _resolve_local_bridge_db()
-
-
-# ── model-tier wiring: build_spawn_fn model_for seam + args_json (atelier) ────
-#
-# These pin the per-task model-tier flow end to end at the dispatch layer:
-#   1. build_spawn_fn's model_for seam threads the chosen tier into the spawn
-#      tool call (subagent AND agent-team first-touch), with EXACT model values;
-#   2. model_for=None (the default) attaches NO model — byte-identical to today;
-#   3. QueueBridgeDispatchTools includes "model" in args_json ONLY when set
-#      (back-compat: model None => NO "model" key, byte-identical rows).
-
-
-def test_build_spawn_fn_subagent_threads_model_into_spawn(tmp_path):
-    """A model_for seam returning a tier => spawn_subagent receives that exact
-    model value (the _FakeTools records it as a trailing tuple element)."""
-    tools = _FakeTools()
-    spawn = build_spawn_fn(
-        DISPATCH_MODE_SUBAGENT,
-        tools=tools,
-        briefing_for=_briefing_for(),
-        model_for=lambda task, attempt: "haiku",
-        teams_root=tmp_path,
-    )
-    spawn({"id": 42}, 1)
-    assert tools.calls == [("spawn_subagent", 42, 1, "BRIEFING:42:1", "haiku")]
-
-
-def test_build_spawn_fn_agent_team_threads_model_into_first_touch(tmp_path):
-    """agent-team first-touch spawn_teammate carries the chosen model verbatim."""
-    tools = _FakeTools()
-    spawn = build_spawn_fn(
-        DISPATCH_MODE_AGENT_TEAM,
-        tools=tools,
-        briefing_for=_briefing_for(),
-        members=["sdet-1"],
-        team_name="cycle-team",
-        teammate_name_for=lambda task: "sdet-1",
-        model_for=lambda task, attempt: "opus",
-        teams_root=tmp_path / "absent",  # force first-touch
-    )
-    spawn({"id": 7}, 1)
-    spawn_calls = [c for c in tools.calls if c[0] == "spawn_teammate"]
-    # team_id is the create_team RESULT ("team-xyz" from _FakeTools), not team_name.
-    assert spawn_calls == [("spawn_teammate", "team-xyz", "sdet-1", "BRIEFING:7:1", "opus")]
-
-
-def test_build_spawn_fn_no_model_for_is_byte_identical(tmp_path):
-    """BACK-COMPAT: with NO model_for seam, the recorded spawn tuple is exactly
-    the pre-policy 4-element shape (no trailing model) — proving model=None
-    changes nothing for existing callers."""
-    tools = _FakeTools()
-    spawn = build_spawn_fn(
-        DISPATCH_MODE_SUBAGENT,
-        tools=tools,
-        briefing_for=_briefing_for(),
-        teams_root=tmp_path,
-    )
-    spawn({"id": 99}, 2)
-    assert tools.calls == [("spawn_subagent", 99, 2, "BRIEFING:99:2")]
-
-
-def test_build_spawn_fn_model_for_returning_none_is_byte_identical(tmp_path):
-    """A model_for seam that returns None per task is also byte-identical — the
-    spawn tuple has no trailing model element (None is dropped at the seam)."""
-    tools = _FakeTools()
-    spawn = build_spawn_fn(
-        DISPATCH_MODE_SUBAGENT,
-        tools=tools,
-        briefing_for=_briefing_for(),
-        model_for=lambda task, attempt: None,
-        teams_root=tmp_path,
-    )
-    spawn({"id": 5}, 1)
-    assert tools.calls == [("spawn_subagent", 5, 1, "BRIEFING:5:1")]
-
-
-def test_queue_bridge_spawn_teammate_includes_model_when_set(bridge_db):
-    """With a model set, spawn_teammate's args_json carries "model": <tier>."""
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-    tools.spawn_teammate("T", "sdet-1", "BRIEF", model="opus")
-    rows = _rows(bridge_db, kind="spawn_teammate")
-    assert len(rows) == 1
-    assert json.loads(rows[0]["args_json"]) == {
-        "team_id": "T",
-        "name": "sdet-1",
-        "prompt": "BRIEF",
-        "model": "opus",
-    }
-
-
-def test_queue_bridge_spawn_subagent_includes_model_when_set(bridge_db):
-    """With a model set, spawn_subagent's args_json carries "model": <tier>."""
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-    tools.spawn_subagent("task-7", 2, "PROMPT", model="haiku")
-    rows = _rows(bridge_db, kind="spawn_subagent")
-    assert len(rows) == 1
-    assert json.loads(rows[0]["args_json"]) == {
-        "task_id": "task-7",
-        "attempt": 2,
-        "prompt": "PROMPT",
-        "model": "haiku",
-    }
-
-
-def test_queue_bridge_spawn_teammate_no_model_key_when_none(bridge_db):
-    """BACK-COMPAT (EXACT): model=None (the default) => args_json has NO "model"
-    key — byte-identical to a pre-policy row."""
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-    tools.spawn_teammate("T", "sdet-1", "BRIEF")  # no model
-    rows = _rows(bridge_db, kind="spawn_teammate")
-    args = json.loads(rows[0]["args_json"])
-    assert "model" not in args
-    assert args == {"team_id": "T", "name": "sdet-1", "prompt": "BRIEF"}
-
-
-def test_queue_bridge_spawn_subagent_no_model_key_when_none(bridge_db):
-    """BACK-COMPAT (EXACT): spawn_subagent without a model => NO "model" key."""
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-    tools.spawn_subagent("task-7", 2, "PROMPT")  # no model
-    rows = _rows(bridge_db, kind="spawn_subagent")
-    args = json.loads(rows[0]["args_json"])
-    assert "model" not in args
-    assert args == {"task_id": "task-7", "attempt": 2, "prompt": "PROMPT"}
-
-
-# ── bounded + hardened tool-call path: debounce / count-limit (unit) ─────────
-#
-# These exercise the REAL QueueBridgeDispatchTools._enqueue guards against the
-# real bridge_requests table. A manual clock makes the debounce sliding window
-# deterministic (no wall-sleep, no argless now()). Every test pins the relevant
-# ATELIER_BRIDGE_* env var so it is hermetic regardless of the ambient shell.
-
-
-class _ManualClock:
-    """A manually-advanceable monotonic clock (seconds). `advance` is the only
-    way time moves — mirrors test_pm_dispatch.FakeClock."""
-
-    def __init__(self, start: float = 1000.0):
-        self.t = float(start)
-
-    def __call__(self) -> float:
-        return self.t
-
-    def advance(self, seconds: float) -> None:
-        self.t += float(seconds)
-
-
-def test_debounce_drops_duplicate_identical_call_in_window(bridge_db, monkeypatch):
-    """Two IDENTICAL (kind, canonical-args) enqueues inside the window => the
-    second is DROPPED (no second INSERT) and returns the FIRST row id (idempotent
-    skip). A NOISE guard layered on top of idempotency — not a correctness mech."""
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "2000")
-    clock = _ManualClock()
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
-
-    # spawn_subagent is the ONLY debounced kind (its args carry `attempt`, so a
-    # genuine re-dispatch is a different key). Call it twice with IDENTICAL args.
-    args = {"prompt": "go", "attempt": 1, "task_id": "t-1"}
-    id1 = tools._enqueue("spawn_subagent", args)
-    clock.advance(0.5)  # still inside the 2000ms window
-    id2 = tools._enqueue("spawn_subagent", dict(args))
-
-    # EXACT-COUNT: the duplicate did NOT INSERT — exactly ONE row exists.
-    assert len(_rows(bridge_db, kind="spawn_subagent")) == 1
-    # The debounced call returns the FIRST row id (caller sees a successful enqueue).
-    assert id2 == id1
-
-
-def test_debounce_does_not_drop_after_window_elapses(bridge_db, monkeypatch):
-    """Once the window elapses, an identical call enqueues AGAIN (the guard is a
-    sliding window, not a permanent dedupe)."""
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "2000")
-    clock = _ManualClock()
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
-
-    tools._enqueue("send_message", {"team_id": "T", "to": "sdet-1", "message": "go"})
-    clock.advance(2.5)  # PAST the 2000ms window
-    tools._enqueue("send_message", {"team_id": "T", "to": "sdet-1", "message": "go"})
-
-    assert len(_rows(bridge_db, kind="send_message")) == 2
-
-
-def test_debounce_never_swallows_a_wave_retry_different_attempt(bridge_db, monkeypatch):
-    """CRITICAL: a legitimate WaveDispatcher re-dispatch carries a DIFFERENT
-    `attempt` in args => different canonical key => NEVER debounced. Two spawns
-    that differ ONLY in attempt both enqueue, even inside the window."""
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "2000")
-    clock = _ManualClock()
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
-
-    tools.spawn_subagent("task-7", 1, "PROMPT")
-    clock.advance(0.1)  # well inside the window
-    tools.spawn_subagent("task-7", 2, "PROMPT")  # attempt differs => different key
-
-    rows = _rows(bridge_db, kind="spawn_subagent")
-    assert len(rows) == 2
-    assert sorted(json.loads(r["args_json"])["attempt"] for r in rows) == [1, 2]
-
-
-def test_debounce_disabled_when_window_zero(bridge_db, monkeypatch):
-    """ATELIER_BRIDGE_DEBOUNCE_MS=0 disables debounce entirely (no drop)."""
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
-    clock = _ManualClock()
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
-    tools._enqueue("send_message", {"team_id": "T", "to": "x", "message": "m"})
-    tools._enqueue("send_message", {"team_id": "T", "to": "x", "message": "m"})
-    assert len(_rows(bridge_db, kind="send_message")) == 2
-
-
-def test_debounce_env_garbage_is_ignored_uses_default(bridge_db, monkeypatch):
-    """A garbage ATELIER_BRIDGE_DEBOUNCE_MS is IGNORED (valid-or-ignore, mirrors
-    model_tier._valid_tier) — the default 2000ms window still debounces."""
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "not-an-int")
-    clock = _ManualClock()
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
-    args = {"prompt": "m", "attempt": 1, "task_id": "t-1"}
-    tools._enqueue("spawn_subagent", args)
-    clock.advance(0.5)
-    tools._enqueue("spawn_subagent", dict(args))
-    # Default window applied => the duplicate was dropped.
-    assert len(_rows(bridge_db, kind="spawn_subagent")) == 1
-
-
-def test_debounce_exempts_attemptless_kinds_send_message(bridge_db, monkeypatch):
-    """send_message / spawn_teammate carry NO `attempt` to distinguish a genuine
-    re-dispatch from a duplicate, so they are EXEMPT from debounce: two identical
-    send_message enqueues inside the window BOTH insert (the no-swallow guarantee
-    is structural, not timing-based). Guards MINOR-1 from the F9 review."""
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "2000")
-    clock = _ManualClock()
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db, clock=clock)
-    tools._enqueue("send_message", {"team_id": "T", "to": "x", "message": "m"})
-    clock.advance(0.5)  # inside the window — but send_message is exempt
-    tools._enqueue("send_message", {"team_id": "T", "to": "x", "message": "m"})
-    assert len(_rows(bridge_db, kind="send_message")) == 2  # NOT debounced
-
-
-def test_count_limit_trips_at_exactly_n_plus_one(bridge_db, monkeypatch):
-    """EXACT-COUNT (multi-mechanism rule): with the per-kind limit pinned to N,
-    enqueues 1..N succeed and enqueue N+1 raises BridgeBudgetExceededError. The
-    Nth row is durably present; the (N+1)th never inserts."""
-    from scripts.dispatch import BridgeBudgetExceededError
-
-    n = 4
-    monkeypatch.setenv("ATELIER_BRIDGE_KIND_LIMIT", str(n))
-    # Disable debounce so each spawn (distinct attempt) is unrelated to the limit
-    # mechanism — we vary `attempt` so no two calls collide on the debounce key.
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-
-    # Exactly N succeed.
-    for attempt in range(1, n + 1):
-        tools.spawn_subagent("task-7", attempt, "P")
-    assert len(_rows(bridge_db, kind="spawn_subagent")) == n
-
-    # The (N+1)th trips the ceiling — fail-loud, and inserts NOTHING.
-    with pytest.raises(BridgeBudgetExceededError, match="per-kind enqueue limit"):
-        tools.spawn_subagent("task-7", n + 1, "P")
-    assert len(_rows(bridge_db, kind="spawn_subagent")) == n
-
-
-def test_count_limit_is_per_kind_not_global(bridge_db, monkeypatch):
-    """The ceiling is per-KIND: hitting the limit on one kind does NOT block a
-    different kind (the counter is keyed by kind)."""
-    from scripts.dispatch import BridgeBudgetExceededError
-
-    monkeypatch.setenv("ATELIER_BRIDGE_KIND_LIMIT", "1")
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-
-    tools.send_message("T", "a", "m")  # kind send_message #1 (== limit)
-    with pytest.raises(BridgeBudgetExceededError):
-        tools.send_message("T", "b", "m")  # send_message #2 trips
-    # A DIFFERENT kind is unaffected — its own counter starts at 0.
-    tools.spawn_subagent("task-9", 1, "P")
-    assert len(_rows(bridge_db, kind="spawn_subagent")) == 1
-
-
-def test_count_limit_resets_on_new_instance(bridge_db, monkeypatch):
-    """The counter is per-INSTANCE (one instance == one cycle/team_pk), so a
-    fresh instance resets the ceiling — the natural per-invocation boundary."""
-    from scripts.dispatch import BridgeBudgetExceededError
-
-    monkeypatch.setenv("ATELIER_BRIDGE_KIND_LIMIT", "1")
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
-
-    tools_a = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-    tools_a.send_message("T", "a", "m")
-    with pytest.raises(BridgeBudgetExceededError):
-        tools_a.send_message("T", "b", "m")
-
-    # A new instance (new cycle) starts its counter fresh.
-    tools_b = QueueBridgeDispatchTools("cycle-2", db_path=bridge_db)
-    tools_b.send_message("T", "c", "m")  # does NOT raise
-
-
-def test_count_limit_env_garbage_is_ignored_uses_high_default(bridge_db, monkeypatch):
-    """A garbage ATELIER_BRIDGE_KIND_LIMIT is ignored => the high default (200)
-    applies, so legitimate MAX_ATTEMPTS-scale traffic is NEVER blocked."""
-    from scripts.dispatch import BRIDGE_KIND_LIMIT_DEFAULT
-
-    monkeypatch.setenv("ATELIER_BRIDGE_KIND_LIMIT", "garbage")
-    monkeypatch.setenv("ATELIER_BRIDGE_DEBOUNCE_MS", "0")
-    tools = QueueBridgeDispatchTools("cycle-1", db_path=bridge_db)
-    # The default sits far above any realistic per-kind wave traffic.
-    assert BRIDGE_KIND_LIMIT_DEFAULT >= 200
-    for attempt in range(1, 11):
-        tools.spawn_subagent("task-7", attempt, "P")  # 10 << 200, never trips
-    assert len(_rows(bridge_db, kind="spawn_subagent")) == 10

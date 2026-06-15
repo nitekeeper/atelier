@@ -52,32 +52,7 @@ def test_internal_bootstrap_memex_skill_present_with_markers():
         assert marker in text, f"bootstrap-memex missing marker: {marker!r}"
 
 
-def test_internal_bridge_poll_skill_present_with_markers():
-    """atelier#81 — the orchestrator-side per-turn servicing procedure for the
-    production dispatch queue. Agent-facing only (read via the Read tool); the
-    only Python-testable invariant is presence + the substring markers the
-    orchestrator turn-loop greps for."""
-    p = INTERNAL / "bridge-poll" / "SKILL.md"
-    assert p.is_file(), f"missing file: {p}"
-    text = p.read_text(encoding="utf-8")
-    for marker in (
-        "bridge_requests",
-        # closed-enum switch: the four DispatchTools method names == kind enum.
-        "create_team",
-        "spawn_teammate",
-        "send_message",
-        "spawn_subagent",
-        # the three encoded contracts.
-        "fail-safe-pending",
-        "READ-FIRST",
-        "untrusted",
-        # references the REAL companion procedure, NOT the nonexistent run/ path.
-        "internal/pm-dispatch/SKILL.md",
-    ):
-        assert marker in text, f"bridge-poll missing marker: {marker!r}"
-    # Guard against the planning bug that abandoned the prior cycle: this SKILL
-    # MUST NOT reference internal/run/SKILL.md (that path does not exist in
-    # atelier — public skills live under skills/run/, not internal/run/).
-    assert "internal/run/SKILL.md" not in text, (
-        "bridge-poll references the nonexistent internal/run/SKILL.md path"
-    )
+# NOTE: the per-turn dispatch-queue servicer SKILL presence test was removed in
+# M7 — that procedure serviced the now-deleted dispatch queue and was itself
+# deleted. The deterministic host (cli transport) replaced the per-turn queue
+# servicing loop with a single awaited coroutine.

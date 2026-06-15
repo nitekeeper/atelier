@@ -1676,23 +1676,338 @@ def test_false_done_guard_unisolated_writer_checks_clone(tmp_path):
     assert not (clone / "u.txt").exists()
 
 
+def test_false_done_noop_on_committed_file_rejected(tmp_path):
+    """BUG4b REGRESSION: a writer that declares an EXISTING committed file and
+    returns `done` WITHOUT changing it (the no-op `done`) is REJECTED.
+
+    The pre-fix ``.exists()`` guard wrongly ACCEPTED this — the declared file
+    already existed at HEAD, so ``.exists()`` was satisfied even though the agent
+    changed nothing. The HEAD-relative DIFF guard correctly flags it: the worktree
+    is carved from HEAD where the file exists unchanged, so it shows NO change vs
+    HEAD and the `done` is converted to a FAILED_ATTEMPT (worktree discarded)."""
+    clone = _git_init_clone(tmp_path)
+    # Pre-seed the declared output as a COMMITTED file at HEAD — so the worktree
+    # carved from HEAD will already contain it (the real-world EDIT case).
+    ge = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": __import__("os").environ.get("PATH", ""),
+    }
+    (clone / "existing.txt").write_text("baseline content")
+    subprocess.run(["git", "add", "-A"], cwd=clone, env=ge, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed existing.txt"], cwd=clone, env=ge, check=True)
+
+    tasks = [
+        {
+            "task_id": "noop",
+            "parallel_group": 0,
+            "writes": ["existing.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    # writes_files=False ⇒ the runner returns `done` but does NOT touch the
+    # already-committed `existing.txt` → a genuine no-op done.
+    runner = _DeclaredWriteRunner(declared={"noop": ["existing.txt"]}, writes_files={"noop": False})
+    res = _run_guard_pipeline(clone, tasks, runner, dag_proof=dag_proof)
+    assert is_failed_attempt(res[0]), (
+        f"no-op `done` on a committed file was wrongly accepted (BUG4b): {res[0]!r}"
+    )
+    # The committed file is unchanged in the base (its baseline content survives).
+    assert (clone / "existing.txt").read_text() == "baseline content"
+
+
+def test_journal_replay_done_not_false_failed(tmp_path):
+    """REGRESSION (live e2e RUN-2): a JOURNAL REPLAY of a genuine writer `done`
+    must NOT be re-rejected by the engine false-`done` guard.
+
+    Scenario reproduces a second pipeline run / resume: RUN-1 is an honest writer
+    that creates its declared output, which is MERGED into the clone's HEAD and the
+    validated `done` is journaled.  RUN-2 reuses the SAME journal, so ``run_attempt``
+    REPLAYS the cached `done` at $0 WITHOUT re-executing — the worktree is NOT
+    re-materialized, and the declared file legitimately already lives in HEAD
+    UNCHANGED.  The diff-vs-HEAD false-`done` guard (built to catch a LYING FRESH
+    `done`) would misread the unchanged-vs-HEAD file as "missing" and wrongly
+    convert the replay to FAILED_ATTEMPT.
+
+    Pre-fix: this FAILS (guard fires on the replay → failed attempt).
+    Post-fix: the guard is skipped on a journal HIT → the replay returns `done`
+    and ZERO new spawns occur."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "T1",
+            "parallel_group": 0,
+            "writes": ["t1.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    # Honest writer: CREATES its declared output (so RUN-1 is a genuine `done`).
+    runner = _DeclaredWriteRunner(declared={"T1": ["t1.txt"]}, writes_files={"T1": True})
+    # A SHARED journal + budget across both runs so RUN-2 sees the cached `done`.
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+
+    # RUN-1: honest writer → `done`, file merged into clone HEAD, result journaled.
+    res1 = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(
+                clone,
+                runner,
+                journal,
+                budget,
+                dag_proof,
+                worktree_factory=simple_worktree_factory(clone),
+            ),
+        )
+    )
+    assert not is_failed_attempt(res1[0]) and res1[0]["status"] == "done"
+    # The declared write is now committed in the clone's HEAD (the post-merge state).
+    assert (clone / "t1.txt").exists()
+    spawns_after_run1 = len(runner.calls)
+    assert spawns_after_run1 == 1  # exactly one real dispatch happened in RUN-1
+
+    # RUN-2 (journal REPLAY): SAME journal → run_attempt replays the cached `done`
+    # at $0 WITHOUT re-executing.  The worktree is carved fresh from HEAD (where
+    # t1.txt now lives, UNCHANGED vs HEAD) — the diff guard must be SKIPPED here.
+    res2 = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(
+                clone,
+                runner,
+                journal,
+                budget,
+                dag_proof,
+                worktree_factory=simple_worktree_factory(clone),
+            ),
+        )
+    )
+    assert not is_failed_attempt(res2[0]), (
+        f"journal replay of a genuine `done` was wrongly converted to a failed "
+        f"attempt (the live RUN-2 bug): {res2[0]!r}"
+    )
+    assert res2[0]["status"] == "done"
+    # ZERO new spawns on the replay — run_attempt returned the cached envelope at $0.
+    assert len(runner.calls) == spawns_after_run1, (
+        "journal replay must NOT re-execute the task (0 new spawns expected)"
+    )
+
+
+def test_false_done_invalidates_journal_entry(tmp_path):
+    """A FRESH lying `done` (journal MISS) whose declared writes are absent is (a)
+    converted to FAILED_ATTEMPT AND (b) has its journal entry INVALIDATED — so a
+    retry RE-EXECUTES instead of replaying the rejected envelope.
+
+    Why this matters: ``run_attempt`` journals the validated `done` (cli_dispatch
+    step 7) BEFORE the host_scheduler guard sees it, and ``attempt`` is NOT part of
+    the journal key.  Without invalidation, the NEXT attempt would be a journal HIT
+    of the rejected `done` and (post replay-skip fix) would skip the guard and
+    resurrect the lie as success.  The guard therefore deletes the cached entry on
+    rejection."""
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {
+            "task_id": "liar",
+            "parallel_group": 0,
+            "writes": ["out.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _DeclaredWriteRunner(
+        declared={"liar": ["out.txt"]},
+        writes_files={"liar": False},  # returns `done` but writes NOTHING (a lie)
+    )
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    res = _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(
+                clone,
+                runner,
+                journal,
+                budget,
+                dag_proof,
+                worktree_factory=simple_worktree_factory(clone),
+            ),
+        )
+    )
+    # (a) The fresh lying `done` is REJECTED (FAILED_ATTEMPT), nothing merged.
+    assert is_failed_attempt(res[0]), f"fresh lying `done` wrongly accepted: {res[0]!r}"
+    assert not (clone / "out.txt").exists()
+
+    # (b) The cached (rejected) envelope was INVALIDATED — the jkey the scheduler
+    # computed (root task: no upstreams, model="sonnet", briefing="b", attempt=1)
+    # is no longer in the journal, so a retry RE-EXECUTES rather than replaying.
+    jkey = journal.key(tasks[0], 1, model="sonnet", briefing="b", upstream_envelope_hashes=[])
+    assert journal.lookup(jkey) is None, (
+        "rejected false-`done` was left in the journal — a retry would REPLAY it "
+        "(attempt is not part of the key), resurrecting the lie as success"
+    )
+
+
 def test_missing_declared_writes_helper_resolves_repo_relative(tmp_path):
-    """UNIT: ``_missing_declared_writes`` resolves the repo-relative declared
-    `writes` against the worktree dir (not CWD), reports the absent ones, and
-    treats a present (even empty) path as satisfied — existence is the contract,
-    content is not over-constrained."""
+    """UNIT (BUG4b): ``_missing_declared_writes`` is a HEAD-RELATIVE DIFF check, not
+    a bare ``.exists()`` check. A declared write must actually show a change vs
+    ``HEAD`` in its git working tree; a declared output that is byte-identical to
+    ``HEAD`` (a committed-but-untouched file — the no-op `done` case) is FLAGGED as
+    missing even though the path exists, while a brand-new file, a modified file,
+    and a present-but-empty NEW file are all accepted."""
     import scripts.host_scheduler as hs
 
-    wt = tmp_path / "wt"
+    # A git working tree with a committed baseline (`committed_untouched.txt` and
+    # `edited.txt` exist at HEAD; the agent then edits/creates files).
+    wt = _git_init_clone(tmp_path)
+    (wt / "committed_untouched.txt").write_text("baseline")
+    (wt / "edited.txt").write_text("baseline")
     (wt / "pkg").mkdir(parents=True)
-    (wt / "present.txt").write_text("x")
-    (wt / "empty.txt").write_text("")  # present-but-empty ⇒ satisfied (not missing)
-    (wt / "pkg" / "nested.py").write_text("y")
-    task = {"task_id": "t", "writes": ["present.txt", "empty.txt", "pkg/nested.py", "absent.txt"]}
+    (wt / "pkg" / "committed_nested.py").write_text("baseline")
+    ge = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": __import__("os").environ.get("PATH", ""),
+    }
+    subprocess.run(["git", "add", "-A"], cwd=wt, env=ge, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=wt, env=ge, check=True)
+
+    # Now the "agent" acts: edit one committed file, create a new file, create a
+    # present-but-empty NEW file, and LEAVE `committed_untouched.txt` exactly as at
+    # HEAD (the no-op `done`).
+    (wt / "edited.txt").write_text("CHANGED by agent")  # modified vs HEAD → ok
+    (wt / "new.txt").write_text("brand new")  # untracked new → ok
+    (wt / "empty_new.txt").write_text("")  # present-but-empty NEW (untracked) → ok
+
+    task = {
+        "task_id": "t",
+        "writes": [
+            "edited.txt",  # modified → present in the diff
+            "new.txt",  # untracked new → present in the diff
+            "empty_new.txt",  # untracked empty → present in the diff
+            "pkg/committed_nested.py",  # committed-but-untouched → NO change → flagged
+            "committed_untouched.txt",  # committed-but-untouched → NO change → flagged
+            "absent.txt",  # never existed at all → flagged
+        ],
+    }
     missing = hs._missing_declared_writes(task, wt)
-    assert missing == ["absent.txt"]
+    # Flagged = the declared writes that did NOT change vs HEAD (sorted order).
+    assert missing == ["absent.txt", "committed_untouched.txt", "pkg/committed_nested.py"]
     # A task that declares no writes is trivially satisfied.
     assert hs._missing_declared_writes({"task_id": "t"}, wt) == []
+
+
+# ── BUG4a: per-writer native sandbox confines allowWrite to the WORKTREE ─────
+
+
+def _allowwrite_of(call) -> list[str]:
+    """Extract ``sandbox.filesystem.allowWrite`` from the ``--settings`` JSON in a
+    captured runner call's argv (the native_sandbox_wrap injection)."""
+    import json as _json
+
+    argv = call["argv"]
+    assert "--settings" in argv, f"no --settings in argv (sandbox not wired): {argv}"
+    settings = _json.loads(argv[argv.index("--settings") + 1])
+    return settings["sandbox"]["filesystem"]["allowWrite"]
+
+
+def test_native_sandbox_confines_to_worktree_when_carved(tmp_path):
+    """BUG4a — when ``pipeline`` carves a per-writer worktree AND a native sandbox
+    is wired, the dispatch's ``--settings`` confines ``allowWrite`` to the
+    WORKTREE (not the clone), so a writer's writes land in (and stay inside) its
+    own worktree. A read-only / no-worktree task keeps ``allowWrite=[clone]``."""
+    from scripts.cli_dispatch import native_sandbox_wrap
+
+    clone = _git_init_clone(tmp_path)
+    tasks = [
+        {  # a WRITER → gets a carved worktree
+            "task_id": "w",
+            "parallel_group": 0,
+            "writes": ["w.txt"],
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+        {  # a READ-ONLY task (no writes) → no worktree → confined to the clone
+            "task_id": "ro",
+            "parallel_group": 0,
+            "assigned_persona": "be-1",
+            "phase": "qa",
+        },
+    ]
+    dag_proof = compute_dag_proof(tasks)
+    runner = _DeclaredWriteRunner(
+        declared={"w": ["w.txt"], "ro": []},
+        writes_files={"w": True, "ro": True},
+    )
+    journal = ResultJournal()
+    budget = BudgetPool(total_tokens=1_000_000)
+    _run(
+        pipeline(
+            tasks,
+            **_pipeline_kwargs(
+                clone,
+                runner,
+                journal,
+                budget,
+                dag_proof,
+                worktree_factory=simple_worktree_factory(clone),
+                # Base native sandbox is clone-scoped; the per-writer wiring rebuilds
+                # it with the carved worktree as the write_root.
+                sandbox_wrap=native_sandbox_wrap(clone),
+            ),
+        )
+    )
+    calls = {_tid_from_argv(c["argv"]): c for c in runner.calls}
+
+    # (1) CARVED-WORKTREE path: the writer's allowWrite is its OWN worktree.
+    expected_wt = str((Path(clone) / ".atelier-worktrees" / "w").resolve())
+    assert _allowwrite_of(calls["w"]) == [expected_wt], (
+        "writer's native sandbox must confine writes to its carved worktree (BUG4a)"
+    )
+
+    # (2) NO-WORKTREE path: the read-only task's allowWrite is the CLONE.
+    assert _allowwrite_of(calls["ro"]) == [str(Path(clone).resolve())], (
+        "no-worktree task must keep allowWrite=[clone]"
+    )
+
+
+def test_sandbox_wrap_for_write_root_passes_through_non_native(tmp_path):
+    """BUG4a — the per-writer rebuild ONLY re-points a NATIVE sandbox. An identity
+    (or any non-native) wrap is returned UNCHANGED, and a native wrap already
+    confined to the exact write_root is not rebuilt (same object)."""
+    import scripts.host_scheduler as hs
+    from scripts.cli_dispatch import identity_sandbox_wrap, native_sandbox_wrap
+
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    wt = clone / ".atelier-worktrees" / "x"
+    wt.mkdir(parents=True)
+
+    # Identity wrap is opaque/non-native → returned unchanged regardless of root.
+    assert hs._sandbox_wrap_for_write_root(identity_sandbox_wrap, wt) is identity_sandbox_wrap
+
+    # A native wrap already confined to this exact root → not rebuilt (same object).
+    already = native_sandbox_wrap(clone, write_root=wt)
+    assert hs._sandbox_wrap_for_write_root(already, wt) is already
+
+    # A clone-scoped native wrap + a worktree root → rebuilt to confine to the wt.
+    base = native_sandbox_wrap(clone)
+    rebuilt = hs._sandbox_wrap_for_write_root(base, wt)
+    assert rebuilt is not base
+    out = rebuilt(["claude"])
+    import json as _json
+
+    settings = _json.loads(out[out.index("--settings") + 1])
+    assert settings["sandbox"]["filesystem"]["allowWrite"] == [str(wt.resolve())]
 
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -218,6 +218,45 @@ def test_put_then_lookup_returns_envelope():
     assert j.lookup(k) == env
 
 
+def test_delete_removes_entry_and_persists(tmp_path: Path):
+    """``delete`` invalidates a cached entry: it returns True on a present key,
+    removes it (subsequent ``lookup`` misses), and the removal SURVIVES a reload
+    from disk.  ``delete`` of an absent key returns False and is a no-op.
+
+    This is the INVALIDATE primitive the host_scheduler false-`done` guard uses
+    to drop a rejected envelope so a retry RE-EXECUTES (``attempt`` is not part
+    of the journal key, so without this a rejected `done` replays forever)."""
+    journal_file = tmp_path / "journal.json"
+    j1 = ResultJournal(journal_file)
+    task = _task()
+    k = j1.key(task, attempt=1, model="m", briefing="b")
+    j1.put(k, _envelope(), {"output_tokens": 42})
+    assert j1.lookup(k) == _envelope()  # present pre-delete
+
+    # delete of a PRESENT key → True, entry gone in-memory.
+    assert j1.delete(k) is True
+    assert j1.lookup(k) is None
+
+    # delete of an ABSENT key → False, no-op.
+    assert j1.delete(k) is False
+    assert j1.delete("never-stored-key") is False
+
+    # The removal was persisted — a fresh journal from the same path misses too.
+    j2 = ResultJournal(journal_file)
+    assert j2.lookup(k) is None
+
+
+def test_delete_in_memory_mode():
+    """``delete`` works in path=None (in-memory) mode without touching disk."""
+    j = ResultJournal(None)
+    task = _task()
+    k = j.key(task, attempt=1, model="m", briefing="b")
+    j.put(k, _envelope(), {"output_tokens": 1})
+    assert j.delete(k) is True
+    assert j.lookup(k) is None
+    assert j.delete(k) is False
+
+
 def test_get_envelope_hash_miss_returns_none():
     j = ResultJournal()
     assert j.get_envelope_hash("nonexistent") is None

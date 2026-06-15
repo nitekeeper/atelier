@@ -1,55 +1,49 @@
-# Team-mode abort lifecycle — atelier#65 (AC#1/#2). The SOFT (default) +
-# --hard teardown writer. Companion to scripts/sweep_leaked_teams.py: where the
-# sweep DISCOVERS leaked teams from a prior run, abort.py is the deliberate,
-# in-session teardown for the CURRENT team. Both close the same orphan loop by
-# enqueuing a 'team_delete' bridge row scoped to the team_pk (migration 009
-# widened bridge_requests.kind to admit 'aborted' + 'team_delete').
+# Team-mode abort — atelier#65 (AC#1/#2). The SOFT (default) + --hard
+# deliberate, in-session abort recorder for the CURRENT team. Under the host
+# engine there is no harness team to reap, so abort is purely a POSTMORTEM +
+# audit-event writer: it records a durable abort-report doc and an 'aborted'
+# team_audit_log event (the authoritative resume signal read by scripts/resume).
 #
 # Invoked by the /atelier:abort SKILL via `PYTHONPATH=. python3 -m scripts.abort`.
 
 """SOFT + HARD team-mode abort for atelier's team lifecycle (atelier#65).
 
-Two teardown paths over one shared core:
+A deliberate, in-session abort = a durable postmortem + an 'aborted' audit event
+(+ a teams.status transition + a worktree policy). Two paths over one shared
+core:
 
 * SOFT (default) — graceful. Sets ``teams.status='shutting_down'`` (an EXISTING
-  003 enum value, no migration). Python CANNOT await the live agents, so this
-  only INITIATES shutdown: the /atelier:abort SKILL drives the TM-005
-  ``shutdown_req`` / ``shutdown_resp`` handshake on the ``bridge_messages`` wire
-  in the live session, then services the enqueued ``team_delete`` row via the
-  harness ``TeamDelete`` tool. The worktree is PRESERVED when dirty (never
+  003 enum value, no migration). The worktree is PRESERVED when dirty (never
   destroy uncommitted work); a CLEAN worktree is removed only with
   ``--clean-worktree``.
 * HARD (``--hard``) — forced. Writes the abort-report doc FIRST (before any
   teardown) so the postmortem survives even if a later step fails, then sets
   ``teams.status='closed'`` and runs the shared core. Auto-cleans the worktree
   ONLY when it is clean; a dirty worktree is PRESERVED + warned (still never
-  destroys uncommitted work). The SKILL tells the session to service the
-  ``team_delete`` row immediately.
+  destroys uncommitted work).
 
 SHARED CORE (BOTH paths run it):
   1. ``backend.write_document(domain='postmortem', subdomain='abort', ...)`` —
      the durable abort-report markdown. This is AC#2, the most-tested invariant:
      BOTH paths MUST produce this doc.
   2. ``backend.write_team_audit(event_type='aborted', ...)`` — the teardown
-     ledger event (event_type is free TEXT; no migration).
-  3. ONE ``bridge_requests`` row ``kind='team_delete'``, ``status='pending'``,
-     scoped to ``team_pk``, ``args_json={"team_id": ...}``. This both INSTRUCTS
-     the live session to reap the team via ``TeamDelete`` AND records the
-     teardown — the symmetric subtractor that closes
-     ``sweep_leaked_teams.find_orphan_team_ids``'s orphan-join.
+     ledger event (event_type is free TEXT; no migration). This is the
+     AUTHORITATIVE resume signal: scripts/resume detects an aborted-but-
+     incomplete arc by finding the team whose LATEST lifecycle audit event is
+     'aborted', reading project_id / abort_phase / incomplete_task_ids from this
+     payload.
 
-team_id resolution: an explicit ``--team-id`` wins; otherwise it is resolved
-from the ``create_team`` bridge row for ``--team-pk`` via
-``json_extract(response_json, '$.team_id')`` (the canonical post-creation
-team_id lives in the create_team RESPONSE — see sweep_leaked_teams.py's "WHY
-response_json" note).
+team_id: comes ONLY from the optional ``--team-id`` flag (may be None). It is
+required for the 'aborted' audit event because ``team_audit_log.team_id``
+references ``teams(team_id)``; when omitted, the audit event is skipped (the
+abort-report is still written).
 
 MODE GATE (mode_detector.detect_mode):
-  In ``local`` — do everything (report + audit + enqueue + status mutation +
-  worktree handling), and the abort-report doc DOES persist durably (AC#2). In
-  NON-local — the migration-006 dispatch-state mutators raise
-  ``NotImplementedError``, so we WARN that state mutations are Local-mode only,
-  SKIP the DB mutations, WRITE the abort-report, and return 0.
+  In ``local`` — do everything (report + audit + status mutation + worktree
+  handling), and the abort-report doc DOES persist durably (AC#2). In NON-local
+  — the migration-006 dispatch-state mutators raise ``NotImplementedError``, so
+  we WARN that state mutations are Local-mode only, SKIP the DB mutations, WRITE
+  the abort-report, and return 0.
 
   EXIT CODE: abort ALWAYS exits 0 once a teardown completes — the abort-report
   is a BEST-EFFORT write (it must never fail the teardown that already
@@ -64,12 +58,12 @@ MODE GATE (mode_detector.detect_mode):
   workspace-less write under the §6.7 ``_no-workspace_`` key (the
   ``NotImplementedError`` gate is gone), so on the non-local path the report
   PERSISTS just as it does in Local mode — AC#2 holds cross-mode. Only the
-  REPORT write crosses modes; team-mode dispatch state (teams.status /
-  team_delete enqueue / audit) stays Local-mode-only, so those mutations are
-  still SKIPPED in non-local mode (there is no live team-mode run to tear down
-  outside Local mode). ``_write_report``'s try/except is now a true last-resort
-  guard for a GENUINE Memex outage — a non-persisting report is an ERROR
-  condition, not an accepted limitation.
+  REPORT write crosses modes; team-mode dispatch state (teams.status / audit)
+  stays Local-mode-only, so those mutations are still SKIPPED in non-local mode
+  (there is no live team-mode run to tear down outside Local mode).
+  ``_write_report``'s try/except is now a true last-resort guard for a GENUINE
+  Memex outage — a non-persisting report is an ERROR condition, not an accepted
+  limitation.
 
 CLI: ``python3 -m scripts.abort --team-pk PK [--team-id ID] [--hard]
 [--reason TEXT] [--clean-worktree] [--db PATH | --bridge-db PATH]``.
@@ -80,7 +74,6 @@ project-local DB). ``main(argv) -> int``.
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -89,22 +82,18 @@ from pathlib import Path
 from scripts import backend, mode_detector
 from scripts.git_utils import git as _git
 
-# ── The per-session TeamDelete handoff note, embedded verbatim in the report ──
+# ── The abort-record note, embedded verbatim in the report ────────────────────
 #
-# Mirrors sweep_leaked_teams.py's "PER-SESSION TeamDelete LIMITATION" note:
-# Python cannot call the session-scoped TeamDelete harness tool, so the live
-# orchestrator session SERVICES the enqueued team_delete row, and any
-# cross-session config dirs left on disk are filesystem-only cleanup.
+# Abort is a recorder, not a reaper. Under the host engine the workers are reaped
+# by the engine itself; there is no harness team to TeamDelete, so abort enqueues
+# no team_delete row. What it produces is durable: a postmortem doc + an
+# 'aborted' team_audit_log event that scripts/resume keys on.
 _HANDOFF_NOTE = (
-    "Per-session TeamDelete handoff: this teardown was recorded by a pure-Python "
-    "script, which CANNOT call the session-scoped `TeamDelete` harness tool. A "
-    "`team_delete` row (status='pending') was enqueued into this team_pk's "
-    "bridge_requests queue carrying the team_id. The LIVE orchestrator session "
-    "services it by calling `TeamDelete` during its turn-loop (soft: after the "
-    "TM-005 shutdown_req/shutdown_resp handshake completes; hard: immediately). "
-    "Any cross-session team config directory left on disk by a crashed prior run "
-    "is filesystem-only cleanup: `rm -rf ~/.claude/teams/<team_id>/` (the harness "
-    "tool cannot reach another session's directory)."
+    "Abort record: this abort recorded a durable postmortem (this doc) and an "
+    "'aborted' team_audit_log event — the authoritative signal scripts/resume "
+    "uses to detect an aborted-but-incomplete arc on the next /atelier:run. "
+    "Under the host engine there is no harness team to tear down: workers are "
+    "reaped by the engine, so no team_delete row is enqueued."
 )
 
 
@@ -112,7 +101,7 @@ def _connect(db_path: str | Path) -> sqlite3.Connection:
     """Open a SQLite connection with WAL + a 5s busy timeout.
 
     Both PRAGMAs are connection-scoped, so they are re-applied on every open
-    (matches sweep_leaked_teams._connect + scripts/backend_local._conn)."""
+    (matches scripts/backend_local._conn)."""
     con = sqlite3.connect(str(db_path))
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA busy_timeout = 5000;")
@@ -122,30 +111,6 @@ def _connect(db_path: str | Path) -> sqlite3.Connection:
 def _now_iso() -> str:
     """UTC ISO-8601 timestamp for the report body (display only)."""
     return datetime.now(timezone.utc).isoformat()
-
-
-def resolve_team_id(db_path: str | Path, team_pk: str) -> str | None:
-    """Resolve the team_id for ``team_pk`` from its ``create_team`` bridge row.
-
-    Returns ``json_extract(response_json, '$.team_id')`` of the most-recent
-    ``create_team`` row for this team_pk (the canonical post-creation team_id
-    lives in the RESPONSE, not the request — see sweep_leaked_teams.py). Returns
-    None when no such row exists or the team_id is NULL (e.g. an errored
-    create_team that never minted one). SQL is fully static + bound."""
-    con = _connect(db_path)
-    try:
-        row = con.execute(
-            "SELECT json_extract(response_json, '$.team_id') AS team_id "
-            "FROM bridge_requests "
-            "WHERE kind = 'create_team' AND team_pk = ? "
-            "ORDER BY id DESC LIMIT 1",
-            (team_pk,),
-        ).fetchone()
-    finally:
-        con.close()
-    if row is None or row[0] is None:
-        return None
-    return str(row[0])
 
 
 def _known_phases(db_path: str | Path) -> set[str]:
@@ -287,7 +252,7 @@ def _render_report(
     torn_down: list[str],
 ) -> str:
     """Build the abort-report markdown body. Lists team_id / team_pk / mode /
-    reason / timestamp, what was torn down, and the TeamDelete handoff note."""
+    reason / timestamp, what was torn down, and the abort-record note."""
     torn_down_md = "\n".join(f"- {line}" for line in torn_down) if torn_down else "- (none)"
     return (
         f"# Team-mode abort report ({mode})\n\n"
@@ -297,7 +262,7 @@ def _render_report(
         f"- **reason:** {reason}\n"
         f"- **timestamp:** {timestamp}\n\n"
         f"## What was torn down\n\n{torn_down_md}\n\n"
-        f"## TeamDelete handoff\n\n{_HANDOFF_NOTE}\n"
+        f"## Abort record\n\n{_HANDOFF_NOTE}\n"
     )
 
 
@@ -372,30 +337,6 @@ def _write_report(
         return None
 
 
-def _enqueue_team_delete(db_path: str | Path, team_pk: str, team_id: str | None) -> int:
-    """INSERT exactly ONE ``team_delete`` row (status='pending') scoped to
-    ``team_pk`` with ``args_json={"team_id": team_id}``; return its rowid.
-
-    The live session services this row into a real ``TeamDelete`` call; it is
-    also the symmetric subtractor sweep_leaked_teams uses to clear the orphan
-    join. SQL is fully static + bound (bandit B608-safe)."""
-    args_json = json.dumps({"team_id": team_id})
-    con = _connect(db_path)
-    try:
-        cur = con.execute(
-            "INSERT INTO bridge_requests (team_pk, kind, args_json, status) "
-            "VALUES (?, 'team_delete', ?, 'pending')",
-            (team_pk, args_json),
-        )
-        con.commit()
-        row_id = cur.lastrowid
-        if row_id is None:  # pragma: no cover — AUTOINCREMENT INSERT always yields a rowid
-            raise RuntimeError("INSERT returned no lastrowid; team_delete row not enqueued")
-        return int(row_id)
-    finally:
-        con.close()
-
-
 def _set_team_status(db_path: str | Path, team_id: str | None, status: str) -> None:
     """UPDATE ``teams.status`` for ``team_id`` to ``status`` (an existing 003
     enum value: soft -> 'shutting_down', hard -> 'closed'). No-op when team_id
@@ -426,23 +367,25 @@ def _do_abort(
     """Shared abort core for both paths. Returns a process exit code.
 
     Order (HARD): report FIRST (persist before teardown), then status mutation,
-    then the shared enqueue/audit, then worktree handling. SOFT writes the
+    then the 'aborted' audit write, then worktree handling. SOFT writes the
     report up front too (cheap, and keeps the two paths symmetric for the AC#2
     "both paths produce the report" invariant) — the only path-specific bits are
-    the target teams.status and the worktree policy."""
+    the target teams.status and the worktree policy.
+
+    ``team_id`` comes only from the optional ``--team-id`` flag and may be None.
+    It is required for the 'aborted' audit event (team_audit_log.team_id FKs
+    teams); when None, that event is skipped but the report still records the
+    abort."""
     detected = mode_detector.detect_mode()
 
-    # Resolve team_id if not supplied. The resolution read is mode-agnostic
-    # (always-Local bridge_requests), so it runs in either mode.
     if team_id is None:
-        team_id = resolve_team_id(db_path, team_pk)
-        if team_id is None:
-            print(
-                "abort: WARN could not resolve team_id from a create_team row "
-                f"for team_pk={team_pk!r}; pass --team-id explicitly if known. "
-                "Proceeding — the report still records the abort.",
-                file=sys.stderr,
-            )
+        print(
+            "abort: WARN no --team-id supplied; the report still records the "
+            "abort, but the 'aborted' team_audit_log event will be SKIPPED "
+            "(team_audit_log.team_id FKs teams, so resume detection needs it). "
+            "Pass --team-id to enable resume detection.",
+            file=sys.stderr,
+        )
 
     target_status = "closed" if mode == "hard" else "shutting_down"
 
@@ -450,13 +393,12 @@ def _do_abort(
     if detected != "local":
         print(
             f"abort: detected mode={detected!r}; team-state mutations "
-            "(teams.status / team_delete enqueue / team audit) are Local-mode "
-            "only and will be SKIPPED. Attempting the abort-report only.",
+            "(teams.status / team audit) are Local-mode only and will be "
+            "SKIPPED. Attempting the abort-report only.",
             file=sys.stderr,
         )
         torn_down = [
             f"teams.status -> {target_status}: SKIPPED (non-local mode).",
-            "team_delete enqueue: SKIPPED (non-local mode).",
             "team_audit 'aborted' event: SKIPPED (non-local mode).",
             "worktree: untouched (non-local mode).",
         ]
@@ -500,7 +442,6 @@ def _do_abort(
         # subsequent steps below are deterministic local writes.
         planned = [
             f"teams.status -> {target_status}.",
-            "bridge_requests: one 'team_delete' row (pending) enqueued.",
             "team_audit_log: one 'aborted' event written.",
         ]
         first_echo = _write_report(
@@ -528,10 +469,6 @@ def _do_abort(
     _set_team_status(db_path, team_id, target_status)
     torn_down.append(f"teams.status -> {target_status}.")
 
-    # Shared-core enqueue: exactly one team_delete row.
-    delete_row_id = _enqueue_team_delete(db_path, team_pk, team_id)
-    torn_down.append(f"bridge_requests: enqueued 'team_delete' row id={delete_row_id} (pending).")
-
     # Shared-core audit: one 'aborted' event (team_audit_log is always-Local).
     # team_audit_log.team_id REFERENCES teams(team_id), so the write requires a
     # real teams row. Skip outright when unresolved; otherwise attempt it but
@@ -551,7 +488,6 @@ def _do_abort(
                     "team_pk": team_pk,
                     "mode": mode,
                     "reason": reason,
-                    "team_delete_request_id": delete_row_id,
                     # #66 resume hooks — the AUTHORITATIVE resume signal.
                     # resume.find_resumable_arc joins team_audit_log.team_id ->
                     # teams.project_id and reads abort_phase + team_pk +
@@ -568,10 +504,10 @@ def _do_abort(
             # IntegrityError: an FK miss (an explicit --team-id naming no teams
             # row, or a row already deleted). OperationalError: a transient lock
             # that outlasts the 5s busy_timeout. Either way the audit event is
-            # NON-GATING bookkeeping — teams.status is already flipped and the
-            # team_delete row already enqueued, so a missing audit event must NOT
-            # abort the teardown (the steps are independent connections, not a
-            # single transaction). Best-effort by design; surface + continue.
+            # NON-GATING bookkeeping — teams.status is already flipped, so a
+            # missing audit event must NOT abort the teardown (the steps are
+            # independent connections, not a single transaction). Best-effort by
+            # design; surface + continue.
             print(
                 f"abort: WARN could not write 'aborted' audit event for "
                 f"team_id={team_id!r} ({type(exc).__name__}: {exc}). "
@@ -589,11 +525,11 @@ def _do_abort(
     # SOFT writes the report now (after the work) — symmetric AC#2 invariant.
     # HARD already wrote a report-first crash-survival copy; write a final one
     # whose "what was torn down" reflects ACTUAL outcomes (incl. the worktree
-    # decision + enqueued row id). On HARD it carries metadata.supersedes =
-    # report_first_id so the two project_documents rows are EXPLICITLY linked
-    # (mirroring write_spec_amendment's {version, supersedes}) rather than silent
-    # duplicates — backend_local.write_document is a plain INSERT with no upsert,
-    # so the chain is by metadata, not row replacement.
+    # decision). On HARD it carries metadata.supersedes = report_first_id so the
+    # two project_documents rows are EXPLICITLY linked (mirroring
+    # write_spec_amendment's {version, supersedes}) rather than silent duplicates
+    # — backend_local.write_document is a plain INSERT with no upsert, so the
+    # chain is by metadata, not row replacement.
     _write_report(
         team_id=team_id,
         team_pk=team_pk,
@@ -609,7 +545,7 @@ def _do_abort(
     print(
         f"abort: {mode} abort complete for team_pk={team_pk} "
         f"(team_id={team_id}); teams.status={target_status}, "
-        f"team_delete row id={delete_row_id}.",
+        "'aborted' audit event recorded.",
         file=sys.stderr,
     )
     return 0
@@ -618,8 +554,8 @@ def _do_abort(
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point. ``main(argv) -> int``.
 
-    Resolves the abort path (soft default / ``--hard``), resolves team_id (or
-    accepts ``--team-id``), and dispatches into ``_do_abort``. The worktree
+    Resolves the abort path (soft default / ``--hard``), takes team_id from the
+    optional ``--team-id`` flag, and dispatches into ``_do_abort``. The worktree
     handled is the current working directory's worktree (the live session runs
     from inside the team's worktree)."""
     ap = argparse.ArgumentParser(prog="abort")
@@ -631,7 +567,10 @@ def main(argv: list[str] | None = None) -> int:
         "--team-id",
         default=None,
         dest="team_id",
-        help="Explicit team_id; if omitted, resolved from the create_team bridge row.",
+        help=(
+            "Explicit team_id; required for the 'aborted' audit event / resume "
+            "detection (FKs teams). If omitted, the audit event is skipped."
+        ),
     )
     ap.add_argument(
         "--hard",

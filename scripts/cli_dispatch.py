@@ -2,12 +2,12 @@
 
 This is the production leaf of the deterministic-host engine: it turns ONE task
 attempt into ONE **metered, schema-validated, journaled** ``claude -p`` call.
-It is the real version of the M0 PoC ``run_attempt`` seam and the
-``CliDispatchTools`` analog of the bridge's ``QueueBridgeDispatchTools``.
+It is the real version of the M0 PoC ``run_attempt`` seam and the production
+``DispatchTools`` binding for the host (CLI) transport.
 
-It is reachable ONLY when the operator opts into ``ATELIER_TRANSPORT=cli`` — the
-bridge (``ATELIER_TRANSPORT=bridge``, the default) is untouched. M3 builds the
-per-task adapter + the engine seams; the pipeline / scheduler wiring is M4.
+The ``cli`` transport is the M7 default; the deterministic host is the only
+dispatch path. M3 built the per-task adapter + the engine seams; the pipeline /
+scheduler wiring is M4.
 
 Pipeline of one attempt (:func:`run_attempt`):
 
@@ -372,6 +372,26 @@ DEFAULT_PERMISSION_MODE = "acceptEdits"
 #: may override ``disallowed_tools`` but these are the floor.
 DEFAULT_DISALLOWED_TOOLS: tuple[str, ...] = ("Bash", "WebFetch", "WebSearch")
 
+#: BUG3 — Default tool ALLOW-list. In headless ``-p`` mode a worker that has not
+#: been granted a tool hits "requested permissions … haven't granted it yet" and
+#: cannot Read/Edit — so the leaf builds ``--allowedTools`` with this set by
+#: default. It carries the file/work primitives a worker needs (Read/Edit/Write/
+#: MultiEdit/Grep/Glob/LS/Task/NotebookEdit/TodoWrite) but DELIBERATELY OMITS the
+#: three deny-floor tools (Bash/WebFetch/WebSearch): :data:`DEFAULT_DISALLOWED_TOOLS`
+#: is the floor and DENY WINS — a tool listed in both is still denied by claude.
+DEFAULT_ALLOWED_TOOLS: tuple[str, ...] = (
+    "Read",
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "Grep",
+    "Glob",
+    "LS",
+    "Task",
+    "NotebookEdit",
+    "TodoWrite",
+)
+
 #: M5 (6) — transient-spawn retry bound INSIDE one charged engine attempt.
 #: ``run_attempt`` retries ONLY a clearly-transient launch error (``OSError`` on
 #: spawn — e.g. EAGAIN / ENOMEM / transient fork failure), up to this many EXTRA
@@ -415,6 +435,18 @@ _USD_INPUT_TO_OUTPUT_RATIO = 5.0
 #: token estimate grossed up by the same buffer the pool reserves.
 _USD_CEILING_HEADROOM = 1.0 / 0.70
 
+#: BUG2 — dollar FLOOR for the derived ``--max-budget-usd`` ceiling. The
+#: token-estimate derivation above is tiny (an opus 12k-token task derives only
+#: ~$0.86), so a BIG real task that legitimately runs long would trip the dollar
+#: ceiling and abort the subprocess mid-run (``claude exited 1``). The dollar
+#: lever is meant to be a DEFENSE-IN-DEPTH backstop — the wall-clock kill is the
+#: REAL terminator — so we never let the derived ceiling fall below a workable
+#: floor. ``max_budget_usd_for`` returns ``max(<derived>, MIN_BUDGET_USD)``;
+#: because the derivation is monotone, the floor only ever clamps the SMALL
+#: estimates up, never makes the ceiling unbounded (a task whose derived value
+#: already exceeds the floor keeps its larger, proportionate ceiling).
+MIN_BUDGET_USD = 5.0
+
 
 def max_budget_usd_for(est_output_tokens: int) -> float:
     """Derive the per-task ``--max-budget-usd`` dollar ceiling from the per-task
@@ -428,11 +460,20 @@ def max_budget_usd_for(est_output_tokens: int) -> float:
     never tighter than — the token lever. Monotone in *est_output_tokens*: a bigger
     task gets a bigger ceiling. The amount is a DEFENSE-IN-DEPTH backstop; the
     wall-clock kill + child reap is the lever that guarantees termination.
+
+    BUG2: the bare derivation is tiny (opus 12k → ~$0.86), so a big real task that
+    legitimately runs long would trip the dollar ceiling and abort mid-run. We
+    therefore clamp the result UP to :data:`MIN_BUDGET_USD` — ``max(<derived>,
+    MIN_BUDGET_USD)`` — so the ceiling can never fall below a workable amount. The
+    floor only raises the SMALL estimates (the derivation is monotone), keeping the
+    ceiling proportionate and bounded: a task whose derived value already exceeds
+    the floor keeps its larger value.
     """
     est = max(0, int(est_output_tokens))
     output_cost = est * _USD_PER_OUTPUT_TOKEN
     input_cost = est * _USD_INPUT_TO_OUTPUT_RATIO * _USD_PER_INPUT_TOKEN
-    return (output_cost + input_cost) * _USD_CEILING_HEADROOM
+    derived = (output_cost + input_cost) * _USD_CEILING_HEADROOM
+    return max(derived, MIN_BUDGET_USD)
 
 
 #: Subprocess env allowlist. ONLY these names (plus the ``LC_*`` prefix) are
@@ -531,16 +572,32 @@ def identity_sandbox_wrap(argv: Sequence[str]) -> list[str]:
     return list(argv)
 
 
-def native_sandbox_wrap(clone_dir: str | os.PathLike[str]) -> SandboxWrap:
+def native_sandbox_wrap(
+    clone_dir: str | os.PathLike[str],
+    *,
+    write_root: str | os.PathLike[str] | None = None,
+) -> SandboxWrap:
     """Return a ``sandbox_wrap`` that enables **Claude Code's native sandbox**.
 
     Injects ``--settings`` with a sandbox config that confines filesystem WRITES
-    to ``clone_dir``, denies all network egress (``network.allowedDomains: []``),
-    and sets ``failIfUnavailable=true`` — so on a host where the platform sandbox
-    can't initialize the ``claude`` CLI REFUSES TO START (verified live: "sandbox
+    to ``write_root`` (defaulting to ``clone_dir`` for back-compat), denies all
+    network egress (``network.allowedDomains: []``), and sets
+    ``failIfUnavailable=true`` — so on a host where the platform sandbox can't
+    initialize the ``claude`` CLI REFUSES TO START (verified live: "sandbox
     required but unavailable … refusing to start"), which is fail-closed (no
     uncontained agent ever runs). On a host with a working sandbox, writes outside
-    the clone are blocked at the OS level.
+    the write root are blocked at the OS level.
+
+    BUG4a — ``write_root`` is the directory the agent is allowed to WRITE into.
+    Workers run in a per-writer git worktree under
+    ``clone_dir/.atelier-worktrees/<id>``, NOT the clone root, so a writer's
+    sandbox must confine writes to (and land them in) ITS worktree — else the
+    OS sandbox would either block the legitimate worktree write or (when pinned to
+    the clone) let a write escape the worktree into a sibling's tree. The host
+    therefore passes ``write_root=<the carved worktree path>`` for an isolated
+    writer; a read-only / no-worktree task keeps the default ``clone_dir``. The
+    parameter is keyword-only and defaults to ``clone_dir`` so every existing
+    caller is unchanged.
 
     **Cross-platform** — the SAME ``--settings`` JSON drives both platforms; only
     the OS primitive differs (verified against code.claude.com/docs/en/sandboxing):
@@ -557,7 +614,10 @@ def native_sandbox_wrap(clone_dir: str | os.PathLike[str]) -> SandboxWrap:
     command; the seam accepts any ``argv -> argv`` transform. This wrapper is the
     batteries-included option.
     """
+    # BUG4a: confine writes to write_root (the carved worktree when supplied),
+    # falling back to clone_dir for the back-compat / no-worktree case.
     clone_str = str(Path(clone_dir).resolve())
+    write_str = str(Path(write_root if write_root is not None else clone_dir).resolve())
 
     def wrap(argv: Sequence[str]) -> list[str]:
         settings = json.dumps(
@@ -565,7 +625,7 @@ def native_sandbox_wrap(clone_dir: str | os.PathLike[str]) -> SandboxWrap:
                 "sandbox": {
                     "enabled": True,
                     "failIfUnavailable": True,
-                    "filesystem": {"allowWrite": [clone_str]},
+                    "filesystem": {"allowWrite": [write_str]},
                     # No network egress by default (the design's "no net egress").
                     "network": {"allowedDomains": []},
                 }
@@ -573,6 +633,13 @@ def native_sandbox_wrap(clone_dir: str | os.PathLike[str]) -> SandboxWrap:
         )
         return [*argv, "--settings", settings]
 
+    # BUG4a: tag the closure so a per-writer caller (host_scheduler.pipeline) can
+    # DETECT a native sandbox and rebuild it with the carved worktree as the
+    # ``write_root`` (an opaque ``argv -> argv`` seam is otherwise un-introspectable).
+    # ``native_clone_dir`` is the resolved clone; ``native_write_root`` is what THIS
+    # wrap currently confines writes to.
+    wrap.native_clone_dir = clone_str  # type: ignore[attr-defined]
+    wrap.native_write_root = write_str  # type: ignore[attr-defined]
     return wrap
 
 
@@ -827,7 +894,7 @@ async def run_attempt(
     wall_clock_s: float = WALL_CLOCK_S,
     permission_mode: str = DEFAULT_PERMISSION_MODE,
     disallowed_tools: Sequence[str] = DEFAULT_DISALLOWED_TOOLS,
-    allowed_tools: Sequence[str] | None = None,
+    allowed_tools: Sequence[str] | None = DEFAULT_ALLOWED_TOOLS,
     sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
     max_budget_usd: float | None = None,
 ) -> dict[str, Any] | _FailedAttempt:
@@ -850,7 +917,12 @@ async def run_attempt(
     * ``permission_mode`` — ``"acceptEdits"`` by default; ``"bypassPermissions"``
       is REFUSED unless ``sandbox_wrap`` is non-identity (a real sandbox is wired).
     * ``disallowed_tools`` — ``("Bash", "WebFetch", "WebSearch")`` by default.
-    * ``allowed_tools`` — optional explicit allowlist (e.g. Read/Edit/Write/Grep).
+    * ``allowed_tools`` — explicit allowlist; defaults to
+      :data:`DEFAULT_ALLOWED_TOOLS` (Read/Edit/Write/MultiEdit/Grep/Glob/LS/Task/
+      NotebookEdit/TodoWrite) so a headless ``-p`` worker is granted the file/work
+      primitives up-front (BUG3 — else it hits "haven't granted it yet"). The
+      deny-floor still wins (Bash/WebFetch/WebSearch denied). Pass ``None`` / an
+      empty sequence to omit ``--allowedTools`` entirely.
     * ``sandbox_wrap`` — ``argv -> argv`` OS-sandbox transform (default identity +
       one-time unsandboxed warning; see :func:`native_sandbox_wrap`).
     """
@@ -1107,8 +1179,7 @@ class _InFlight:
 class CliDispatchTools:
     """The real ``DispatchTools`` binding for the deterministic host (CLI mode).
 
-    The analog of ``QueueBridgeDispatchTools``: instead of enqueueing a bridge
-    request and servicing a queue, each dispatch launches ONE
+    No queue: each dispatch launches ONE
     ``loop.create_task(run_attempt(...))`` on the owned loop and records the future
     in an in-flight map. The WaveDispatcher drives this through the
     :func:`build_cli_spawn_fn` / :func:`build_cli_poll_fn` seams (spawn fires the
@@ -1139,7 +1210,7 @@ class CliDispatchTools:
         loop: asyncio.AbstractEventLoop | None = None,
         permission_mode: str = DEFAULT_PERMISSION_MODE,
         disallowed_tools: Sequence[str] = DEFAULT_DISALLOWED_TOOLS,
-        allowed_tools: Sequence[str] | None = None,
+        allowed_tools: Sequence[str] | None = DEFAULT_ALLOWED_TOOLS,
         sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
         review_pairing: Mapping[str, str] | None = None,
         task_index: Mapping[Any, Mapping[str, Any]] | None = None,
@@ -1313,8 +1384,7 @@ def build_cli_spawn_fn(
 
     Mirrors ``pm_dispatch.WaveDispatcher``'s ``spawn_fn`` contract EXACTLY
     (fire-and-forget; the reply is read back through the separate ``poll_fn``),
-    so the engine drives the CLI transport unchanged — the same shape
-    ``dispatch.build_spawn_fn`` produces for the bridge.
+    so the engine drives the CLI transport with the standard engine seam shape.
     """
 
     def spawn_fn(task: Mapping[str, Any], attempt: int) -> None:
@@ -1329,8 +1399,8 @@ def build_cli_poll_fn(
     """Build the WaveDispatcher ``poll_fn(task, attempt) -> Mapping | None`` seam.
 
     Returns the future's validated envelope when ``done()``, else ``None`` — the
-    exact non-blocking contract ``dispatch.build_poll_fn`` honors for the bridge,
-    so the engine's GO-OBSERVE / single-re-queue logic is unchanged.
+    standard non-blocking engine ``poll_fn`` contract, so the engine's GO-OBSERVE
+    / single-re-queue logic is unchanged.
     """
 
     def poll_fn(task: Mapping[str, Any], attempt: int) -> Mapping[str, Any] | None:
@@ -1339,31 +1409,28 @@ def build_cli_poll_fn(
     return poll_fn
 
 
-# ── M6a: CLI dispatch factory (the bridge-factory analog for the host path) ──
+# ── M6a: CLI dispatch factory (production constructor for the host path) ──
 #
-# The bridge path's production factory is
-# `atelier_entrypoint.build_wave_dispatcher_for_project`, which defaults its
-# `model_for` to `_default_model_for(phase, env)` (a `scripts.model_tier.recommend`
-# -backed closure). The host/CLI path had NO such factory: `CliDispatchTools` took
-# `model_for` as a REQUIRED ctor arg and every PRODUCTION call site was missing —
-# only tests constructed it (always with a constant lambda). This factory closes
-# that gap: it is the FIRST production constructor of `CliDispatchTools`, with the
-# SAME recommend-backed tier policy as the bridge.
+# `_default_model_for(phase, env)` is the shared `scripts.model_tier.recommend`
+# -backed tier closure. The host/CLI path previously had NO factory:
+# `CliDispatchTools` took `model_for` as a REQUIRED ctor arg and every PRODUCTION
+# call site was missing — only tests constructed it (always with a constant
+# lambda). This factory closes that gap: it is the FIRST production constructor of
+# `CliDispatchTools`, wiring the shared recommend-backed tier policy.
 #
-# Two seams differ from the bridge in WHERE they read their inputs, NOT in policy:
+# Two seams source their inputs per-task (the policy itself is unchanged):
 #
-#   * model_for — the bridge closes over ONE cycle `phase` and reads the task's
-#     `assigned_to` (the DB column). The host-path task dict carries a PER-TASK
-#     `phase` AND `assigned_persona` (the planner field; see scripts/roster.py).
-#     We REUSE `_default_model_for` verbatim (no re-implementation of tier /
-#     precedence / ATELIER_MODEL_TIER): for each task we resolve that task's phase
-#     and call `_default_model_for(task_phase, env)` on a view of the task whose
-#     `assigned_to` is the planner persona. The tier flow is therefore IDENTICAL
-#     to the bridge (override > env > difficulty > phase > default, then
-#     ROLE_FLOOR raise-only) — just sourced per-task.
-#   * briefing_for — the bridge resolves the persona-profile body from agents.db;
-#     the host path is DB-free at dispatch, so `briefing_for` resolves the persona
-#     from the IN-MEMORY roster (scripts/roster.resolve_persona) and feeds it to
+#   * model_for — a host-path task dict carries a PER-TASK `phase` AND
+#     `assigned_persona` (the planner field; see scripts/roster.py). We REUSE
+#     `_default_model_for` verbatim (no re-implementation of tier / precedence /
+#     ATELIER_MODEL_TIER): for each task we resolve that task's phase and call
+#     `_default_model_for(task_phase, env)` on a view of the task whose
+#     `assigned_to` is the planner persona. The tier flow is the shared policy
+#     (override > env > difficulty > phase > default, then ROLE_FLOOR raise-only) —
+#     just sourced per-task.
+#   * briefing_for — the host path is DB-free at dispatch, so `briefing_for`
+#     resolves the persona from the IN-MEMORY roster
+#     (scripts/roster.resolve_persona) and feeds it to
 #     `compose_briefing(persona_profile_text=...)`.
 
 
@@ -1497,16 +1564,15 @@ def build_cli_dispatch_for_project(
     loop: asyncio.AbstractEventLoop | None = None,
     permission_mode: str = DEFAULT_PERMISSION_MODE,
     disallowed_tools: Sequence[str] = DEFAULT_DISALLOWED_TOOLS,
-    allowed_tools: Sequence[str] | None = None,
+    allowed_tools: Sequence[str] | None = DEFAULT_ALLOWED_TOOLS,
     sandbox_wrap: SandboxWrap = identity_sandbox_wrap,
     run_mode: Any = None,
 ) -> CliDispatchTools:
     """Build the production ``CliDispatchTools`` for the host/CLI transport (M6a).
 
-    The host-path analog of
-    :func:`scripts.atelier_entrypoint.build_wave_dispatcher_for_project`: it
-    constructs the leaf adapter with the SAME recommend-backed model-tier policy
-    as the bridge, plus an in-memory roster-backed briefing.
+    The production constructor for the host path: it constructs the leaf adapter
+    with the shared recommend-backed model-tier policy, plus an in-memory
+    roster-backed briefing.
 
     .. note::
        This factory builds the ``CliDispatchTools`` LEAF (it owns an event loop;
@@ -1597,11 +1663,13 @@ def build_cli_dispatch_for_project(
 
 
 __all__ = [
+    "DEFAULT_ALLOWED_TOOLS",
     "DEFAULT_DISALLOWED_TOOLS",
     "DEFAULT_PERMISSION_MODE",
     "ENVELOPE_SCHEMA",
     "ENV_ALLOWLIST",
     "FAILED_ATTEMPT",
+    "MIN_BUDGET_USD",
     "TRANSIENT_SPAWN_RETRIES",
     "TRANSPORT_CLI",
     "UNSANDBOXED_OPT_OUT_ENV",

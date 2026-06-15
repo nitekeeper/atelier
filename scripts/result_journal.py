@@ -219,6 +219,18 @@ class ResultJournal:
         }
         self._persist()
 
+    def delete(self, key: str) -> bool:
+        """Remove the cached entry for *key* (if present) and persist; return True iff
+        an entry was removed. Used to INVALIDATE a result a downstream engine guard
+        rejected (e.g. a false-`done` whose declared writes were absent) so a retry
+        RE-EXECUTES instead of replaying the rejected envelope (``attempt`` is not part
+        of the key, so without this a rejected `done` would be replayed forever)."""
+        if key in self._store:
+            del self._store[key]
+            self._persist()
+            return True
+        return False
+
     def get_envelope_hash(self, key: str) -> str | None:
         """Return the stored envelope_hash for *key*, or ``None`` on a miss."""
         row = self._store.get(key)

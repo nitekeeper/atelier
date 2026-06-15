@@ -44,5 +44,6 @@ def test_schema_is_json_serialisable_and_stable():
     a = json.dumps(ENVELOPE_SCHEMA, sort_keys=True)
     b = json.dumps(ENVELOPE_SCHEMA, sort_keys=True)
     assert a == b
-    # task_id permits both int and string (the SKILL's bare-int OR stringified id).
-    assert set(ENVELOPE_SCHEMA["properties"]["task_id"]["type"]) == {"string", "integer"}
+    # task_id is a SINGLE type "string" — claude's --json-schema (ajv strictTypes)
+    # rejects union types; the worker always echoes the string id we hand it.
+    assert ENVELOPE_SCHEMA["properties"]["task_id"]["type"] == "string"

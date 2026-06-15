@@ -28,8 +28,8 @@ You need two values to identify the cycle:
 
 - `<id>` — the `team_id` (the TEXT id returned when the team was created).
 - `<pk>` — the `team_pk`, i.e. the run/cycle correlation id that scopes the
-  cycle's bridge queue. (If you ran the dispatch this session, both are in
-  working memory; otherwise read them from the `teams` / `bridge_requests`
+  cycle's records. (If you ran the dispatch this session, both are in
+  working memory; otherwise read them from the `teams` / `bridge_messages`
   rows for the active project.)
 
 Shell to the reporter:

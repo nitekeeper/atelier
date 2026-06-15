@@ -343,12 +343,11 @@ def persist_tasks(
     project-scoped (the status fallback), so this is a SAFE no-op when the
     orchestrator does not thread a correlation id.
 
-    ORDERING SUBTLETY: ``persist_tasks`` runs at ``plan:approved`` BEFORE
-    ``build_wave_dispatcher_for_project``, so ``team_pk`` must be known before
-    the planner persists. It already is — the orchestrator allocates the same
-    correlation string for the bridge queue (it scopes the whole cycle's
-    bridge_requests per ``scripts/atelier_entrypoint.py``) and passes that same
-    string here; no dispatch-time backfill is required on the live flow.
+    ORDERING SUBTLETY: ``persist_tasks`` runs at ``plan:approved`` BEFORE the
+    host dispatch await, so ``team_pk`` must be known before the planner
+    persists. It already is — the orchestrator allocates the same correlation
+    string to scope the whole cycle's records and passes that same string here;
+    no dispatch-time backfill is required on the live flow.
 
     All-or-nothing: if any row fails mid-loop, the rows already created are
     deleted before the exception propagates, so a partial task list never
@@ -414,12 +413,11 @@ def run_planner(
     ``team_pk`` (atelier#90 / migration 010) is the run/cycle correlation id
     forwarded to :func:`persist_tasks` so every persisted task is stamped with
     its cycle. It is known BEFORE the planner runs — the orchestrator allocates
-    the same string for the bridge queue (it scopes the whole cycle's
-    bridge_requests) and threads it here; the planner persists at
-    ``plan:approved``, which is before ``build_wave_dispatcher_for_project``, so
-    the stamp lands at creation with no dispatch-time backfill. NULL by default
-    (single-cycle / non-team flows leave rows project-scoped — the SAFE status
-    fallback).
+    the same string to scope the whole cycle's records and threads it here; the
+    planner persists at ``plan:approved``, which is before the host dispatch
+    await, so the stamp lands at creation with no dispatch-time backfill. NULL by
+    default (single-cycle / non-team flows leave rows project-scoped — the SAFE
+    status fallback).
     """
     if existing_files is None:
         existing_files = snapshot_existing_files(root) if root is not None else set()

@@ -495,9 +495,9 @@ def build_persona_gap_escalate_fn(
 
     #64 (PR #86) shipped :func:`escalate_persona_gap` as a dormant API — never
     wired to the engine's ``escalate_fn`` seam (`scripts/pm_dispatch.py`). This
-    factory is that wire: pass the returned callable to
-    :func:`scripts.atelier_entrypoint.build_wave_dispatcher_for_project` (the
-    #85 call site) so every abandonment the engine emits both (a) hits the
+    factory is that wire: thread the returned callable (typically wrapped in a
+    collector) into :func:`scripts.dispatch.dispatch_host_pipeline` (the #85 host
+    dispatch entry point) so every abandonment the engine emits both (a) hits the
     guaranteed-emitting base sink and (b) records a one-shot escalation row the
     orchestrator can surface to the human.
 

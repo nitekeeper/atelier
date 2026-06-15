@@ -135,9 +135,10 @@ reply (`_observe_before_kill`), then branches on a **real signal**:
 
 The discriminator keys on a **real signal — the presence of a validated terminal
 envelope — never on elapsed time alone.** The confirming read is **non-consuming**
-(production `build_poll_fn` passes `update_cursor=False`), so it cannot hide the
-row from the real consumer or be attempt-laundered; it is **fail-closed** (a read
-error is treated as `None` → soft-kill, never a silent advance).
+(the production host `poll_fn` reads the worker's terminal envelope without
+consuming it), so it cannot hide the row from the real consumer or be
+attempt-laundered; it is **fail-closed** (a read error is treated as `None` →
+soft-kill, never a silent advance).
 
 Distinguish two intervals: the **30 s emit cadence** is the worker's advisory
 heartbeat rhythm; `POLL_INTERVAL_S` (0.2 s) is the engine's internal in-flight
@@ -267,21 +268,22 @@ section.
    (`internal/plan-wave-1/`): every dispatchable task has a non-null
    `parallel_group` and an acyclic `depends_on`. A NULL group aborts the entire
    run at pre-flight.
-2. Construct the dispatcher via the **production call site**
-   `scripts/atelier_entrypoint.py::build_wave_dispatcher_for_project` (atelier#85)
-   — it resolves the persisted dispatch mode, wires the production queue-bridge
-   seams (`QueueBridgeDispatchTools` + `build_spawn_fn` / `build_poll_fn`,
-   atelier#81), and threads `escalate_fn` through. Pass
-   `escalate_fn=build_persona_gap_escalate_fn(team_id=…)`
-   (`scripts/team_meeting.py`, atelier#87) to surface escalations inline to the
-   human via the one-shot ledger latch; the engine's default only logs. The full
-   live recipe (mode read-back + per-turn `bridge_requests` servicing) is
-   `internal/dev-dispatch/SKILL.md`. (Constructing `WaveDispatcher` directly with
-   hand-wired seams remains valid for tests / smoke runs.)
-3. Call `dispatcher.run(tasks)`. It returns one `WaveTracker.summary()` dict per
-   wave (in order). Inspect `dispatcher.escalations` for every abandonment
-   emitted this run. The `spawn_fn` ENQUEUES `bridge_requests` rows you must
-   service each turn (`internal/bridge-poll/SKILL.md`) for the wave to progress.
+2. Drive the engine via the **production call site**
+   `scripts/dispatch.py::dispatch_host_pipeline` (atelier#85) — the
+   deterministic-host pipeline resolves the persisted dispatch mode, wires the
+   host CLI dispatch seams (`scripts/cli_dispatch.py`), and threads `escalate_fn`
+   through. Inject a COLLECTOR `escalate_fn` (it appends each escalation to a
+   captured list) so escalations surface to the human via the one-shot ledger
+   latch (`build_persona_gap_escalate_fn(team_id=…)`, `scripts/team_meeting.py`,
+   atelier#87); the engine's default only logs. The full live recipe (mode
+   read-back + the single await) is `internal/dev-dispatch/SKILL.md`.
+   (Constructing `WaveDispatcher` directly with hand-wired seams remains valid for
+   tests / smoke runs.)
+3. `await dispatch_host_pipeline(tasks, …)` once. It returns a flat `list[dict]`
+   of per-task envelopes in deterministic `(parallel_group, task_id)` order; the
+   pipeline drives the kept `WaveDispatcher` engine internally (no per-turn
+   servicer). Read the collector's `escalations` list for every abandonment
+   emitted this run.
 4. For each abandoned task surfaced via escalation, decide whether to stamp
    `tasks.set_abandoned_ack` (audit only — it does not change status or unblock
    any wave).

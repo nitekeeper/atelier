@@ -1192,7 +1192,7 @@ def lookup_index_id_by_source_ref(*, source_ref: str) -> int | None:
 #
 # These tables are part of the team-mode runtime substrate, which lives on the
 # LOCAL `.ai/atelier.db` regardless of mode (the same DB the bridge message
-# wire and bridge_requests queue write through — see scripts/dispatch.py
+# wire writes through — see scripts/dispatch.py
 # "always Local" enforcement). They go through backend_local._conn() (A8: WAL
 # + FK, never raw sqlite3.connect); the backend.py facade exposes them as
 # always-Local dispatchers.

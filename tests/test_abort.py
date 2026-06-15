@@ -1,18 +1,17 @@
 """pytest suite for `scripts/abort.py` — team-mode SOFT + HARD abort (atelier#65).
 
-`scripts.abort.main` is the deliberate, in-session teardown writer for the
+`scripts.abort.main` is the deliberate, in-session abort recorder for the
 CURRENT team. It runs in Local mode (mode_detector.detect_mode() == 'local';
 migration-006 dispatch-state mutators raise NotImplementedError otherwise), so
 these tests stand up a real Local-mode atelier DB (mirroring the `workspace`
 fixture pattern in `tests/test_pm_dispatch.py`): chdir into a fake git root,
 apply ALL migrations (shared + local-only) against `.ai/atelier.db`, then INSERT
-a `teams` row + a `create_team` `bridge_requests` row whose `response_json`
-carries the `team_id` so `resolve_team_id` can find it.
+a `teams` row (so the 'aborted' team_audit_log write — which FKs teams — holds).
+team_id is supplied explicitly via `--team-id`.
 
-Both teardown paths run one shared core whose AC#2 invariant is:
+Both paths run one shared core whose AC#2 invariant is:
   * the abort-report doc PERSISTS (domain='postmortem', subdomain='abort'),
   * teams.status is mutated (soft -> 'shutting_down', hard -> 'closed'),
-  * exactly ONE 'team_delete' bridge row is enqueued (status='pending'),
   * a 'aborted' team_audit event is written,
 and the worktree is never destroyed when dirty.
 
@@ -21,8 +20,8 @@ abort-report is a workspace-less doc (workspace_id=None) and the Memex
 facade `backend.write_document` lands it via the §6.7 `_no-workspace_`
 key, so `test_non_local_mode_abort_report_persists` pins cross-mode
 persistence. Only the report write crosses modes — teams.status /
-team_delete enqueue / 'aborted' audit remain Local-mode-only skips in
-non-local mode (`test_non_local_mode_skips_state_mutations_and_returns_zero`).
+'aborted' audit remain Local-mode-only skips in non-local mode
+(`test_non_local_mode_skips_state_mutations_and_returns_zero`).
 
 The worktree policy is exercised through the two private seams
 (`_worktree_is_dirty` / `_remove_worktree`) monkeypatched per-test, because the
@@ -59,7 +58,7 @@ TEAM_PK = "run-2026-05-31-cycle-1"
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     """A real Local-mode atelier DB rooted at a fake git workspace, seeded with
-    a `teams` row + a `create_team` bridge row carrying the team_id.
+    a `teams` row.
 
     `backend_local._conn()` and `abort`'s `--db .ai/atelier.db` both resolve via
     the CWD git root, so we chdir into the workspace and drop a `.git` dir.
@@ -79,22 +78,12 @@ def workspace(tmp_path, monkeypatch):
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA foreign_keys=ON")
     # teams row: team_audit_log.team_id REFERENCES teams(team_id), so the
-    # 'aborted' audit write requires this row to pre-exist.
+    # 'aborted' audit write requires this row to pre-exist. abort takes team_id
+    # explicitly via --team-id, so the FK holds against this seeded row.
     conn.execute(
         "INSERT INTO teams (team_id, project_id, lead_role, status, schema_version, created_at) "
         "VALUES (?, ?, ?, 'active', 1, ?)",
         (TEAM_ID, "proj-1", "atelier-pm-1", now),
-    )
-    # create_team bridge row: response_json carries {"team_id": ...} so
-    # abort.resolve_team_id can recover the team_id from the team_pk alone.
-    conn.execute(
-        "INSERT INTO bridge_requests (team_pk, kind, args_json, status, response_json) "
-        "VALUES (?, 'create_team', ?, 'ready', ?)",
-        (
-            TEAM_PK,
-            json.dumps({"lead_role": "atelier-pm-1"}),
-            json.dumps({"team_id": TEAM_ID}),
-        ),
     )
     conn.commit()
     conn.close()
@@ -111,20 +100,6 @@ def _team_status(db_path, team_id):
     finally:
         conn.close()
     return row[0] if row else None
-
-
-def _team_delete_rows(db_path, team_pk):
-    """Every kind='team_delete' bridge row for this team_pk (full dicts)."""
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            "SELECT * FROM bridge_requests WHERE kind = 'team_delete' AND team_pk = ? ORDER BY id",
-            (team_pk,),
-        ).fetchall()
-    finally:
-        conn.close()
-    return [dict(r) for r in rows]
 
 
 def _abort_report_docs(db_path):
@@ -148,27 +123,20 @@ def _abort_report_docs(db_path):
 
 
 def test_soft_abort_full_teardown_and_dirty_worktree_preserved(workspace, monkeypatch):
-    """SOFT abort: teams.status -> 'shutting_down', exactly ONE pending
-    'team_delete' bridge row enqueued, a 'aborted' team_audit event written,
-    the abort-report doc persists (readable back via project_documents), AND a
-    DIRTY worktree is PRESERVED (never removed). main() returns 0."""
+    """SOFT abort: teams.status -> 'shutting_down', a 'aborted' team_audit event
+    written, the abort-report doc persists (readable back via project_documents),
+    AND a DIRTY worktree is PRESERVED (never removed). main() returns 0."""
     # Worktree is DIRTY: the removal seam must never be called.
     monkeypatch.setattr(abort, "_worktree_is_dirty", lambda cwd: True)
     removed_calls = []
     monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: removed_calls.append(cwd) or True)
 
-    rc = abort.main(["--team-pk", TEAM_PK])
+    rc = abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID])
     assert rc == 0
 
     db = workspace["db"]
     # teams.status flipped to the soft target.
     assert _team_status(db, TEAM_ID) == "shutting_down"
-
-    # EXACTLY ONE team_delete row, pending, args_json carries the team_id.
-    del_rows = _team_delete_rows(db, TEAM_PK)
-    assert len(del_rows) == 1
-    assert del_rows[0]["status"] == "pending"
-    assert json.loads(del_rows[0]["args_json"]) == {"team_id": TEAM_ID}
 
     # EXACTLY ONE 'aborted' audit event, scoped to the team, mode='soft'.
     audits = backend.list_team_audit(team_id=TEAM_ID, event_type="aborted")
@@ -193,11 +161,11 @@ def test_soft_abort_clean_worktree_removed_only_with_opt_in(workspace, monkeypat
     monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: removed.append(cwd) or True)
 
     # Without the opt-in flag: clean worktree preserved.
-    assert abort.main(["--team-pk", TEAM_PK]) == 0
+    assert abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID]) == 0
     assert removed == []
 
     # With --clean-worktree: clean worktree removed.
-    assert abort.main(["--team-pk", TEAM_PK, "--clean-worktree"]) == 0
+    assert abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID, "--clean-worktree"]) == 0
     assert len(removed) == 1
 
 
@@ -212,7 +180,7 @@ def test_hard_abort_closes_team_and_removes_clean_worktree(workspace, monkeypatc
     removed = []
     monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: removed.append(cwd) or True)
 
-    rc = abort.main(["--team-pk", TEAM_PK, "--hard"])
+    rc = abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID, "--hard"])
     assert rc == 0
 
     db = workspace["db"]
@@ -224,8 +192,7 @@ def test_hard_abort_closes_team_and_removes_clean_worktree(workspace, monkeypatc
     assert len(docs) >= 1
     assert json.loads(docs[-1]["metadata"])["mode"] == "hard"
 
-    # Shared core still ran: one team_delete row + one 'aborted' audit event.
-    assert len(_team_delete_rows(db, TEAM_PK)) == 1
+    # Shared core still ran: one 'aborted' audit event.
     assert len(backend.list_team_audit(team_id=TEAM_ID, event_type="aborted")) == 1
 
     # Clean worktree auto-removed on the hard path.
@@ -248,7 +215,7 @@ def test_hard_abort_report_written_before_teardown(workspace, monkeypatch):
     monkeypatch.setattr(abort, "_set_team_status", _boom)
 
     with pytest.raises(RuntimeError, match="teardown step exploded"):
-        abort.main(["--team-pk", TEAM_PK, "--hard"])
+        abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID, "--hard"])
 
     # The report-first write landed BEFORE the teardown exploded.
     docs = _abort_report_docs(workspace["db"])
@@ -272,7 +239,7 @@ def test_hard_happy_path_links_final_report_to_crash_survival_copy(workspace, mo
     monkeypatch.setattr(abort, "_worktree_is_dirty", lambda cwd: False)
     monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: True)
 
-    assert abort.main(["--team-pk", TEAM_PK, "--hard"]) == 0
+    assert abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID, "--hard"]) == 0
 
     docs = _abort_report_docs(workspace["db"])
     # Exactly two: the report-first crash-survival doc + the final actuals doc.
@@ -293,7 +260,7 @@ def test_hard_abort_dirty_worktree_preserved(workspace, monkeypatch):
     removed = []
     monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: removed.append(cwd) or True)
 
-    assert abort.main(["--team-pk", TEAM_PK, "--hard"]) == 0
+    assert abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID, "--hard"]) == 0
     assert _team_status(workspace["db"], TEAM_ID) == "closed"
     # Dirty -> the removal seam was never called.
     assert removed == []
@@ -305,8 +272,8 @@ def test_hard_abort_dirty_worktree_preserved(workspace, monkeypatch):
 @pytest.mark.parametrize(
     "argv, expected_status, expected_mode",
     [
-        (["--team-pk", TEAM_PK], "shutting_down", "soft"),
-        (["--team-pk", TEAM_PK, "--hard"], "closed", "hard"),
+        (["--team-pk", TEAM_PK, "--team-id", TEAM_ID], "shutting_down", "soft"),
+        (["--team-pk", TEAM_PK, "--team-id", TEAM_ID, "--hard"], "closed", "hard"),
     ],
     ids=["soft", "hard"],
 )
@@ -356,7 +323,7 @@ def test_doc_persistence_is_non_vacuous(workspace, monkeypatch):
 
     monkeypatch.setattr(abort.backend, "write_document", _spy)
 
-    assert abort.main(["--team-pk", TEAM_PK]) == 0
+    assert abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID]) == 0
 
     # write_document was invoked with the postmortem/abort doc — the AC#2 write.
     abort_writes = [
@@ -375,28 +342,27 @@ def test_doc_persistence_is_non_vacuous(workspace, monkeypatch):
 
 def test_non_local_mode_skips_state_mutations_and_returns_zero(workspace, monkeypatch):
     """In NON-local mode abort SKIPS every Local-only state mutation
-    (teams.status / team_delete enqueue / 'aborted' audit) and returns 0.
+    (teams.status / 'aborted' audit) and returns 0.
 
     The migration-006 dispatch-state mutators are Local-mode-only, so a
-    non-local abort must not flip teams.status, must not enqueue a team_delete
-    row, and must not write an 'aborted' audit event. The pre-seeded teams row
-    stays 'active' and no new bridge/audit rows appear.
+    non-local abort must not flip teams.status and must not write an 'aborted'
+    audit event. The pre-seeded teams row stays 'active' and no new audit rows
+    appear.
 
     ANTI-REVERT: if the non-local guard is removed and abort runs the full
-    teardown in Memex mode, teams.status would flip and a team_delete row would
-    be enqueued — this FAILS.
+    teardown in Memex mode, teams.status would flip and an 'aborted' audit event
+    would be written — this FAILS.
     """
     monkeypatch.setattr(mode_detector, "detect_mode", lambda: "memex")
     monkeypatch.setattr(abort, "_worktree_is_dirty", lambda cwd: True)
     monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: True)
 
-    rc = abort.main(["--team-pk", TEAM_PK])
+    rc = abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID])
     assert rc == 0
 
     db = workspace["db"]
     # No Local-only state mutation happened.
     assert _team_status(db, TEAM_ID) == "active"
-    assert _team_delete_rows(db, TEAM_PK) == []
     assert backend.list_team_audit(team_id=TEAM_ID, event_type="aborted") == []
 
 
@@ -411,9 +377,8 @@ def test_non_local_mode_abort_report_persists(workspace, monkeypatch):
     set — so BEFORE the fix the facade gate raises NotImplementedError and
     NO doc is captured (RED), and AFTER the fix the workspace-less write
     lands under the §6.7 `_no-workspace_/(no-project)/postmortem/` key
-    (GREEN). State mutations (teams.status / team_delete enqueue / audit)
-    stay Local-only skips in non-local mode — only the REPORT write crosses
-    the facade now.
+    (GREEN). State mutations (teams.status / 'aborted' audit) stay Local-only
+    skips in non-local mode — only the REPORT write crosses the facade now.
     """
     from scripts import backend_memex
 
@@ -452,7 +417,7 @@ def test_non_local_mode_abort_report_persists(workspace, monkeypatch):
     )
 
     # The workspace-less write now lands; abort still returns 0.
-    assert abort.main(["--team-pk", TEAM_PK]) == 0
+    assert abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID]) == 0
 
     # The abort-report write was REACHED and persisted (not swallowed) —
     # workspace-less postmortem doc under the §6.7 reserved key.
@@ -463,20 +428,14 @@ def test_non_local_mode_abort_report_persists(workspace, monkeypatch):
     assert captured["payload"]["project_id"] is None
 
 
-# ── team_id resolution ──────────────────────────────────────────────────────
+# ── team_id handling ─────────────────────────────────────────────────────────
 
 
-def test_explicit_team_id_overrides_resolution(workspace, monkeypatch):
-    """An explicit --team-id wins over create_team-row resolution: the status
-    mutation + audit event target the passed team_id, and resolve_team_id is
-    never consulted."""
+def test_explicit_team_id_drives_status_and_audit(workspace, monkeypatch):
+    """An explicit --team-id is the sole source of team_id: the status mutation
+    + 'aborted' audit event target the passed team_id."""
     monkeypatch.setattr(abort, "_worktree_is_dirty", lambda cwd: True)
     monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: True)
-
-    def _should_not_run(*a, **k):
-        raise AssertionError("resolve_team_id must not be called when --team-id is explicit")
-
-    monkeypatch.setattr(abort, "resolve_team_id", _should_not_run)
 
     assert abort.main(["--team-pk", TEAM_PK, "--team-id", TEAM_ID]) == 0
     assert _team_status(workspace["db"], TEAM_ID) == "shutting_down"
@@ -484,13 +443,23 @@ def test_explicit_team_id_overrides_resolution(workspace, monkeypatch):
     assert len(audits) == 1
 
 
-def test_resolve_team_id_reads_from_create_team_response(workspace):
-    """resolve_team_id recovers the team_id from the create_team bridge row's
-    response_json $.team_id for a given team_pk (the canonical post-creation
-    id lives in the RESPONSE, not the request)."""
-    assert abort.resolve_team_id(workspace["db"], TEAM_PK) == TEAM_ID
-    # An unknown team_pk resolves to None.
-    assert abort.resolve_team_id(workspace["db"], "no-such-pk") is None
+def test_missing_team_id_skips_audit_but_still_reports(workspace, monkeypatch):
+    """With no --team-id the abort still completes (exit 0), flips teams.status
+    only for a resolvable team (here it is a no-op — no team_id to target), and
+    SKIPS the 'aborted' audit event (team_audit_log.team_id FKs teams). The
+    abort-report doc still persists."""
+    monkeypatch.setattr(abort, "_worktree_is_dirty", lambda cwd: True)
+    monkeypatch.setattr(abort, "_remove_worktree", lambda cwd: True)
+
+    assert abort.main(["--team-pk", TEAM_PK]) == 0
+
+    db = workspace["db"]
+    # No team_id → teams.status untouched (the seeded team stays 'active') and no
+    # 'aborted' audit event written.
+    assert _team_status(db, TEAM_ID) == "active"
+    assert backend.list_team_audit(team_id=TEAM_ID, event_type="aborted") == []
+    # But the report is still durable.
+    assert len(_abort_report_docs(db)) >= 1
 
 
 # ── #66 resume hooks: --project-id / --phase fold into payload + metadata ────

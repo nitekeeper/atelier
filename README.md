@@ -4,7 +4,7 @@ A shared workspace and methodology for a human developer collaborating with one 
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.10+
 - tmux (only for `workspace:*` and `room:*` commands)
 - [Memex](https://github.com/nitekeeper/memex) is **optional** — install it if you want shared knowledge-store backing; otherwise Atelier runs fine on its own.
 
@@ -34,13 +34,9 @@ WAL mode is enforced on both paths. Concurrent agent writes are safe.
 
 ### Pointing Claude Code at the plugin
 
-Atelier ships as a Claude Code plugin. From inside a Claude Code session, register it once:
+Atelier ships as a Claude Code plugin. From inside a Claude Code session, register it once via the agora marketplace's public `agora:run` skill — express the intent to register a new plugin (pointing at `https://github.com/nitekeeper/atelier.git`), which `agora:run` routes to its internal `plugin-register` procedure. (`plugin-register` is not itself a slash command.)
 
-```
-agora:plugin-register --url https://github.com/nitekeeper/atelier.git
-```
-
-`/atelier:run`, `/atelier:load`, `/atelier:save`, `/atelier:ingest`, and `/atelier:migrate` become available immediately.
+`/atelier:run`, `/atelier:load`, `/atelier:save`, `/atelier:ingest`, `/atelier:migrate`, `/atelier:status`, and `/atelier:abort` become available immediately.
 
 ### Auto-trigger setup (recommended)
 
@@ -121,11 +117,13 @@ Agents follow a **deregister-on-completion / rejoin-on-demand** lifecycle: each 
 
 This is all **fail-soft and bridge-fallback**: if Loom is absent or down, behavior is byte-identical to bridge-only — all coordination rides the existing bridge (`scripts/bridge_send.py`) — and a Loom error never blocks or aborts a cycle. Loom never carries control-flow: the terminal `task_result` reply envelope and heartbeats **always** ride the bridge control-plane regardless of Loom, and Loom never replaces the mandatory completion reply. See `scripts/loom_comms.py`, `internal/dev-dispatch/SKILL.md`, and `internal/dev-subagent/SKILL.md`.
 
-## Skills
+## Skills and internal procedures
 
-| Category | Skills |
+Only the **Session** row lists public `/atelier:<name>` slash commands. Every other row lists **internal procedures** (`internal/<name>/SKILL.md`) written in `name:op` notation — these are *not* slash commands; agents reach them via the Read tool, as the note below the table explains.
+
+| Category | Skills / procedures |
 |---|---|
-| Session | `run`, `ingest`, `save`, `load`, `migrate` |
+| Session | `run`, `ingest`, `save`, `load`, `migrate`, `status`, `abort` |
 | Dev workflow | `dev:design`, `dev:plan`, `dev:tdd`, `dev:review`, `dev:security`, `dev:qa`, `dev:diagnose`, `dev:handoff` |
 | Projects | `project:create/read/update/delete/list/search` |
 | Documents | `doc:create/read/update/delete/list/search` |

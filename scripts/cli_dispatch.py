@@ -84,7 +84,9 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -661,6 +663,82 @@ bwrap_sandbox_wrap = native_sandbox_wrap
 Runner = Callable[[Sequence[str], str], Awaitable[dict[str, Any]]]
 
 
+#: Grace, in seconds, between the SIGTERM and the SIGKILL escalation when reaping
+#: a timed-out child's process group. Short on purpose: a hung ``claude`` worker
+#: that ignores SIGTERM is force-killed quickly, while a cooperative child that
+#: honours SIGTERM exits within the grace and is reaped immediately (the grace is
+#: polled, not slept-through). Bounded so the reap completes well inside the test's
+#: post-timeout settle window and the engine's deadline budget.
+_TERM_GRACE_S = 0.5
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if ``pid`` still exists (signal 0 probe). A reaped/absent pid is dead."""
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, ChildProcessError):
+        return False
+    except PermissionError:
+        # Exists but not ours to signal — treat as alive (conservative).
+        return True
+    return True
+
+
+async def _reap_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Terminate + reap the whole process group of a timed-out/cancelled child.
+
+    The child is spawned with ``start_new_session=True`` so it leads its own
+    session/process group; killing the GROUP (``os.killpg``) reaps any grandchild
+    (e.g. a shell's ``sleep``) that a bare ``proc.kill()`` (direct child only)
+    would orphan. Escalation is SIGTERM → polled grace → SIGKILL, then a
+    SYNCHRONOUS, non-cancellable ``os.waitpid`` collects the zombie — critical
+    because the ambient ``asyncio.wait_for`` cancellation can abort an
+    ``await proc.wait()`` mid-flight (the prior bug: the SIGKILL had not yet
+    landed, the cancelled wait was suppressed, and the child leaked).
+
+    Idempotent and fail-soft: a child that already exited is a no-op; every
+    ``os`` call tolerates a racing exit (``ProcessLookupError`` / ``ChildProcessError``).
+    """
+    if proc.returncode is not None:
+        return
+    pid = proc.pid
+
+    def _signal_group(sig: int) -> None:
+        # Prefer the whole process group (reaps grandchildren); fall back to the
+        # direct pid if the group is already gone or pgid lookup races.
+        try:
+            os.killpg(os.getpgid(pid), sig)
+        except (ProcessLookupError, ChildProcessError):
+            return
+        except OSError:
+            with contextlib.suppress(ProcessLookupError, ChildProcessError):
+                os.kill(pid, sig)
+
+    _signal_group(signal.SIGTERM)
+
+    deadline = time.monotonic() + _TERM_GRACE_S
+    while time.monotonic() < deadline:
+        with contextlib.suppress(ChildProcessError):
+            if os.waitpid(pid, os.WNOHANG)[0] != 0:
+                break
+        if not _pid_alive(pid):
+            break
+        # Shielded so the ambient cancellation can't abort the grace poll.
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(asyncio.sleep(0.01))
+
+    if _pid_alive(pid):
+        _signal_group(signal.SIGKILL)
+
+    # Synchronous reap of the direct child — NOT cancellable, so the zombie is
+    # always collected even while the coroutine is being torn down.
+    with contextlib.suppress(ChildProcessError, ProcessLookupError):
+        os.waitpid(pid, 0)
+    # Let the asyncio transport observe the exit too (best-effort, shielded).
+    with contextlib.suppress(BaseException):
+        await asyncio.shield(proc.wait())
+
+
 async def real_cli_runner(argv: Sequence[str], cwd: str) -> dict[str, Any]:
     """Run ``claude`` as a subprocess and parse its single JSON result object.
 
@@ -677,11 +755,17 @@ async def real_cli_runner(argv: Sequence[str], cwd: str) -> dict[str, Any]:
       parent env. An autonomous agent running untrusted code never sees GH_TOKEN /
       cloud creds / ANTHROPIC_API_KEY. Subscription auth rides
       ``$HOME/.claude/.credentials.json`` (verified live with this trimmed env).
-    * **Reap on cancel.** On cancellation/timeout (the ``asyncio.wait_for`` in
-      :func:`run_attempt` trips) the ``CancelledError`` propagates through the
-      ``finally``, which ``kill()``s and ``wait()``s the child so a hung ``claude``
-      is genuinely terminated — never leaked as a zombie (the silently-dead-worker
-      class). An orphaned ``acceptEdits`` agent would keep running with no gate.
+    * **Reap on cancel.** The child is spawned with ``start_new_session=True`` so
+      it leads its own process group. On cancellation/timeout (the
+      ``asyncio.wait_for`` in :func:`run_attempt` trips) the ``CancelledError``
+      propagates through the ``except``, which reaps the whole GROUP via
+      :func:`_reap_process_group` (SIGTERM → polled grace → SIGKILL, then a
+      synchronous ``os.waitpid``). Killing the group — not just the direct child —
+      reaps any grandchild a hung ``claude`` spawned, and the synchronous waitpid
+      collects the zombie even while the coroutine is torn down. A hung ``claude``
+      is genuinely terminated — never leaked as an orphan or zombie (the
+      silently-dead-worker class). An orphaned ``acceptEdits`` agent would keep
+      running with no gate.
 
     Returns the parsed result dict (``usage`` / ``structured_output`` /
     ``is_error`` / ``subtype`` / …). Raises on a non-zero exit or unparseable
@@ -693,18 +777,15 @@ async def real_cli_runner(argv: Sequence[str], cwd: str) -> dict[str, Any]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=build_subprocess_env(),
+        start_new_session=True,  # own process group → group-kill reaps grandchildren on timeout
     )
     try:
         stdout_b, stderr_b = await proc.communicate()
-    except (asyncio.CancelledError, BaseException):
-        # Cancelled (wall-clock timeout) or any failure mid-flight: REAP the child
-        # before propagating so no orphaned `claude` survives the cancelled
-        # coroutine. kill() is idempotent-safe; wait() collects the zombie.
-        if proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            with contextlib.suppress(BaseException):
-                await proc.wait()
+    except BaseException:
+        # Cancelled (wall-clock timeout) or any failure mid-flight: REAP the whole
+        # process group before propagating so no orphaned `claude` (or grandchild)
+        # survives the cancelled coroutine, and no zombie is left behind.
+        await _reap_process_group(proc)
         raise
     if proc.returncode != 0:
         raise RuntimeError(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
 import warnings
 
 import pytest
@@ -471,14 +472,25 @@ def test_unsandboxed_warning_fires_once(tmp_path, caplog):
 def test_real_runner_reaps_child_on_timeout():
     """A real subprocess (a long `sleep`) launched via the REAL runner is KILLED
     and reaped when the wall_clock trips — no orphan survives. Uses a dummy
-    long-running command (no real `claude` needed)."""
+    long-running command (no real `claude` needed).
+
+    The sleep duration is a UNIQUE, collision-proof marker (not the obvious "30")
+    so the orphan probe matches ONLY the child this test spawned — never an
+    unrelated `sleep 30` from some other process on the host (e.g. a developer's
+    background watcher). Weakening that probe to a generic value would let a
+    foreign sleep masquerade as a leak (false fail) — or, worse, hide a real leak.
+    """
     from scripts.cli_dispatch import real_cli_runner
 
+    # A long-but-unique sleep duration: long enough that the 0.2s wall-clock trips
+    # first, unique enough that no other process on the host runs `sleep <this>`.
+    marker = f"31{os.getpid()}"  # e.g. "31<pid>" seconds (~years) — uniquely ours
+
     async def drive():
-        # A 30s sleeper; wall_clock 0.2s trips first.
+        # The marker-second sleeper; wall_clock 0.2s trips first.
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(
-                real_cli_runner(["sleep", "30"], "/tmp"),  # nosec B108 — /tmp cwd for a dummy sleep
+                real_cli_runner(["sleep", marker], "/tmp"),  # nosec B108 — /tmp cwd for a dummy sleep
                 timeout=0.2,
             )
         # Give the reap a beat to complete.
@@ -486,13 +498,17 @@ def test_real_runner_reaps_child_on_timeout():
 
     asyncio.run(drive())
 
-    # No orphaned `sleep 30` may survive (the runner killed + reaped it).
+    # No orphaned `sleep <marker>` may survive (the runner killed + reaped its
+    # whole process group). The marker makes this probe match only OUR child.
     import subprocess  # nosec B404 — test-only liveness check
 
     out = subprocess.run(  # nosec B603 B607 — fixed argv, no shell
-        ["pgrep", "-f", "sleep 30"], capture_output=True, text=True
+        ["pgrep", "-f", f"sleep {marker}"], capture_output=True, text=True
     )
-    assert out.stdout.strip() == "", f"orphaned sleep survived: {out.stdout!r}"
+    # pgrep -f can match the probe's own short-lived argv on some hosts; filter to
+    # genuine `sleep <marker>` survivors only.
+    survivors = [line for line in out.stdout.splitlines() if line.strip() and "pgrep" not in line]
+    assert survivors == [], f"orphaned sleep survived: {survivors!r}"
 
 
 # ── MINOR 6: owned-loop FD hygiene (context manager + __del__) ──────────────

@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.10.1 — 2026-06-19
+
+**Migration runner self-heals a ledger/schema desync instead of crashing.** A
+Memex-mode store whose `migrations` ledger had fallen behind its actual schema
+caused the bootstrap runner to re-apply an already-applied migration
+(`ALTER TABLE tasks ADD COLUMN parallel_group`) → `duplicate column name`, which
+broke `/atelier:save`. `scripts/migrate.py` now applies each migration
+**per-statement** (split via stdlib `sqlite3.complete_statement()`), skipping
+only an already-exists statement and continuing — so genuinely-new statements
+still apply, while every other error still propagates and a file is recorded
+only once fully applied. Self-wrapped `BEGIN;…COMMIT;` migrations are honored.
+
+Adds `migrations/shared/014_project_documents_rebuild.sql`: a forward, idempotent
+rebuild that drops the orphan `project_documents.type` column and relaxes
+`NOT NULL` on `workspace_id`/`project_id`, preserving rows + FTS.
+
+**Child-process reaping fix.** `cli_dispatch.real_cli_runner` now reaps the
+entire process group on wall-clock timeout (`start_new_session` +
+SIGTERM→grace→SIGKILL via `os.killpg`, then `os.waitpid`), so a hung worker can
+no longer orphan a grandchild.
+
 ## v1.10.0 — 2026-06-15
 
 **M7 — the bridge dispatch QUEUE is retired and the `bridge_requests` table is

@@ -17,8 +17,11 @@ Layout pinned here:
   `roles` + `agents` tables (Memex mode defers to `~/.memex/agents.db`).
 """
 
+import sqlite3
 from contextlib import closing
 from pathlib import Path
+
+import pytest
 
 from scripts.migrate import apply_migrations, get_connection
 
@@ -140,6 +143,234 @@ def test_apply_shared_then_local_is_idempotent(tmp_path):
     with closing(get_connection(db_path)) as conn:
         count = conn.execute("SELECT COUNT(*) FROM migrations").fetchone()[0]
     assert count == expected, f"expected {expected} migration rows, got {count}"
+
+
+# ── Runner reconcile guard (ledger behind, schema ahead) ───────────────────
+
+
+def _make_migrations(tmp_path: Path) -> Path:
+    """A throwaway migrations dir with one base-schema file."""
+    d = tmp_path / "migs"
+    d.mkdir()
+    (d / "001_base.sql").write_text(
+        "CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT);\n"
+        "CREATE INDEX idx_widgets_name ON widgets(name);\n"
+    )
+    return d
+
+
+def test_fresh_store_applies_cleanly(tmp_path):
+    """A fresh store applies every file and records each exactly once."""
+    db_path = str(tmp_path / "fresh.db")
+    migs = _make_migrations(tmp_path)
+    apply_migrations(db_path, migs)
+    with closing(get_connection(db_path)) as conn:
+        recorded = {r[0] for r in conn.execute("SELECT filename FROM migrations")}
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert recorded == {"001_base.sql"}
+    assert "widgets" in tables
+
+
+def test_fully_applied_store_is_noop(tmp_path):
+    """Re-running on a fully-applied store records nothing new and does not
+    raise (the filename gate short-circuits before any SQL runs)."""
+    db_path = str(tmp_path / "noop.db")
+    migs = _make_migrations(tmp_path)
+    apply_migrations(db_path, migs)
+    apply_migrations(db_path, migs)  # must not raise
+    with closing(get_connection(db_path)) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM migrations").fetchone()[0]
+    assert count == 1
+
+
+def test_desynced_store_reconciles_without_crash(tmp_path):
+    """Ledger behind, schema ahead → reconcile.
+
+    Simulate the desync: the schema object (`widgets` + its index) already
+    exists, but the `migrations` ledger has NO row for the file. A naive
+    runner re-runs the migration and crashes on "already exists". The guarded
+    runner must treat it as ALREADY-APPLIED: record the filename and continue.
+    """
+    db_path = str(tmp_path / "desync.db")
+    migs = _make_migrations(tmp_path)
+    # Build the schema object directly, WITHOUT recording it in the ledger.
+    with closing(get_connection(db_path)) as conn:
+        conn.execute(
+            "CREATE TABLE migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "filename TEXT NOT NULL UNIQUE, applied_at TEXT NOT NULL)"
+        )
+        conn.execute("CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT)")
+        conn.execute("CREATE INDEX idx_widgets_name ON widgets(name)")
+        conn.execute("INSERT INTO widgets (name) VALUES ('keep-me')")
+        conn.commit()
+
+    # Must NOT raise — reconciles instead.
+    apply_migrations(db_path, migs)
+
+    with closing(get_connection(db_path)) as conn:
+        recorded = {r[0] for r in conn.execute("SELECT filename FROM migrations")}
+        # Data preserved — reconcile never touched the existing rows.
+        names = [r[0] for r in conn.execute("SELECT name FROM widgets")]
+    assert recorded == {"001_base.sql"}, "reconcile must record the filename"
+    assert names == ["keep-me"], "reconcile must not destroy existing data"
+
+
+def test_genuine_error_still_propagates(tmp_path):
+    """A non-'already exists' error MUST propagate (no blanket except)."""
+    db_path = str(tmp_path / "broken.db")
+    migs = tmp_path / "broken_migs"
+    migs.mkdir()
+    # References a table that does not exist → "no such table" OperationalError,
+    # which is NOT in the already-exists family and must propagate.
+    (migs / "001_broken.sql").write_text("INSERT INTO does_not_exist (x) VALUES (1);\n")
+    with pytest.raises(sqlite3.OperationalError):
+        apply_migrations(db_path, migs)
+    # The failed migration must NOT be recorded.
+    with closing(get_connection(db_path)) as conn:
+        recorded = {r[0] for r in conn.execute("SELECT filename FROM migrations")}
+    assert "001_broken.sql" not in recorded
+
+
+def test_mixed_file_new_statement_after_collision_still_runs(tmp_path):
+    """CRITICAL regression — the mixed-file / partial-presence hazard.
+
+    A not-yet-recorded file whose FIRST statement is already-present but whose
+    LATER statements are genuinely new. A whole-file `executescript` reconcile
+    would abort at statement 1 and record the file as applied, SILENTLY SKIPPING
+    every later statement forever. Per-statement reconcile must skip only the
+    collided statement and still apply the new ones, recording the file only
+    after ALL statements are processed.
+    """
+    db_path = str(tmp_path / "mixed.db")
+    with closing(get_connection(db_path)) as conn:
+        conn.execute(
+            "CREATE TABLE migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "filename TEXT NOT NULL UNIQUE, applied_at TEXT NOT NULL)"
+        )
+        # `early` already exists (partial prior run); `late` does NOT.
+        conn.execute("CREATE TABLE early (x)")
+        conn.commit()
+    migs = tmp_path / "mixed_migs"
+    migs.mkdir()
+    (migs / "001_mixed.sql").write_text(
+        "CREATE TABLE early (x);\n"  # collides → skipped
+        "CREATE TABLE late (y);\n"  # genuinely new → MUST still run
+    )
+    apply_migrations(db_path, migs)  # must not raise
+    with closing(get_connection(db_path)) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        recorded = {r[0] for r in conn.execute("SELECT filename FROM migrations")}
+    assert "late" in tables, "statement AFTER a collision must still execute"
+    assert recorded == {"001_mixed.sql"}, "file recorded once fully processed"
+
+
+def test_partial_002_completes_on_rerun(tmp_path):
+    """Realistic partial-`002` variant on the REAL migration files.
+
+    Simulate a crash after 002's first `ALTER TABLE project_documents ADD COLUMN
+    source_ref` (autocommitted) with 002 NOT yet ledger-recorded. The guarded
+    re-run hits `duplicate column name: source_ref` on statement 1 and must
+    still create the LATER 002 objects: tasks.source_ref, meeting_minutes
+    .source_ref, the FTS table, and the 3 sync triggers.
+    """
+    migrations = Path(__file__).parent.parent / "migrations"
+    shared = migrations / "shared"
+    db_path = str(tmp_path / "partial002.db")
+
+    # Apply only 001 (record it), then hand-apply 002's first statement so the
+    # column is present but 002 is unrecorded — the exact desync.
+    only_001 = tmp_path / "only_001"
+    only_001.mkdir()
+    (only_001 / "001_v110_schema.sql").write_text((shared / "001_v110_schema.sql").read_text())
+    apply_migrations(db_path, only_001)
+    with closing(get_connection(db_path)) as conn:
+        conn.execute("ALTER TABLE project_documents ADD COLUMN source_ref TEXT")
+        conn.commit()
+
+    # Full shared run: 002 reconciles per-statement; later objects still build.
+    apply_migrations(db_path, shared)
+
+    with closing(get_connection(db_path)) as conn:
+        tasks_cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        mtg_cols = {r[1] for r in conn.execute("PRAGMA table_info(meeting_minutes)")}
+        fts = conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE name='project_documents_fts'"
+        ).fetchone()[0]
+        trigs = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND name LIKE 'project_documents_%'"
+            )
+        }
+        recorded = {r[0] for r in conn.execute("SELECT filename FROM migrations")}
+    assert "source_ref" in tasks_cols, "tasks.source_ref (post-collision stmt) must exist"
+    assert "source_ref" in mtg_cols, "meeting_minutes.source_ref must exist"
+    assert fts == 1, "project_documents_fts must be created"
+    assert trigs == {
+        "project_documents_ai",
+        "project_documents_ad",
+        "project_documents_au",
+    }, f"all 3 FTS triggers must exist; got {trigs}"
+    assert "002_source_ref_and_fts.sql" in recorded
+
+
+def test_wrapped_file_midfile_failure_rolls_back(tmp_path):
+    """A BEGIN-wrapped file that hits a genuine (non-already-exists) error
+    mid-file must roll the WHOLE file back and NOT be recorded — the error
+    propagates, no half-applied state, no leaked open transaction."""
+    db_path = str(tmp_path / "wrapped.db")
+    with closing(get_connection(db_path)) as conn:
+        conn.execute(
+            "CREATE TABLE migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "filename TEXT NOT NULL UNIQUE, applied_at TEXT NOT NULL)"
+        )
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.execute("INSERT INTO t (v) VALUES ('original')")
+        conn.commit()
+    migs = tmp_path / "wrapped_migs"
+    migs.mkdir()
+    # Wrapped: drops t, then a genuine error (missing table) inside the BEGIN
+    # block. The whole block must roll back — t (and its row) intact.
+    (migs / "001_wrapped.sql").write_text(
+        "BEGIN;\nDROP TABLE t;\nINSERT INTO nonexistent_table VALUES (1);\nCOMMIT;\n"
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        apply_migrations(db_path, migs)
+    with closing(get_connection(db_path)) as conn:
+        rows = [r[0] for r in conn.execute("SELECT v FROM t")]
+        recorded = {r[0] for r in conn.execute("SELECT filename FROM migrations")}
+        leaked = conn.in_transaction
+    assert rows == ["original"], "wrapped file must roll back fully on genuine error"
+    assert "001_wrapped.sql" not in recorded, "failed file must NOT be recorded"
+    assert not leaked, "no open transaction may leak"
+
+
+def test_split_statements_handles_trigger_and_wrapped_begin():
+    """`_split_statements` keeps a trigger BEGIN...END body as ONE statement
+    (its inner `;` do not split) and emits self-wrapped `BEGIN;`/`COMMIT;` as
+    their own statements (string literals + comments with `;` are respected)."""
+    from scripts.migrate import _split_statements
+
+    sql = (
+        "-- a comment; with a semicolon\n"
+        "ALTER TABLE pd ADD COLUMN x TEXT;\n"
+        "CREATE TRIGGER tr AFTER INSERT ON pd BEGIN\n"
+        "  INSERT INTO pd(x) VALUES('a;b');\n"
+        "  INSERT INTO pd(x) VALUES('c');\n"
+        "END;\n"
+        "BEGIN;\n"
+        "DROP TABLE pd;\n"
+        "COMMIT;\n"
+    )
+    stmts = _split_statements(sql)
+    assert len(stmts) == 5, f"expected 5 statements, got {len(stmts)}: {stmts}"
+    assert stmts[0].endswith("ADD COLUMN x TEXT;")
+    assert stmts[1].startswith("CREATE TRIGGER tr") and stmts[1].endswith("END;")
+    assert "VALUES('a;b')" in stmts[1], "string-literal semicolon must stay in the trigger body"
+    assert stmts[2] == "BEGIN;"
+    assert stmts[3] == "DROP TABLE pd;"
+    assert stmts[4] == "COMMIT;"
 
 
 # ── phase_bypasses shape (v1.1.0 column rename) ────────────────────────────

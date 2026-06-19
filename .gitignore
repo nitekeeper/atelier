@@ -29,3 +29,6 @@ docs/agora-design.md
 # Tracked exceptions (forward-compat with kaizen+memex shape; none exist today; reserve the slot).
 !docs/runbooks/
 !docs/runbooks/**
+# Loom desktop app runtime state (mcp.json, temp reports) — never part of the repo.
+.loom/
+**/.loom/

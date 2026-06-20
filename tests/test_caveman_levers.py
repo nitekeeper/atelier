@@ -192,3 +192,30 @@ def test_include_terse_false_still_carries_rules_block_context_budget():
     # unique to the discipline subsection (not the changelog line that also mentions
     # the 125k figure) so the test pins real guidance, not a version-history artifact.
     assert "accumulating past" in off
+
+
+# ── M8 follow-up: terse rule is tier/env-gated (haiku = measured net loss) ──
+def test_terse_suppressed_on_haiku_tier():
+    """A haiku-tier dispatch (mechanical phase) drops _TERSE_OUTPUT_RULE but keeps
+    _CONTEXT_BUDGET_RULE — both ponytail and the atelier-bench fair-test show terse
+    is a net loss on the cheap tier (+99% cost, worse correctness on haiku)."""
+    body = compose_briefing(**_compose_kwargs(wave_phase="doc"))  # doc -> haiku tier
+    assert _TERSE_OUTPUT_RULE not in body
+    assert _CONTEXT_BUDGET_RULE in body
+
+
+def test_terse_kept_on_sonnet_tier():
+    """An implementation (sonnet) dispatch keeps the terse rule — byte-parity with
+    pre-gate behavior for the non-haiku case (existing fixtures use sonnet phases)."""
+    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))  # sonnet tier
+    assert _TERSE_OUTPUT_RULE in body
+    assert _CONTEXT_BUDGET_RULE in body
+
+
+def test_terse_env_force_off(monkeypatch):
+    """ATELIER_INCLUDE_TERSE=0 force-suppresses the terse rule everywhere (the
+    full-cycle A/B off-switch) while keeping _CONTEXT_BUDGET_RULE."""
+    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "0")
+    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))  # sonnet, but env off
+    assert _TERSE_OUTPUT_RULE not in body
+    assert _CONTEXT_BUDGET_RULE in body

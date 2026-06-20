@@ -89,7 +89,7 @@ from typing import Any, Protocol
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, UndefinedError
 
-from scripts.model_tier import normalize_phase
+from scripts.model_tier import normalize_phase, recommend
 
 # ── Constants pinned to the rules SKILL + 003 migration ────────────────────
 
@@ -236,6 +236,28 @@ def _is_implementation_phase(wave_phase: str) -> bool:
     phases the minimal-diff lever applies to. Uses ``model_tier.normalize_phase``
     so ``dev:tdd`` / ``tdd-green`` / etc. canonicalize to the gate keys."""
     return normalize_phase(wave_phase) in _IMPLEMENTATION_PHASES
+
+
+#: Operator force-off for the terse rule everywhere (the A/B off-switch). "0" disables.
+_TERSE_ENV = "ATELIER_INCLUDE_TERSE"
+
+
+def _terse_rule_applies(wave_phase: str, role_id: str) -> bool:
+    """Whether to append ``_TERSE_OUTPUT_RULE`` for THIS dispatch (the terse rule
+    only; ``_CONTEXT_BUDGET_RULE`` is a separate concern and is never gated here).
+
+    SUPPRESSED for the HAIKU tier: both ponytail and the atelier-bench fair-test
+    (2026-06-20) measured the terse / "caveman" rule as a NET LOSS on the cheap
+    tier (+99% cost AND worse correctness on haiku; ~neutral on sonnet), and haiku
+    handles the mechanical phases (doc/agenda/status/format) whose output is short
+    prose with little to compress — so terse there is nearly pure cost. Kept for
+    sonnet/opus pending a full-cycle orchestrator-level A/B. The operator env
+    ``ATELIER_INCLUDE_TERSE=0`` force-suppresses it everywhere (that A/B's
+    off-switch) and is checked first.
+    """
+    if os.environ.get(_TERSE_ENV, "1") == "0":
+        return False
+    return recommend(phase=wave_phase, role_id=role_id, env=os.environ) != "haiku"
 
 
 # ── ATELIER_TRANSPORT — cli (the deterministic host; the ONLY transport) ────
@@ -660,7 +682,11 @@ def compose_briefing(
     context-budget discipline subsection in ``internal/team-mode-rules/SKILL.md`` is
     always rendered, so ``include_terse=False`` is a clean control for the terse
     rule and removes the appended budget tail, but does NOT remove the rules-block
-    budget guidance (single-sourcing that is a follow-up).
+    budget guidance (single-sourcing that is a follow-up). Even when
+    ``include_terse`` is True, the ``_TERSE_OUTPUT_RULE`` itself is additionally
+    suppressed for the HAIKU tier and by ``ATELIER_INCLUDE_TERSE=0`` (see
+    :func:`_terse_rule_applies`) — it is a measured net loss there;
+    ``_CONTEXT_BUDGET_RULE`` is unaffected by that gate.
 
     ``include_minimal_diff`` (default ``True``) gates the output-side
     ``_MINIMAL_DIFF_RULE`` (the minimal-diff/native-first ladder + anti-deliberation
@@ -763,7 +789,13 @@ def compose_briefing(
     # above, so it is always TRANSPORT_CLI here.
     body = rendered.rstrip()
     if include_terse:
-        body += _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
+        # _TERSE_OUTPUT_RULE is additionally TIER/ENV-gated (haiku = measured net
+        # loss; ATELIER_INCLUDE_TERSE=0 force-off). _CONTEXT_BUDGET_RULE is a
+        # separate concern and stays under include_terse. Byte-identical to the
+        # prior single append for the kept case (concatenation associativity).
+        if _terse_rule_applies(wave_phase, role_id):
+            body += _TERSE_OUTPUT_RULE
+        body += _CONTEXT_BUDGET_RULE
     # Output-side minimal-diff lever (M8 rec #3) — GATED to implementation phases
     # (tdd/tdd:green/tdd:clean) and toggleable; appended AFTER the terse/budget
     # block and BEFORE the cli rule so _CLI_TRANSPORT_RULE stays the tail.

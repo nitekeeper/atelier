@@ -78,96 +78,89 @@ def test_b1_terse_rule_is_nonempty_constant():
 # ── B1 — LIVE: the rule reaches the rendered briefing, outside the fence ───
 
 
-def test_b1_terse_rule_present_in_composed_briefing():
-    """LIVE proof: compose_briefing's returned briefing CONTAINS the terse
-    rule. NEUTER: if the `+ _TERSE_OUTPUT_RULE` append were removed, this
-    distinctive substring would be absent and the test goes RED."""
+def test_b1_terse_rule_present_when_enabled(monkeypatch):
+    """Terse is now DEFAULT-OFF (measured net loss); opt in via ATELIER_INCLUDE_TERSE=1.
+    When enabled, the rule reaches the briefing, appended AFTER the untrusted fence."""
+    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
     body = compose_briefing(**_compose_kwargs())
     assert _TERSE_OUTPUT_RULE in body
-    # The terse rule is appended AFTER the rendered template body (the append
-    # site). It is no longer the briefing's very last section — the always-on
-    # context-budget rule (_CONTEXT_BUDGET_RULE) is appended directly after it
-    # in a stable terse → context-budget order (see test_context_budget_lever).
     fence_close = body.rfind("</untrusted>")
     assert fence_close != -1
     assert body.find(_TERSE_OUTPUT_RULE) > fence_close
 
 
-def test_b1_terse_rule_appended_after_template_body_outside_untrusted_fence():
-    """The terse rule sits AFTER the rendered template body — i.e. after the
-    untrusted TASK fence — never inside the task_brief that the fence escapes.
-
-    The task_brief text is wrapped in `<untrusted source=...>...</untrusted>`
-    by the template. The terse rule must appear AFTER the fence close so it is
-    real briefing guidance, not escaped untrusted data."""
-    body = compose_briefing(**_compose_kwargs())
-    fence_close = body.rfind("</untrusted>")
-    assert fence_close != -1, "expected an untrusted fence in the rendered briefing"
-    terse_at = body.find(_TERSE_OUTPUT_RULE)
-    assert terse_at != -1
-    assert terse_at > fence_close, "terse rule must be appended AFTER the untrusted fence"
-
-
-def test_b1_tm006_reply_contract_present_and_unmodified():
-    """The B1 append must not disturb the TM-006 reply contract. The
-    `# REPLY CONTRACT (verbatim — TM-006)` block + `"type": "task_result"`
-    payload survive in the briefing exactly as the template emits them."""
+def test_b1_tm006_reply_contract_present_and_unmodified(monkeypatch):
+    """Even with terse enabled, the TM-006 reply contract survives and precedes it."""
+    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
     body = compose_briefing(**_compose_kwargs())
     assert "# REPLY CONTRACT (verbatim — TM-006)" in body
     assert '"type": "task_result"' in body
-    # The reply-contract block is BEFORE the appended terse rule (the append
-    # is the briefing's tail), so the TM-006 contract is untouched by B1.
     assert body.index('"type": "task_result"') < body.index(_TERSE_OUTPUT_RULE)
 
 
 def test_b1_task_brief_stays_inside_fence_untouched():
-    """The task_brief (untrusted) content still renders inside the fence; the
-    terse rule is additive and does not move it out."""
+    """The untrusted task_brief renders inside the fence regardless of terse."""
     body = compose_briefing(**_compose_kwargs(task_brief="Add a unit test for X."))
     fence_close = body.rfind("</untrusted>")
     assert "Add a unit test for X." in body
     assert body.index("Add a unit test for X.") < fence_close
 
 
-# ── B1' — include_terse toggle (M8 lever-OFF control arm; ponytail analysis) ──
-def test_include_terse_default_is_byte_identical():
-    """Explicit include_terse=True is byte-identical to the implicit default, and
-    the default body still carries BOTH appended rules (byte-parity guard)."""
-    explicit = compose_briefing(**_compose_kwargs(include_terse=True))
-    default = compose_briefing(**_compose_kwargs())
-    assert explicit == default
-    assert _TERSE_OUTPUT_RULE in default
-    assert _CONTEXT_BUDGET_RULE in default
+# ── B1' — terse is DEFAULT-OFF (measured net loss at every tier); opt-in via env ──
+def test_terse_off_by_default():
+    """A normal sonnet dispatch (env unset) must NOT carry the terse rule, while
+    still carrying the context-budget rule."""
+    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))
+    assert _TERSE_OUTPUT_RULE not in body
+    assert _CONTEXT_BUDGET_RULE in body
+
+
+def test_terse_on_via_env(monkeypatch):
+    """ATELIER_INCLUDE_TERSE=1 opts the terse rule back in (the A/B re-test hook)."""
+    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
+    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))
+    assert _TERSE_OUTPUT_RULE in body
+    assert _CONTEXT_BUDGET_RULE in body
+
+
+def test_terse_env_force_off(monkeypatch):
+    """ATELIER_INCLUDE_TERSE=0 (explicit) also keeps terse off, budget on."""
+    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "0")
+    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))
+    assert _TERSE_OUTPUT_RULE not in body
+    assert _CONTEXT_BUDGET_RULE in body
 
 
 def test_include_terse_false_omits_both_rules():
-    """Lever-OFF control arm: include_terse=False drops BOTH the terse and
-    context-budget rules, but must NOT collaterally drop the CLI transport addendum."""
+    """include_terse=False drops the appended context-budget rule (and terse, off
+    anyway), but NOT the CLI transport addendum."""
     off = compose_briefing(**_compose_kwargs(include_terse=False))
     assert _TERSE_OUTPUT_RULE not in off
     assert _CONTEXT_BUDGET_RULE not in off
     assert _CLI_TRANSPORT_RULE in off
 
 
-def test_include_terse_false_equals_default_with_rules_stripped():
-    """Exact-delta neuter guard: OFF == default with exactly the two-rule tail
-    removed. Ties ON<->OFF so a future silent re-coupling cannot pass both tests."""
+def test_terse_enabled_byte_parity_and_exact_delta(monkeypatch):
+    """With terse opted in: explicit include_terse=True == implicit default; both
+    rules present; and include_terse=False == that default with exactly the
+    terse+budget tail excised (anti-recoupling delta guard)."""
+    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
+    explicit = compose_briefing(**_compose_kwargs(include_terse=True))
     on = compose_briefing(**_compose_kwargs())
+    assert explicit == on
+    assert _TERSE_OUTPUT_RULE in on
+    assert _CONTEXT_BUDGET_RULE in on
     off = compose_briefing(**_compose_kwargs(include_terse=False))
     combo = _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
-    # Uniqueness first: the concatenated tail occurs exactly once, so the delta is
-    # unambiguous (guards against a future template that repeats the rule text).
     assert on.count(combo) == 1
-    # Position-explicit excision (not first-match replace): OFF is ON with exactly
-    # that one tail span removed.
     cut = on.find(combo)
     assert off == on[:cut] + on[cut + len(combo) :]
 
 
-def test_include_terse_false_threads_through_host_briefing_for():
-    """The lever propagates through cli_dispatch._host_briefing_for, not just the
-    compose_briefing seam — pins the AI-2 threading so a refactor can't silently
-    drop it."""
+def test_terse_threads_through_host_briefing_for(monkeypatch):
+    """With terse enabled, it propagates through cli_dispatch._host_briefing_for;
+    include_terse=False still drops the budget tail."""
+    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
     from scripts.cli_dispatch import _host_briefing_for
 
     task = {"task_id": "AI-X", "assigned_persona": "backend-engineer-1", "phase": "tdd:green"}
@@ -180,42 +173,8 @@ def test_include_terse_false_threads_through_host_briefing_for():
 
 
 def test_include_terse_false_still_carries_rules_block_context_budget():
-    """KNOWN, DOCUMENTED limitation (M8 lever foundation): include_terse=False drops
-    the APPENDED _CONTEXT_BUDGET_RULE constant, but the equivalent context-budget
-    discipline in the always-rendered team-mode-rules block survives. So OFF is a
-    clean control for the terse rule but NOT (yet) for the context-budget concept.
-    Pinned here so a future single-sourcing change updates this test deliberately
-    rather than silently changing the control's meaning."""
+    """include_terse=False drops the APPENDED _CONTEXT_BUDGET_RULE constant, but the
+    equivalent discipline in the always-rendered team-mode-rules block survives."""
     off = compose_briefing(**_compose_kwargs(include_terse=False))
-    assert _CONTEXT_BUDGET_RULE not in off  # the appended constant is gated off
-    # ...but the SUBSTANTIVE rules-block budget guidance survives. Key on a phrase
-    # unique to the discipline subsection (not the changelog line that also mentions
-    # the 125k figure) so the test pins real guidance, not a version-history artifact.
+    assert _CONTEXT_BUDGET_RULE not in off
     assert "accumulating past" in off
-
-
-# ── M8 follow-up: terse rule is tier/env-gated (haiku = measured net loss) ──
-def test_terse_suppressed_on_haiku_tier():
-    """A haiku-tier dispatch (mechanical phase) drops _TERSE_OUTPUT_RULE but keeps
-    _CONTEXT_BUDGET_RULE — both ponytail and the atelier-bench fair-test show terse
-    is a net loss on the cheap tier (+99% cost, worse correctness on haiku)."""
-    body = compose_briefing(**_compose_kwargs(wave_phase="doc"))  # doc -> haiku tier
-    assert _TERSE_OUTPUT_RULE not in body
-    assert _CONTEXT_BUDGET_RULE in body
-
-
-def test_terse_kept_on_sonnet_tier():
-    """An implementation (sonnet) dispatch keeps the terse rule — byte-parity with
-    pre-gate behavior for the non-haiku case (existing fixtures use sonnet phases)."""
-    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))  # sonnet tier
-    assert _TERSE_OUTPUT_RULE in body
-    assert _CONTEXT_BUDGET_RULE in body
-
-
-def test_terse_env_force_off(monkeypatch):
-    """ATELIER_INCLUDE_TERSE=0 force-suppresses the terse rule everywhere (the
-    full-cycle A/B off-switch) while keeping _CONTEXT_BUDGET_RULE."""
-    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "0")
-    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))  # sonnet, but env off
-    assert _TERSE_OUTPUT_RULE not in body
-    assert _CONTEXT_BUDGET_RULE in body

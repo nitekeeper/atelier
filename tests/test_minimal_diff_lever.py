@@ -76,7 +76,10 @@ def test_minimal_diff_rule_shape_and_invariants():
 
 
 # (2) present for each implementation phase, in the right slot (after terse, before cli)
-def test_present_for_implementation_phases_in_order():
+def test_present_for_implementation_phases_in_order(monkeypatch):
+    monkeypatch.setenv(
+        "ATELIER_INCLUDE_TERSE", "1"
+    )  # terse default-off; opt in to assert terse<minimal<cli
     for phase in ("tdd", "tdd:green", "tdd:clean"):
         body = compose_briefing(**_compose_kwargs(wave_phase=phase))
         assert _MINIMAL_DIFF_RULE in body, phase

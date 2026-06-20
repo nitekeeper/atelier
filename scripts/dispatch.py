@@ -89,7 +89,7 @@ from typing import Any, Protocol
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, UndefinedError
 
-from scripts.model_tier import normalize_phase, recommend
+from scripts.model_tier import normalize_phase
 
 # ── Constants pinned to the rules SKILL + 003 migration ────────────────────
 
@@ -242,22 +242,23 @@ def _is_implementation_phase(wave_phase: str) -> bool:
 _TERSE_ENV = "ATELIER_INCLUDE_TERSE"
 
 
-def _terse_rule_applies(wave_phase: str, role_id: str) -> bool:
-    """Whether to append ``_TERSE_OUTPUT_RULE`` for THIS dispatch (the terse rule
-    only; ``_CONTEXT_BUDGET_RULE`` is a separate concern and is never gated here).
+def _terse_rule_applies() -> bool:
+    """Whether to append ``_TERSE_OUTPUT_RULE`` (the terse / "caveman" rule only;
+    ``_CONTEXT_BUDGET_RULE`` is a separate concern and is never gated here).
 
-    SUPPRESSED for the HAIKU tier: both ponytail and the atelier-bench fair-test
-    (2026-06-20) measured the terse / "caveman" rule as a NET LOSS on the cheap
-    tier (+99% cost AND worse correctness on haiku; ~neutral on sonnet), and haiku
-    handles the mechanical phases (doc/agenda/status/format) whose output is short
-    prose with little to compress — so terse there is nearly pure cost. Kept for
-    sonnet/opus pending a full-cycle orchestrator-level A/B. The operator env
-    ``ATELIER_INCLUDE_TERSE=0`` force-suppresses it everywhere (that A/B's
-    off-switch) and is checked first.
+    DEFAULT OFF. The terse instruction is a measured NET LOSS at every tier, by
+    three independent measurements (2026-06-20):
+      • per-worker benchmark: +99% cost & worse correctness on haiku, ~neutral sonnet;
+      • whole-cycle A/B: +37.8% total tokens even on sonnet (cost compounds across
+        the cycle's turns + cache re-injection — the OPPOSITE of the orchestrator-
+        context saving it was meant for);
+      • deterministic cap-demo: its only benefit (compacter ``notes_md`` -> smaller
+        wave digest) is bounded tiny (~100 tokens/worker) because the digest already
+        head/tail-caps notes to 200 chars AND the B2 codec compresses it.
+    So it is now OPT-IN ONLY via ``ATELIER_INCLUDE_TERSE=1`` (kept solely as the A/B
+    re-test hook). The B2 wave-digest codec + ``_CONTEXT_BUDGET_RULE`` are unaffected.
     """
-    if os.environ.get(_TERSE_ENV, "1") == "0":
-        return False
-    return recommend(phase=wave_phase, role_id=role_id, env=os.environ) != "haiku"
+    return os.environ.get(_TERSE_ENV, "0") == "1"
 
 
 # ── ATELIER_TRANSPORT — cli (the deterministic host; the ONLY transport) ────
@@ -682,11 +683,11 @@ def compose_briefing(
     context-budget discipline subsection in ``internal/team-mode-rules/SKILL.md`` is
     always rendered, so ``include_terse=False`` is a clean control for the terse
     rule and removes the appended budget tail, but does NOT remove the rules-block
-    budget guidance (single-sourcing that is a follow-up). Even when
-    ``include_terse`` is True, the ``_TERSE_OUTPUT_RULE`` itself is additionally
-    suppressed for the HAIKU tier and by ``ATELIER_INCLUDE_TERSE=0`` (see
-    :func:`_terse_rule_applies`) — it is a measured net loss there;
-    ``_CONTEXT_BUDGET_RULE`` is unaffected by that gate.
+    budget guidance (single-sourcing that is a follow-up). NB the
+    ``_TERSE_OUTPUT_RULE`` itself is now **DEFAULT-OFF** even when ``include_terse``
+    is True — it is a measured net loss at every tier (see
+    :func:`_terse_rule_applies`) and is opt-in only via ``ATELIER_INCLUDE_TERSE=1``.
+    ``_CONTEXT_BUDGET_RULE`` is unaffected and still rides ``include_terse``.
 
     ``include_minimal_diff`` (default ``True``) gates the output-side
     ``_MINIMAL_DIFF_RULE`` (the minimal-diff/native-first ladder + anti-deliberation
@@ -789,11 +790,10 @@ def compose_briefing(
     # above, so it is always TRANSPORT_CLI here.
     body = rendered.rstrip()
     if include_terse:
-        # _TERSE_OUTPUT_RULE is additionally TIER/ENV-gated (haiku = measured net
-        # loss; ATELIER_INCLUDE_TERSE=0 force-off). _CONTEXT_BUDGET_RULE is a
-        # separate concern and stays under include_terse. Byte-identical to the
-        # prior single append for the kept case (concatenation associativity).
-        if _terse_rule_applies(wave_phase, role_id):
+        # _TERSE_OUTPUT_RULE is now DEFAULT-OFF (measured net loss at every tier;
+        # see _terse_rule_applies) — opt back in only via ATELIER_INCLUDE_TERSE=1.
+        # _CONTEXT_BUDGET_RULE is a separate concern and stays under include_terse.
+        if _terse_rule_applies():
             body += _TERSE_OUTPUT_RULE
         body += _CONTEXT_BUDGET_RULE
     # Output-side minimal-diff lever (M8 rec #3) — GATED to implementation phases

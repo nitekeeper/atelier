@@ -1578,6 +1578,8 @@ def _host_briefing_for(
     wave_id: str,
     phase_procedure_for: Callable[[Mapping[str, Any]], str] | None = None,
     deadline_iso: str = "2099-01-01T00:00:00Z",
+    include_terse: bool = True,
+    include_minimal_diff: bool = True,
 ) -> Callable[[Mapping[str, Any], int], str]:
     """Build the host-path ``briefing_for(task, attempt) -> str`` seam.
 
@@ -1587,6 +1589,17 @@ def _host_briefing_for(
     is pinned to ``TRANSPORT_CLI`` so the composer appends the CLI CHANNELS /
     REPLY-CONTRACT addendum (the worker returns its structured envelope, not a
     bridge send) — the host path has no bridge.
+
+    ``include_terse`` (default ``True``) threads to ``compose_briefing`` to gate the
+    terse / context-budget tail (the M8 measurement-lever seam). The two production
+    callers omit it, so a live run is always ``True`` until the A/B harness wires it.
+
+    ``include_minimal_diff`` (default ``True``) threads the same way to gate the
+    output-side minimal-diff ladder (M8 rec #3). It is PHASE-gated inside
+    ``compose_briefing`` via the per-task ``wave_phase`` (``str(task.get("phase") or
+    "implement")`` below), so a real ``tdd:green`` task auto-gets the rule while a
+    review / design / un-phased (``"implement"``) task does not — no planner wiring.
+    The two production callers omit the kwarg (always ``True``, then phase-gated).
 
     ``phase_procedure_for(task) -> str`` supplies the dev-arc phase-procedure body
     (the bridge sources it from ``internal/<phase>/SKILL.md``); defaults to a
@@ -1622,6 +1635,8 @@ def _host_briefing_for(
             wave_phase=str(task.get("phase") or "implement"),
             deadline_iso=deadline_iso,
             transport=TRANSPORT_CLI,
+            include_terse=include_terse,
+            include_minimal_diff=include_minimal_diff,
         )
 
     return briefing_for

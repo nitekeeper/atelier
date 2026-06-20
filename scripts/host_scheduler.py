@@ -68,7 +68,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from scripts.budget_pool import BudgetExceeded, BudgetPool
+from scripts.budget_pool import BudgetExceeded, BudgetPool, format_usage_report
 from scripts.cli_dispatch import (
     DEFAULT_ALLOWED_TOOLS as _DEFAULT_ALLOWED_TOOLS,
 )
@@ -2066,4 +2066,11 @@ async def run_host_pipeline_for_project(
     # internally to {}, so leaving it unset keeps the single-dispatch behavior).
     if eff_review_pairing:
         pipeline_kwargs["review_pairing"] = eff_review_pairing
-    return await pipeline(task_list, **pipeline_kwargs)
+    results = await pipeline(task_list, **pipeline_kwargs)
+    # Post-run COST REPORT (M8 rec #2) — the only post-run consumer of the meter.
+    # eff_budget is the pool that received the bubbled per-task charges (in a
+    # non-neutral mode the passed `budget` carries ZERO), so its root-level
+    # usage_breakdown() is the whole-run four-channel total. Logger side-effect
+    # only: the return stays the byte/shape-identical per-task envelope list.
+    logging.getLogger(__name__).info(format_usage_report(eff_budget.usage_breakdown()))
+    return results

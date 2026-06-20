@@ -15,7 +15,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.dispatch import _TERSE_OUTPUT_RULE, TRANSPORT_CLI, compose_briefing
+from scripts.dispatch import (
+    _CLI_TRANSPORT_RULE,
+    _CONTEXT_BUDGET_RULE,
+    _TERSE_OUTPUT_RULE,
+    TRANSPORT_CLI,
+    compose_briefing,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -121,3 +127,68 @@ def test_b1_task_brief_stays_inside_fence_untouched():
     fence_close = body.rfind("</untrusted>")
     assert "Add a unit test for X." in body
     assert body.index("Add a unit test for X.") < fence_close
+
+
+# ── B1' — include_terse toggle (M8 lever-OFF control arm; ponytail analysis) ──
+def test_include_terse_default_is_byte_identical():
+    """Explicit include_terse=True is byte-identical to the implicit default, and
+    the default body still carries BOTH appended rules (byte-parity guard)."""
+    explicit = compose_briefing(**_compose_kwargs(include_terse=True))
+    default = compose_briefing(**_compose_kwargs())
+    assert explicit == default
+    assert _TERSE_OUTPUT_RULE in default
+    assert _CONTEXT_BUDGET_RULE in default
+
+
+def test_include_terse_false_omits_both_rules():
+    """Lever-OFF control arm: include_terse=False drops BOTH the terse and
+    context-budget rules, but must NOT collaterally drop the CLI transport addendum."""
+    off = compose_briefing(**_compose_kwargs(include_terse=False))
+    assert _TERSE_OUTPUT_RULE not in off
+    assert _CONTEXT_BUDGET_RULE not in off
+    assert _CLI_TRANSPORT_RULE in off
+
+
+def test_include_terse_false_equals_default_with_rules_stripped():
+    """Exact-delta neuter guard: OFF == default with exactly the two-rule tail
+    removed. Ties ON<->OFF so a future silent re-coupling cannot pass both tests."""
+    on = compose_briefing(**_compose_kwargs())
+    off = compose_briefing(**_compose_kwargs(include_terse=False))
+    combo = _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
+    # Uniqueness first: the concatenated tail occurs exactly once, so the delta is
+    # unambiguous (guards against a future template that repeats the rule text).
+    assert on.count(combo) == 1
+    # Position-explicit excision (not first-match replace): OFF is ON with exactly
+    # that one tail span removed.
+    cut = on.find(combo)
+    assert off == on[:cut] + on[cut + len(combo) :]
+
+
+def test_include_terse_false_threads_through_host_briefing_for():
+    """The lever propagates through cli_dispatch._host_briefing_for, not just the
+    compose_briefing seam — pins the AI-2 threading so a refactor can't silently
+    drop it."""
+    from scripts.cli_dispatch import _host_briefing_for
+
+    task = {"task_id": "AI-X", "assigned_persona": "backend-engineer-1", "phase": "tdd:green"}
+    kw = {"clone_dir": REPO_ROOT, "team_id": "t", "team_lead_name": "lead", "wave_id": "w"}
+    on = _host_briefing_for(**kw)(task, 1)
+    off = _host_briefing_for(**kw, include_terse=False)(task, 1)
+    assert _TERSE_OUTPUT_RULE in on
+    assert _TERSE_OUTPUT_RULE not in off
+    assert _CONTEXT_BUDGET_RULE not in off
+
+
+def test_include_terse_false_still_carries_rules_block_context_budget():
+    """KNOWN, DOCUMENTED limitation (M8 lever foundation): include_terse=False drops
+    the APPENDED _CONTEXT_BUDGET_RULE constant, but the equivalent context-budget
+    discipline in the always-rendered team-mode-rules block survives. So OFF is a
+    clean control for the terse rule but NOT (yet) for the context-budget concept.
+    Pinned here so a future single-sourcing change updates this test deliberately
+    rather than silently changing the control's meaning."""
+    off = compose_briefing(**_compose_kwargs(include_terse=False))
+    assert _CONTEXT_BUDGET_RULE not in off  # the appended constant is gated off
+    # ...but the SUBSTANTIVE rules-block budget guidance survives. Key on a phrase
+    # unique to the discipline subsection (not the changelog line that also mentions
+    # the 125k figure) so the test pins real guidance, not a version-history artifact.
+    assert "accumulating past" in off

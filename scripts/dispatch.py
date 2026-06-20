@@ -89,6 +89,8 @@ from typing import Any, Protocol
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, UndefinedError
 
+from scripts.model_tier import normalize_phase
+
 # ── Constants pinned to the rules SKILL + 003 migration ────────────────────
 
 # Triple-pinned with:
@@ -186,6 +188,55 @@ _CONTEXT_BUDGET_RULE = (
     "at a threshold, so this is your responsibility — checkpoint first, then "
     "return; do not just keep going."
 )
+
+# Output-side "minimal-diff / native-first" implementer lever (M8 rec #3, ponytail
+# analysis). UNLIKE the always-on terse/context-budget rules, this one is GATED to
+# implementation phases (tdd / tdd:green / tdd:clean) AND toggleable via
+# ``compose_briefing(include_minimal_diff=...)`` — a designer/reviewer/test-author
+# must NOT be told to write minimal code. Same append discipline: opens with
+# "\n\n# HEADING", appended to ``rendered.rstrip()`` OUTSIDE the untrusted TASK
+# fence (guidance, never injectable task data); does NOT touch role.j2/_base.j2 or
+# the TM-006 reply envelope. It is the output-side lever atelier lacked — every
+# prior lever is input-side and none constrains what an implementer BUILDS.
+_MINIMAL_DIFF_RULE = (
+    "\n\n# WHAT TO BUILD (minimal-diff — implementer, read last)\n\n"
+    "You are implementing. Prefer the SMALLEST change that satisfies the task "
+    "and its acceptance criteria. Walk this ladder and STOP at the first rung "
+    "that holds: (1) YAGNI — do not build what the task did not ask for; "
+    "(2) the standard library; (3) a native platform/framework feature; "
+    "(4) an already-installed dependency; (5) one line; (6) minimum custom "
+    "code. Do not add a new dependency, abstraction, config flag, or layer "
+    "when a lower rung already works. "
+    "REFLEX, NOT RESEARCH: the ladder is a quick reflex, not a research "
+    "project — if two rungs both work, take the higher (lazier) one and move "
+    "on; ship the lazy version and question it in the SAME response rather "
+    "than deliberating across turns (deliberation burns the very tokens this "
+    "rule exists to save). "
+    "WHEN NOT TO BE LAZY (load-bearing carve-out): do NOT minimize away input "
+    "validation at trust boundaries, error handling that prevents data loss, "
+    "security, accessibility, or anything the task EXPLICITLY requested. Leave "
+    "ONE runnable check (a test or assertion) behind any non-trivial logic. "
+    "The lazy choice is the small SAFE choice, never the unsafe one — when "
+    "minimizing would drop a guard, keep the guard. "
+    "This guidance shapes the CODE you write; it does NOT change the TM-006 "
+    "reply envelope, the acceptance criteria, or anything inside the TASK "
+    "fence above."
+)
+
+# Implementation phases the minimal-diff lever gates ON. NOT design/plan/review/
+# security/tdd:red/qa/verify/doc — a non-implementer (designer, reviewer, test
+# author) must never be told to minimize code. Gate on normalize_phase MEMBERSHIP,
+# never on tier (qa/verify are ALSO sonnet) and never on a bare == (the live host
+# value is "tdd:green", which a bare == "tdd" would miss → an inert lever).
+_IMPLEMENTATION_PHASES: frozenset[str] = frozenset({"tdd", "tdd:green", "tdd:clean"})
+
+
+def _is_implementation_phase(wave_phase: str) -> bool:
+    """True iff ``wave_phase`` is a code-writing implementation phase — the only
+    phases the minimal-diff lever applies to. Uses ``model_tier.normalize_phase``
+    so ``dev:tdd`` / ``tdd-green`` / etc. canonicalize to the gate keys."""
+    return normalize_phase(wave_phase) in _IMPLEMENTATION_PHASES
+
 
 # ── ATELIER_TRANSPORT — cli (the deterministic host; the ONLY transport) ────
 #
@@ -547,6 +598,8 @@ def compose_briefing(
     from_agent_self: str | None = None,
     template_env: Environment | None = None,
     transport: str | None = None,
+    include_terse: bool = True,
+    include_minimal_diff: bool = True,
 ) -> str:
     """Assemble + render a worker's inaugural spawn prompt.
 
@@ -595,6 +648,30 @@ def compose_briefing(
     :class:`UnknownTransportError`. The ``team_chat`` / loom wiring is independent
     of this and untouched (the inter-agent message WIRE, distinct from the removed
     dispatch queue, still rides ``bridge_send.py``/``bridge_read.py``).
+
+    ``include_terse`` (default ``True``) gates the appended ``_TERSE_OUTPUT_RULE``
+    + ``_CONTEXT_BUDGET_RULE`` tail; the default path is byte-identical to today,
+    and ``_CLI_TRANSPORT_RULE`` is NOT gated (transport-correctness, not a
+    measurement lever). SCOPE (M8 lever foundation): the flag is presently set only
+    via a direct call / the A/B tests — there is no env / run_mode wiring yet (the
+    two production callers of ``_host_briefing_for`` omit it, so a live run is
+    always ``True``); operator wiring lands with the measurement harness. It gates
+    only the APPENDED ``_CONTEXT_BUDGET_RULE`` constant: the equivalent
+    context-budget discipline subsection in ``internal/team-mode-rules/SKILL.md`` is
+    always rendered, so ``include_terse=False`` is a clean control for the terse
+    rule and removes the appended budget tail, but does NOT remove the rules-block
+    budget guidance (single-sourcing that is a follow-up).
+
+    ``include_minimal_diff`` (default ``True``) gates the output-side
+    ``_MINIMAL_DIFF_RULE`` (the minimal-diff/native-first ladder + anti-deliberation
+    reflex + safety carve-out, M8 rec #3). UNLIKE the always-on terse/budget rules
+    it is PHASE-GATED: it appends ONLY for an implementation ``wave_phase``
+    (tdd / tdd:green / tdd:clean, via :func:`_is_implementation_phase`) — never for
+    design / plan / review / security / tdd:red / qa / verify / doc. Default path
+    for a non-implementation phase is byte-identical to today (the rule never
+    appends there). Set only via a direct call / the A/B tests today — the two
+    production ``_host_briefing_for`` callers omit it, so a live run is always
+    ``True`` (then phase-gated); no env / run_mode wiring yet.
 
     Returns the fully-rendered briefing string.
     """
@@ -684,7 +761,14 @@ def compose_briefing(
     # (see `_CLI_TRANSPORT_RULE`). The `if` guard is retained as a defensive
     # belt-and-braces — `transport` is already validated against VALID_TRANSPORTS
     # above, so it is always TRANSPORT_CLI here.
-    body = rendered.rstrip() + _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
+    body = rendered.rstrip()
+    if include_terse:
+        body += _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
+    # Output-side minimal-diff lever (M8 rec #3) — GATED to implementation phases
+    # (tdd/tdd:green/tdd:clean) and toggleable; appended AFTER the terse/budget
+    # block and BEFORE the cli rule so _CLI_TRANSPORT_RULE stays the tail.
+    if include_minimal_diff and _is_implementation_phase(wave_phase):
+        body += _MINIMAL_DIFF_RULE
     if transport == TRANSPORT_CLI:
         body += _CLI_TRANSPORT_RULE
     return body

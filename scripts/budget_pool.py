@@ -135,6 +135,18 @@ class BudgetPool:
             "cache_read_input_tokens": self._cache_read_input_tokens,
         }
 
+    def total_usage_tokens(self) -> int:
+        """Whole-run four-channel token total for the post-run cost report.
+
+        The sum of every channel in :meth:`usage_breakdown` (output + input +
+        cache_creation + cache_read). Derived FROM ``usage_breakdown`` so it can
+        never diverge from the per-channel counters. This is NOT a gating metric —
+        only ``output_tokens`` (via :meth:`spent`) drives :meth:`assert_can_dispatch`.
+        Distinct from the :attr:`total_tokens` PROPERTY, which is the hard budget
+        LIMIT, not a consumption total.
+        """
+        return sum(self.usage_breakdown().values())
+
     # ── mutating operations ────────────────────────────────────────────────
 
     def charge(self, usage: Mapping[str, Any]) -> None:
@@ -229,3 +241,26 @@ class BudgetPool:
             raise ValueError(f"max_workers must be positive; got {max_workers!r}")
         budget_width = budget.remaining() // per_agent_tokens
         return min(max_workers, budget_width)
+
+
+def format_usage_report(breakdown: Mapping[str, int]) -> str:
+    """Render a one-line post-run cost report from a ``usage_breakdown()`` dict.
+
+    The headline metric is the FOUR-CHANNEL TOTAL (output + input +
+    cache_creation + cache_read) — NOT the gated ``output_tokens`` channel alone,
+    which systematically UNDER-counts whole-run cost (input + cache re-injection
+    dominate a multi-turn session). Pure + partial-dict tolerant: every channel is
+    read with a default of 0 so a missing KEY never raises mid-report. The contract
+    is partial-KEY tolerance, not partial-VALUE — VALUES are assumed numeric (the
+    sole caller passes ``usage_breakdown()``, whose four counters are always ints).
+    The total is a TOKEN count, not USD — gating stays token-based by design.
+    """
+    out = int(breakdown.get("output_tokens", 0))
+    inp = int(breakdown.get("input_tokens", 0))
+    cache_create = int(breakdown.get("cache_creation_input_tokens", 0))
+    cache_read = int(breakdown.get("cache_read_input_tokens", 0))
+    total = out + inp + cache_create + cache_read
+    return (
+        f"cost report (tokens): total={total} output={out} input={inp} "
+        f"cache_creation={cache_create} cache_read={cache_read}"
+    )

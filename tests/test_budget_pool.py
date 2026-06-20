@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.budget_pool import BudgetExceeded, BudgetPool
+from scripts.budget_pool import BudgetExceeded, BudgetPool, format_usage_report
 
 # ── headroom math ──────────────────────────────────────────────────────────
 
@@ -307,3 +307,114 @@ def test_invalid_total_tokens_zero_raises():
 def test_invalid_total_tokens_negative_raises():
     with pytest.raises(ValueError):
         BudgetPool(total_tokens=-100)
+
+
+# ── total_usage_tokens + format_usage_report (M8 four-channel cost report) ──
+
+
+def test_total_usage_tokens_sums_all_four_channels():
+    pool = BudgetPool(total_tokens=100_000, headroom=1.0)
+    pool.charge(
+        {
+            "output_tokens": 50,
+            "input_tokens": 200,
+            "cache_creation_input_tokens": 36_000,
+            "cache_read_input_tokens": 1_000,
+        }
+    )
+    pool.charge(
+        {
+            "output_tokens": 25,
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 500,
+        }
+    )
+    assert pool.total_usage_tokens() == 37_875
+    # Derived from the breakdown, so a future channel addition cannot silently diverge.
+    assert pool.total_usage_tokens() == sum(pool.usage_breakdown().values())
+
+
+def test_total_usage_tokens_exceeds_output_alone():
+    pool = BudgetPool(total_tokens=100_000, headroom=1.0)
+    pool.charge(
+        {
+            "output_tokens": 50,
+            "input_tokens": 200,
+            "cache_creation_input_tokens": 36_000,
+            "cache_read_input_tokens": 1_000,
+        }
+    )
+    pool.charge(
+        {
+            "output_tokens": 25,
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 500,
+        }
+    )
+    # The headline four-channel total is NOT the gated output channel (which under-counts).
+    assert pool.total_usage_tokens() > pool.spent()
+
+
+def test_total_usage_tokens_bubbles_to_parent():
+    parent = BudgetPool(total_tokens=1_000_000, headroom=1.0)
+    child = BudgetPool(total_tokens=100_000, parent=parent)
+    child.charge(
+        {
+            "output_tokens": 40,
+            "input_tokens": 500,
+            "cache_creation_input_tokens": 12_000,
+            "cache_read_input_tokens": 3_000,
+        }
+    )
+    # The ROOT pool's total is the whole-run total (charges bubble up).
+    assert parent.total_usage_tokens() == child.total_usage_tokens() == 15_540
+
+
+def test_format_usage_report_names_all_four_and_total():
+    report = format_usage_report(
+        {
+            "output_tokens": 50,
+            "input_tokens": 200,
+            "cache_creation_input_tokens": 36_000,
+            "cache_read_input_tokens": 1_000,
+        }
+    )
+    for label in ("output", "input", "cache_creation", "cache_read", "total"):
+        assert label in report
+    for value in ("50", "200", "36000", "1000", "37250"):
+        assert value in report  # no channel value silently dropped
+
+
+def test_format_usage_report_total_is_four_channel_sum():
+    report = format_usage_report(
+        {
+            "output_tokens": 1,
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 4,
+            "cache_read_input_tokens": 8,
+        }
+    )
+    assert "total=15" in report  # 1+2+4+8, NOT output (1) alone
+
+
+def test_format_usage_report_missing_channel_is_zero():
+    report = format_usage_report({"output_tokens": 10})  # partial dict must not raise
+    assert "total=10" in report
+
+
+def test_total_usage_does_not_gate():
+    pool = BudgetPool(total_tokens=1000, headroom=1.0)  # ceiling = 1000 output tokens
+    pool.charge(
+        {
+            "output_tokens": 100,
+            "input_tokens": 999_999,
+            "cache_creation_input_tokens": 999_999,
+            "cache_read_input_tokens": 999_999,
+        }
+    )
+    assert pool.total_usage_tokens() > 1_000_000  # huge four-channel total...
+    pool.assert_can_dispatch(est_per_agent=800)  # ...but it NEVER gates (output 100 + 800 <= 1000)
+    assert pool.spent() == 100
+    assert pool.remaining() == 900

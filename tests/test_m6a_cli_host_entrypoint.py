@@ -1057,3 +1057,40 @@ def test_rmode_never_writes_settings_json(tmp_path, monkeypatch):
     # ...but NOTHING wrote settings.json — R-MODE is transient/per-run.
     assert apply_calls == [], "R-MODE must NOT call apply_profile (advisory only)"
     assert write_calls == [], "R-MODE must NOT write settings.json"
+
+
+# ── M8 rec #2: post-run four-channel cost report (drive the REAL caller, A3) ──
+
+
+def test_host_pipeline_emits_four_channel_cost_report(tmp_path, caplog):
+    """A3 / test-the-production-caller: drive the REAL run_host_pipeline_for_project
+    and assert it emits the four-channel cost report wired at host_scheduler.run_host_pipeline_for_project,
+    with a total that is the FOUR-CHANNEL SUM (output + input + cache_creation +
+    cache_read) — not the gated output channel alone. The FakeCliRunner carries
+    non-zero input/cache so the report reflects the CHARGED eff_budget pool (not the
+    zero-charge passed budget)."""
+    import logging
+
+    usage = {
+        "output_tokens": 7,
+        "input_tokens": 200,
+        "cache_creation_input_tokens": 5_000,
+        "cache_read_input_tokens": 100,
+    }
+    runner = FakeCliRunner(structured_output=_echo_envelope, usage=usage)
+    with caplog.at_level(logging.INFO, logger="scripts.host_scheduler"):
+        _run_host(_two_task_dag(), runner, tmp_path)
+
+    reports = [r.getMessage() for r in caplog.records if "cost report (tokens):" in r.getMessage()]
+    assert len(reports) == 1, f"expected exactly one cost report, got {len(reports)}: {reports}"
+    nums = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", reports[0])}
+    for k in ("output", "input", "cache_creation", "cache_read", "total"):
+        assert k in nums, f"{k} missing from cost report {reports[0]!r}"
+    # Headline total is the four-channel sum, not output-only.
+    assert (
+        nums["total"]
+        == nums["output"] + nums["input"] + nums["cache_creation"] + nums["cache_read"]
+    )
+    # Charges reached the REPORTED (eff_budget) pool; total exceeds the gated channel.
+    assert nums["total"] > nums["output"] > 0
+    assert nums["input"] > 0 and nums["cache_creation"] > 0

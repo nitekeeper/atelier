@@ -630,11 +630,37 @@ def simple_worktree_factory(base_clone: str | Path) -> Callable[[str], _Worktree
     return factory
 
 
+def _porcelain_paths(porcelain: str) -> list[str]:
+    """Extract the changed paths from ``git status --porcelain`` output.
+
+    Each porcelain line is ``XY <path>`` (a 2-char status code, a space, then the
+    path; a rename is ``orig -> new``).  Returns the affected paths so a merge
+    diagnosis can NAME the dirty base files.  Best-effort + non-raising — used
+    only to enrich an error message.
+    """
+    paths: list[str] = []
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        # Drop the 2-char status code + the separating space.
+        rest = line[3:] if len(line) > 3 else line.strip()
+        # A rename/copy renders as "old -> new"; name the destination path.
+        if " -> " in rest:
+            rest = rest.split(" -> ", 1)[1]
+        rest = rest.strip().strip('"')
+        if rest:
+            paths.append(rest)
+    return sorted(paths)
+
+
 def _merge_worktree(wt: _Worktree) -> None:
     """Commit a writer worktree's changes and merge its branch into the base
     clone, then remove the worktree.  Conflict-free by construction (disjoint
-    writes); a conflict here is a SCHEDULER bug (the disjointness invariant was
-    violated) and is surfaced loudly, never silently resolved.
+    writes); a conflict here is surfaced loudly, never silently resolved.  The
+    diagnosis distinguishes two causes: a SCHEDULER bug (the disjointness
+    invariant was violated — base was clean) versus an ENVIRONMENT fault (the
+    base clone was already dirty before the merge).  Both name the conflicting
+    paths so the downstream debugger is not sent astray.
     """
     base = wt.base_clone
     # Commit any pending writer changes on the worktree branch.  The commit
@@ -653,6 +679,21 @@ def _merge_worktree(wt: _Worktree) -> None:
                 f"committing worktree {wt.branch!r} failed: {commit.stderr.strip()[:300]}"
             )
 
+    # Snapshot the base clone's cleanliness IMMEDIATELY before the merge.  A
+    # merge conflict has two distinct causes and the diagnosis below depends on
+    # telling them apart: (a) a SCHEDULER bug — two concurrent writers wrote the
+    # same path (disjointness breach); (b) an ENVIRONMENT fault — the base clone
+    # already had uncommitted/untracked changes that collide with the
+    # worktree's.  Capturing here (not after the failed merge) keeps the signal
+    # uncontaminated by merge side effects.
+    pre_status = _git(["status", "--porcelain"], base, check=False)
+    # Linked worktrees physically live under ``.atelier-worktrees/`` INSIDE the
+    # base clone, so ``git status`` reports them — that is engine scaffolding,
+    # not operator dirt, and must NOT count toward "base was dirty".  Filter it.
+    base_dirty_paths = [
+        p for p in _porcelain_paths(pre_status.stdout) if not p.startswith(".atelier-worktrees/")
+    ]
+
     # Merge into the base clone's current branch.  --no-ff keeps an explicit
     # merge record; disjoint writes mean no conflict.  --no-ff CREATES a merge
     # commit, so this also needs the engine identity (same fixed `-c user.*`).
@@ -662,12 +703,29 @@ def _merge_worktree(wt: _Worktree) -> None:
         check=False,
     )
     if merge.returncode != 0:
+        # Gather the unmerged (conflicting) paths BEFORE aborting — `--abort`
+        # tears down the conflict state, so this must run first.
+        conflict = _git(["diff", "--name-only", "--diff-filter=U"], base, check=False)
+        conflict_paths = sorted(p for p in (ln.strip() for ln in conflict.stdout.splitlines()) if p)
         _git(["merge", "--abort"], base, check=False)
+        conflict_str = ", ".join(conflict_paths[:20]) or "<none reported>"
+        git_tail = merge.stderr.strip()[:200]
+        if base_dirty_paths:
+            # ENVIRONMENT fault, NOT a scheduler bug: the base clone was dirty.
+            dirty_str = ", ".join(base_dirty_paths[:20])
+            raise WorktreeError(
+                f"merging worktree {wt.branch!r} CONFLICTED because the base "
+                "clone had UNCOMMITTED/UNTRACKED changes before the merge "
+                "(this is an unexpected-precondition / environment fault, NOT a "
+                f"disjointness-invariant breach). dirty base paths: {dirty_str}; "
+                f"conflicting paths: {conflict_str}. git: {git_tail}"
+            )
         raise WorktreeError(
             f"INVARIANT VIOLATION: merging worktree {wt.branch!r} CONFLICTED — "
             "two concurrently-isolated writers must be write-disjoint by "
             "construction (gate 3 + dynamic re-check), so a conflict means the "
-            f"disjointness invariant was breached. git: {merge.stderr.strip()[:300]}"
+            f"disjointness invariant was breached. conflicting paths: "
+            f"{conflict_str}. git: {git_tail}"
         )
 
     # Remove the worktree + delete its branch (best-effort cleanup).

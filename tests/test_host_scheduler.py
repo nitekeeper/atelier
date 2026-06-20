@@ -1332,6 +1332,91 @@ def test_cleanup_after_merge_failure_clean_under_autocrlf(tmp_path):
     )
 
 
+# ── _merge_worktree conflict-diagnosis: dirty-base vs disjointness breach ────
+
+
+def _seed_conflicting_worktree(tmp_path, wt_file_content):
+    """Build a base clone + a writer worktree that both touch ``shared.txt`` with
+    DIFFERENT content, so merging the worktree back conflicts.  Returns
+    ``(clone, wt)``.  The worktree's change is committed (the merge happens
+    between two commits); the caller seeds the base's collision separately
+    (committed → clean-base/disjointness case, or uncommitted → dirty-base case)."""
+    import scripts.host_scheduler as hs
+
+    clone = _git_init_clone(tmp_path)
+    (clone / "shared.txt").write_text("ancestor\n")
+    ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*["git"], *ident, "add", "-A"], cwd=clone, check=True, capture_output=True)
+    subprocess.run([*["git"], *ident, "commit", "-qm", "base shared"], cwd=clone, check=True)
+
+    wt = hs.simple_worktree_factory(clone)("writer")
+    (Path(wt.path) / "shared.txt").write_text(wt_file_content)
+    return clone, wt
+
+
+def test_merge_worktree_dirty_base_conflict_diagnosed_not_disjointness(tmp_path):
+    """REGRESSION: a merge conflict caused by a DIRTY BASE CLONE (uncommitted
+    change colliding with the worktree's change) must be diagnosed as an
+    environment/precondition fault that NAMES the dirty + conflicting paths — it
+    must NOT be misattributed to a disjointness-invariant breach (which sent the
+    kaizen M8b Bug#4 debugging effort astray)."""
+    import scripts.host_scheduler as hs
+
+    clone, wt = _seed_conflicting_worktree(tmp_path, "worktree-change\n")
+    # Make the base DIRTY: an uncommitted edit to the same file the worktree
+    # changed, so the --no-ff merge conflicts on a local-modification.
+    (clone / "shared.txt").write_text("UNCOMMITTED-base-edit\n")
+
+    with pytest.raises(WorktreeError) as ei:
+        hs._merge_worktree(wt)
+
+    msg = str(ei.value)
+    assert "UNCOMMITTED" in msg or "uncommitted" in msg.lower()
+    assert "shared.txt" in msg  # names the conflicting / dirty path
+    # MUST NOT misdiagnose as a scheduler bug: the breach marker is absent and
+    # the message explicitly disclaims the disjointness-breach cause.
+    assert "INVARIANT VIOLATION" not in msg
+    assert "NOT a" in msg and "disjointness-invariant breach" in msg
+    # Base must be left clean (merge aborted; the uncommitted edit may persist as
+    # the working-tree state but no conflict markers / merge-in-progress remain).
+    assert not (clone / ".git" / "MERGE_HEAD").exists()
+
+
+def test_merge_worktree_clean_base_conflict_flags_disjointness_breach(tmp_path):
+    """A genuine scheduler-bug conflict — base CLEAN, but a committed collision on
+    the same path (simulating two write-disjoint-violating writers) — still
+    raises the disjointness-invariant-breach WorktreeError, now ALSO naming the
+    conflicting paths."""
+    import scripts.host_scheduler as hs
+
+    clone, wt = _seed_conflicting_worktree(tmp_path, "worktree-change\n")
+    # Base is CLEAN but advanced with a COMMITTED divergent change to shared.txt,
+    # so the worktree merge conflicts even though `git status` is empty.
+    ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    (clone / "shared.txt").write_text("BASE-committed-divergence\n")
+    subprocess.run([*["git"], *ident, "add", "-A"], cwd=clone, check=True, capture_output=True)
+    subprocess.run([*["git"], *ident, "commit", "-qm", "base divergence"], cwd=clone, check=True)
+    # Base is clean apart from the engine's own .atelier-worktrees scaffolding
+    # (which the diagnosis filters out) → the conflict routes to the
+    # disjointness-breach branch, not the dirty-base branch.
+    porcelain = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=clone, capture_output=True, text=True, check=True
+    ).stdout
+    operator_dirt = [
+        ln for ln in porcelain.splitlines() if ".atelier-worktrees" not in ln and ln.strip()
+    ]
+    assert operator_dirt == []  # no operator-authored dirt → clean base
+
+    with pytest.raises(WorktreeError) as ei:
+        hs._merge_worktree(wt)
+
+    msg = str(ei.value)
+    assert "INVARIANT VIOLATION" in msg
+    assert "disjointness" in msg.lower()
+    assert "shared.txt" in msg  # now names the conflicting path
+    assert not (clone / ".git" / "MERGE_HEAD").exists()
+
+
 # ── MINOR-1 regression: a FAILED writer's partial writes never reach base ────
 
 

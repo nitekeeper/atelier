@@ -24,6 +24,11 @@ from scripts.dispatch import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# Phases that must NOT receive the minimal-diff rule. tdd:red (test DESIGN) is the
+# load-bearing exclusion — a test author choosing the right failing test must never
+# be told to minimize code; it stays excluded as a verbatim PHASE_TIER key, and the
+# absent-check below regression-guards it (a future PHASE_TIER edit that dropped
+# tdd:red would let normalize_phase collapse it to "tdd" → gate TRUE → this test RED).
 _NON_IMPL_PHASES = ["design", "plan", "review", "security", "tdd:red", "qa", "verify", "doc"]
 
 
@@ -54,7 +59,19 @@ def test_minimal_diff_rule_shape_and_invariants():
     assert _MINIMAL_DIFF_RULE.startswith("\n\n#")
     assert "YAGNI" in _MINIMAL_DIFF_RULE  # the ladder
     assert "reflex" in _MINIMAL_DIFF_RULE.lower()  # anti-deliberation
-    for guard in ("WHEN NOT TO BE LAZY", "trust boundaries", "EXPLICITLY requested"):
+    # The FULL safety carve-out must be un-trimmable: pin every load-bearing clause
+    # so a future terseness pass that drops any of them turns RED (the carve-out is
+    # exactly what keeps ponytail's "100% safe" property).
+    for guard in (
+        "WHEN NOT TO BE LAZY",
+        "trust boundaries",
+        "data loss",
+        "security",
+        "accessibility",
+        "EXPLICITLY requested",
+        "ONE runnable check",
+        "keep the guard",
+    ):
         assert guard in _MINIMAL_DIFF_RULE  # safety carve-out
 
 

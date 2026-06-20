@@ -238,6 +238,29 @@ def _is_implementation_phase(wave_phase: str) -> bool:
     return normalize_phase(wave_phase) in _IMPLEMENTATION_PHASES
 
 
+#: Operator force-off for the terse rule everywhere (the A/B off-switch). "0" disables.
+_TERSE_ENV = "ATELIER_INCLUDE_TERSE"
+
+
+def _terse_rule_applies() -> bool:
+    """Whether to append ``_TERSE_OUTPUT_RULE`` (the terse / "caveman" rule only;
+    ``_CONTEXT_BUDGET_RULE`` is a separate concern and is never gated here).
+
+    DEFAULT OFF. The terse instruction is a measured NET LOSS at every tier, by
+    three independent measurements (2026-06-20):
+      • per-worker benchmark: +99% cost & worse correctness on haiku, ~neutral sonnet;
+      • whole-cycle A/B: +37.8% total tokens even on sonnet (cost compounds across
+        the cycle's turns + cache re-injection — the OPPOSITE of the orchestrator-
+        context saving it was meant for);
+      • deterministic cap-demo: its only benefit (compacter ``notes_md`` -> smaller
+        wave digest) is bounded tiny (~100 tokens/worker) because the digest already
+        head/tail-caps notes to 200 chars AND the B2 codec compresses it.
+    So it is now OPT-IN ONLY via ``ATELIER_INCLUDE_TERSE=1`` (kept solely as the A/B
+    re-test hook). The B2 wave-digest codec + ``_CONTEXT_BUDGET_RULE`` are unaffected.
+    """
+    return os.environ.get(_TERSE_ENV, "0") == "1"
+
+
 # ── ATELIER_TRANSPORT — cli (the deterministic host; the ONLY transport) ────
 #
 # The transport selector. Since M7 PR-B the SQLite-bridge dispatch QUEUE is
@@ -660,7 +683,11 @@ def compose_briefing(
     context-budget discipline subsection in ``internal/team-mode-rules/SKILL.md`` is
     always rendered, so ``include_terse=False`` is a clean control for the terse
     rule and removes the appended budget tail, but does NOT remove the rules-block
-    budget guidance (single-sourcing that is a follow-up).
+    budget guidance (single-sourcing that is a follow-up). NB the
+    ``_TERSE_OUTPUT_RULE`` itself is now **DEFAULT-OFF** even when ``include_terse``
+    is True — it is a measured net loss at every tier (see
+    :func:`_terse_rule_applies`) and is opt-in only via ``ATELIER_INCLUDE_TERSE=1``.
+    ``_CONTEXT_BUDGET_RULE`` is unaffected and still rides ``include_terse``.
 
     ``include_minimal_diff`` (default ``True``) gates the output-side
     ``_MINIMAL_DIFF_RULE`` (the minimal-diff/native-first ladder + anti-deliberation
@@ -763,7 +790,12 @@ def compose_briefing(
     # above, so it is always TRANSPORT_CLI here.
     body = rendered.rstrip()
     if include_terse:
-        body += _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
+        # _TERSE_OUTPUT_RULE is now DEFAULT-OFF (measured net loss at every tier;
+        # see _terse_rule_applies) — opt back in only via ATELIER_INCLUDE_TERSE=1.
+        # _CONTEXT_BUDGET_RULE is a separate concern and stays under include_terse.
+        if _terse_rule_applies():
+            body += _TERSE_OUTPUT_RULE
+        body += _CONTEXT_BUDGET_RULE
     # Output-side minimal-diff lever (M8 rec #3) — GATED to implementation phases
     # (tdd/tdd:green/tdd:clean) and toggleable; appended AFTER the terse/budget
     # block and BEFORE the cli rule so _CLI_TRANSPORT_RULE stays the tail.

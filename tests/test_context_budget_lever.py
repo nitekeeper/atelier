@@ -113,13 +113,16 @@ def test_ai1_context_budget_rule_does_not_claim_silent_automation():
 # ── AI-1 — LIVE: the rule reaches the rendered briefing, outside the fence ──
 
 
-def test_ai1_context_budget_rule_present_in_cli_default_briefing():
+def test_ai1_context_budget_rule_present_in_cli_default_briefing(monkeypatch):
     """LIVE proof on the CLI/host transport — the M7 PRODUCTION DEFAULT (and, since
     the bridge-queue removal, the ONLY transport). Asserts the rule survives and
     its position is the STABLE terse → context-budget → cli-transport order. The
     cli branch appends `_CLI_TRANSPORT_RULE` after the budget rule, so the budget
     rule is NOT the literal tail. NEUTER: dropping the `+ _CONTEXT_BUDGET_RULE`
     append makes this RED."""
+    monkeypatch.setenv(
+        "ATELIER_INCLUDE_TERSE", "1"
+    )  # terse now default-off; opt in to assert order
     body = compose_briefing(**_compose_kwargs(transport=TRANSPORT_CLI))
     # (a) the budget rule reaches the cli-default briefing.
     assert _CONTEXT_BUDGET_RULE in body
@@ -149,10 +152,13 @@ def test_ai1_context_budget_rule_present_under_cli_env_default(monkeypatch):
     assert _CLI_TRANSPORT_RULE in body
 
 
-def test_ai1_budget_rule_after_untrusted_fence_and_after_terse_rule():
+def test_ai1_budget_rule_after_untrusted_fence_and_after_terse_rule(monkeypatch):
     """The budget rule sits AFTER the untrusted TASK fence (guidance, not
     injectable task data) and AFTER the terse rule (the deterministic
     terse → context-budget order is stable)."""
+    monkeypatch.setenv(
+        "ATELIER_INCLUDE_TERSE", "1"
+    )  # terse default-off; opt in for the order check
     body = compose_briefing(**_compose_kwargs())
     fence_close = body.rfind("</untrusted>")
     assert fence_close != -1, "expected an untrusted fence in the rendered briefing"

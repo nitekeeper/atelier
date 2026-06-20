@@ -1578,6 +1578,7 @@ def _host_briefing_for(
     wave_id: str,
     phase_procedure_for: Callable[[Mapping[str, Any]], str] | None = None,
     deadline_iso: str = "2099-01-01T00:00:00Z",
+    include_terse: bool = True,
 ) -> Callable[[Mapping[str, Any], int], str]:
     """Build the host-path ``briefing_for(task, attempt) -> str`` seam.
 
@@ -1622,6 +1623,7 @@ def _host_briefing_for(
             wave_phase=str(task.get("phase") or "implement"),
             deadline_iso=deadline_iso,
             transport=TRANSPORT_CLI,
+            include_terse=include_terse,
         )
 
     return briefing_for

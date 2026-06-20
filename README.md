@@ -142,7 +142,7 @@ pip install -r requirements-dev.txt
 pytest tests/
 ```
 
-The test suite covers both backends in parallel, so a single `pytest` run validates Local and Memex behavior together.
+The test suite covers both backends jointly, so a single `pytest` run validates Local and Memex behavior together.
 
 ## Architecture (one-line summary)
 

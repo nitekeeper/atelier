@@ -597,10 +597,18 @@ def compose_briefing(
     of this and untouched (the inter-agent message WIRE, distinct from the removed
     dispatch queue, still rides ``bridge_send.py``/``bridge_read.py``).
 
-    ``include_terse`` (default ``True``) gates the ``_TERSE_OUTPUT_RULE`` +
-    ``_CONTEXT_BUDGET_RULE`` tail; the default path is byte-identical to today,
+    ``include_terse`` (default ``True``) gates the appended ``_TERSE_OUTPUT_RULE``
+    + ``_CONTEXT_BUDGET_RULE`` tail; the default path is byte-identical to today,
     and ``_CLI_TRANSPORT_RULE`` is NOT gated (transport-correctness, not a
-    measurement lever).
+    measurement lever). SCOPE (M8 lever foundation): the flag is presently set only
+    via a direct call / the A/B tests — there is no env / run_mode wiring yet (the
+    two production callers of ``_host_briefing_for`` omit it, so a live run is
+    always ``True``); operator wiring lands with the measurement harness. It gates
+    only the APPENDED ``_CONTEXT_BUDGET_RULE`` constant: the equivalent
+    context-budget discipline subsection in ``internal/team-mode-rules/SKILL.md`` is
+    always rendered, so ``include_terse=False`` is a clean control for the terse
+    rule and removes the appended budget tail, but does NOT remove the rules-block
+    budget guidance (single-sourcing that is a follow-up).
 
     Returns the fully-rendered briefing string.
     """

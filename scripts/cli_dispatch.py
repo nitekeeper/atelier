@@ -1589,6 +1589,10 @@ def _host_briefing_for(
     REPLY-CONTRACT addendum (the worker returns its structured envelope, not a
     bridge send) — the host path has no bridge.
 
+    ``include_terse`` (default ``True``) threads to ``compose_briefing`` to gate the
+    terse / context-budget tail (the M8 measurement-lever seam). The two production
+    callers omit it, so a live run is always ``True`` until the A/B harness wires it.
+
     ``phase_procedure_for(task) -> str`` supplies the dev-arc phase-procedure body
     (the bridge sources it from ``internal/<phase>/SKILL.md``); defaults to a
     deterministic stub so the factory is constructible from a minimal call site.

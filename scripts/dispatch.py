@@ -547,6 +547,7 @@ def compose_briefing(
     from_agent_self: str | None = None,
     template_env: Environment | None = None,
     transport: str | None = None,
+    include_terse: bool = True,
 ) -> str:
     """Assemble + render a worker's inaugural spawn prompt.
 
@@ -595,6 +596,11 @@ def compose_briefing(
     :class:`UnknownTransportError`. The ``team_chat`` / loom wiring is independent
     of this and untouched (the inter-agent message WIRE, distinct from the removed
     dispatch queue, still rides ``bridge_send.py``/``bridge_read.py``).
+
+    ``include_terse`` (default ``True``) gates the ``_TERSE_OUTPUT_RULE`` +
+    ``_CONTEXT_BUDGET_RULE`` tail; the default path is byte-identical to today,
+    and ``_CLI_TRANSPORT_RULE`` is NOT gated (transport-correctness, not a
+    measurement lever).
 
     Returns the fully-rendered briefing string.
     """
@@ -684,7 +690,9 @@ def compose_briefing(
     # (see `_CLI_TRANSPORT_RULE`). The `if` guard is retained as a defensive
     # belt-and-braces — `transport` is already validated against VALID_TRANSPORTS
     # above, so it is always TRANSPORT_CLI here.
-    body = rendered.rstrip() + _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
+    body = rendered.rstrip()
+    if include_terse:
+        body += _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
     if transport == TRANSPORT_CLI:
         body += _CLI_TRANSPORT_RULE
     return body

@@ -250,8 +250,10 @@ def format_usage_report(breakdown: Mapping[str, int]) -> str:
     cache_creation + cache_read) — NOT the gated ``output_tokens`` channel alone,
     which systematically UNDER-counts whole-run cost (input + cache re-injection
     dominate a multi-turn session). Pure + partial-dict tolerant: every channel is
-    read with a default of 0 so a missing key never raises mid-report. The total is
-    a TOKEN count, not USD — gating stays token-based by design.
+    read with a default of 0 so a missing KEY never raises mid-report. The contract
+    is partial-KEY tolerance, not partial-VALUE — VALUES are assumed numeric (the
+    sole caller passes ``usage_breakdown()``, whose four counters are always ints).
+    The total is a TOKEN count, not USD — gating stays token-based by design.
     """
     out = int(breakdown.get("output_tokens", 0))
     inp = int(breakdown.get("input_tokens", 0))

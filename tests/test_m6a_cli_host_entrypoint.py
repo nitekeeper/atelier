@@ -1064,7 +1064,7 @@ def test_rmode_never_writes_settings_json(tmp_path, monkeypatch):
 
 def test_host_pipeline_emits_four_channel_cost_report(tmp_path, caplog):
     """A3 / test-the-production-caller: drive the REAL run_host_pipeline_for_project
-    and assert it emits the four-channel cost report wired at host_scheduler:2069,
+    and assert it emits the four-channel cost report wired at host_scheduler.run_host_pipeline_for_project,
     with a total that is the FOUR-CHANNEL SUM (output + input + cache_creation +
     cache_read) — not the gated output channel alone. The FakeCliRunner carries
     non-zero input/cache so the report reflects the CHARGED eff_budget pool (not the

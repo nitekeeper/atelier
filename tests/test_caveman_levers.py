@@ -15,7 +15,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.dispatch import _TERSE_OUTPUT_RULE, TRANSPORT_CLI, compose_briefing
+from scripts.dispatch import (
+    _CLI_TRANSPORT_RULE,
+    _CONTEXT_BUDGET_RULE,
+    _TERSE_OUTPUT_RULE,
+    TRANSPORT_CLI,
+    compose_briefing,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -121,3 +127,31 @@ def test_b1_task_brief_stays_inside_fence_untouched():
     fence_close = body.rfind("</untrusted>")
     assert "Add a unit test for X." in body
     assert body.index("Add a unit test for X.") < fence_close
+
+
+# ── B1' — include_terse toggle (M8 lever-OFF control arm; ponytail analysis) ──
+def test_include_terse_default_is_byte_identical():
+    """Explicit include_terse=True is byte-identical to the implicit default, and
+    the default body still carries BOTH appended rules (byte-parity guard)."""
+    explicit = compose_briefing(**_compose_kwargs(include_terse=True))
+    default = compose_briefing(**_compose_kwargs())
+    assert explicit == default
+    assert _TERSE_OUTPUT_RULE in default
+    assert _CONTEXT_BUDGET_RULE in default
+
+
+def test_include_terse_false_omits_both_rules():
+    """Lever-OFF control arm: include_terse=False drops BOTH the terse and
+    context-budget rules, but must NOT collaterally drop the CLI transport addendum."""
+    off = compose_briefing(**_compose_kwargs(include_terse=False))
+    assert _TERSE_OUTPUT_RULE not in off
+    assert _CONTEXT_BUDGET_RULE not in off
+    assert _CLI_TRANSPORT_RULE in off
+
+
+def test_include_terse_false_equals_default_with_rules_stripped():
+    """Exact-delta neuter guard: OFF == default with exactly the two-rule tail
+    removed. Ties ON<->OFF so a future silent re-coupling cannot pass both tests."""
+    on = compose_briefing(**_compose_kwargs())
+    off = compose_briefing(**_compose_kwargs(include_terse=False))
+    assert off == on.replace(_TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE, "", 1)

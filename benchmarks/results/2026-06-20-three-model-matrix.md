@@ -70,10 +70,17 @@ single-requirement tasks (slugify) and the safety task it is neutral-to-**better
 So the completeness risk is **localized to multi-acceptance-criteria work**, where the
 "stop at the first rung that works" reflex can stop before covering every criterion — and
 it is the lever violating its OWN carve-out ("do NOT minimize away … anything the task
-EXPLICITLY requested"). Actionable: sharpen the carve-out to "satisfy every acceptance
-criterion *before* minimizing," and/or have the lever echo the acceptance list. It is
-exactly why `minimal_diff` stays paired with a review loop, and why **correctness, not
-LOC, is the metric to watch.**
+EXPLICITLY requested"). `minimal_diff` stays paired with a review loop, and **correctness,
+not LOC, is the metric to watch.**
+
+> **Follow-up tried — a sharpened prompt clause did NOT fix it.** A `COVER EVERY
+> REQUIREMENT` clause was added to `_MINIMAL_DIFF_RULE` and the matrix re-run (v2, n=2).
+> form-validation `minimal_diff` correctness moved 1.83 → 2.00 — but the entire +0.17 is a
+> single sonnet cell, the worst cell (haiku `[1, 2]`) did not move, and an **unchanged**
+> control arm (`terse`) drifted the *same* +0.17, so it is indistinguishable from
+> resampling noise at n=2. Conclusion: a blanket prompt instruction can't reliably stop a
+> model dropping a requirement under brevity pressure. See the per-part policy below — the
+> right fix is a *deterministic gate*, not a prompt nudge.
 
 **`terse` came out ≈cost-neutral per-worker here — it did NOT reproduce the earlier
 +99%-on-haiku harm.** That earlier figure (see `2026-06-20-fair-test.md`) was the
@@ -107,3 +114,42 @@ drops the guard (ponytail's `safe-path` / `critic-email` shape).
 - Most tasks have a native solution (`<input type=date|file>`, HTML5 validation), so LOC
   deltas are small except where an arm trips into a custom build (the terse/haiku slugify
   tail, the opus minimal_diff 10→1 collapse).
+
+## Conclusion — the decision unit is mechanism × context, not whole levers
+
+The honest read across all three runs is **not** "lever X good, lever Y bad." Every lever
+won in some parts and lost in others; the value is in routing each *mechanism* to the
+*context* where it actually helps, and gating it off where it doesn't. A whole-lever
+keep/kill verdict is the wrong granularity.
+
+**We already proved this once — and it worked.** "Caveman" was never one thing: it was
+**B1**, the terse *briefing instruction* (a net loss → removed), and **B2**, the *post-hoc
+codec* that strips filler after the text is written (free, harmless → kept). Same name,
+two mechanisms, opposite verdicts. Splitting them was the win. The same discipline applies
+one level deeper to `minimal_diff`.
+
+### Per-part lever policy (what wins where)
+
+| mechanism | context (part) | verdict | how to apply |
+|---|---|---|---|
+| **B2 codec** (post-hoc filler strip) | any orchestrator-facing prose | **win** (free, no agent cost) | keep, always |
+| **B1 terse instruction** (tell agent to be brief) | whole cycle, every tier | **loss** (deliberation compounds) | removed; if revisited, gate **off for haiku** specifically, where the harm concentrates — never globally |
+| **minimal_diff ladder** | over-build-prone, single-output (dropzone, date-field) | **strong win** (LOC/cost ↓, correctness held) | keep ON |
+| **minimal_diff ladder** | irreducible single-requirement (slugify, safe-join) | **win** (leaner, correctness held-or-up) | keep ON |
+| **minimal_diff ladder** | **compound / multi-requirement (form-validation)** | **loss** (drops a requirement; worst on haiku) | **gate, don't preach** — see below |
+
+### The open follow-up: gate minimal_diff on compound tasks deterministically
+
+The form-validation failure is the only place `minimal_diff` loses, and a prompt clause
+didn't fix it (above). The robust fix is a **deterministic gate on a signal we already
+have**: `compose_briefing` receives `acceptance_criteria`, so "compound task" is literally
+`len(acceptance_criteria) > 1`. On that signal, either (a) soften / suppress the
+minimal-diff ladder, or (b) keep it but attach a **per-criterion completeness check in the
+review loop** — catch the dropped requirement *mechanically*, after the fact, instead of
+hoping the implementer prompt prevents it. That is the lever applied *by part*, on a signal
+the engine already passes — not a hope.
+
+(The `COVER EVERY REQUIREMENT` clause added in the meantime is the right *idea* at the
+wrong *granularity*: a blanket implementer-prompt where a `len(acceptance_criteria)`-gated
+mechanism belongs. It is harmless and implementer-phase-only, but unproven — treat the
+deterministic gate above as the real work.)

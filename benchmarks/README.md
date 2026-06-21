@@ -148,18 +148,40 @@ discriminate, the harness refuses to spend.
 
 ## Results
 
-The terse rule's kill verdict, triangulated three ways (2026-06-20):
+Per-run writeups are **generated locally** into `results/` and are **gitignored** (like
+`runs/`) — they analyze throwaway, cache-noisy runs and don't belong under version
+control. Re-run the harness to regenerate them. The **stable conclusions** the runs
+support live here:
 
-- [`results/2026-06-20-per-worker.md`](results/2026-06-20-per-worker.md) — the per-worker
-  matrix (pilot).
-- [`results/2026-06-20-fair-test.md`](results/2026-06-20-fair-test.md) — over-build-prone
-  tasks across haiku & sonnet (the decisive per-worker run).
-- [`results/2026-06-20-whole-cycle-ab.md`](results/2026-06-20-whole-cycle-ab.md) — the
-  live whole-cycle A/B (the keep-or-kill number).
+### Stable findings (2026-06-20)
 
-Post-removal per-tier sweep:
+- **Terse rule (B1) — removed.** The terse / "caveman" *briefing instruction* was a
+  measured net loss, decided on the **whole-cycle A/B** (+37.8% total tokens on sonnet,
+  deliberation compounding across turns) and a deterministic capped-benefit proof. (A
+  later per-tier per-worker sweep had terse ≈neutral — an honest negative; the kill never
+  rested on the per-worker axis.)
+- **`minimal_diff` — kept, phase-gated to implementers.** The cost / over-engineering
+  winner at every tier incl. opus (−16…−27% cost, over-engineering → 0). It **loses only
+  on compound, multi-requirement tasks**, where "build the minimum" can drop a stated
+  requirement (the `form-validation` case). A sharpened prompt clause did **not**
+  measurably fix that at n=2.
 
-- [`results/2026-06-20-three-model-matrix.md`](results/2026-06-20-three-model-matrix.md) —
-  the full per-worker matrix across **haiku, sonnet, and opus** (120 cells). `minimal_diff`
-  wins at every tier incl. opus; terse came out ≈neutral per-worker (it did *not* reproduce
-  the +99%-on-haiku figure — variance/task-mix, an honest negative the kill never rested on).
+### The decision unit is mechanism × context, not whole levers
+
+Each lever wins in some parts and loses in others; route each *mechanism* to the *context*
+where it helps. Proven once already: "caveman" was two mechanisms with opposite verdicts —
+**B1** (terse instruction, removed) vs **B2** (the post-hoc `caveman_codec` filler-strip,
+kept, free). The same discipline applies to `minimal_diff`:
+
+| mechanism | context | verdict | policy |
+|---|---|---|---|
+| B2 codec | any orchestrator-facing prose | win (free) | keep, always |
+| B1 terse instruction | whole cycle, every tier | loss | removed; if revisited, gate **off for haiku**, not globally |
+| minimal_diff ladder | over-build-prone / single-requirement impl | win | keep ON |
+| minimal_diff ladder | **compound / multi-requirement** | loss (drops a requirement) | **gate, don't preach** ↓ |
+
+**Open follow-up:** gate `minimal_diff` on compound tasks *deterministically* —
+`compose_briefing` already receives `acceptance_criteria`, so "compound" is
+`len(acceptance_criteria) > 1`. On that signal, soften/suppress the ladder or attach a
+per-criterion completeness check in the review loop. A mechanism on a signal we already
+have — not a prompt nudge.

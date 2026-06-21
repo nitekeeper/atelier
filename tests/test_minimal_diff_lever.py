@@ -71,6 +71,10 @@ def test_minimal_diff_rule_shape_and_invariants():
         "EXPLICITLY requested",
         "ONE runnable check",
         "keep the guard",
+        # compound-task carve-out: minimize size, never scope (every acceptance
+        # criterion must be covered) — the form-validation completeness fix.
+        "COVER EVERY REQUIREMENT",
+        "NOT fewer requirements",
     ):
         assert guard in _MINIMAL_DIFF_RULE  # safety carve-out
 

@@ -9,9 +9,8 @@ Coverage:
     compressed),
   - M5 sentinel-collision safety + M7 head-case handling.
 
-The atelier wiring of the codec (B1 terse-rule lever in scripts/dispatch.py,
-B2 env-gated digest sink in scripts/pm_dispatch.py) is exercised in
-tests/test_dispatch_templates.py and tests/test_wave_compression.py.
+The atelier wiring of the codec (the env-gated wave-summary digest sink in
+scripts/pm_dispatch.py) is exercised in tests/test_wave_compression.py.
 """
 
 from __future__ import annotations

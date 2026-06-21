@@ -33,9 +33,8 @@ SECURITY / boundary note: this module is intentionally a *prose* compressor for
 ORCHESTRATOR-FACING / persisted free-text only. It MUST NOT be applied upstream
 of any byte-sensitive parser (see ``scripts/pm_dispatch.py``'s envelope/abandon
 parsers — ``validate_envelope`` / ``_parse_abandon_category`` / ``ABANDON_RE``)
-and is wired into atelier at two seams: ``scripts/dispatch.py`` (the always-on
-terse-output-rule lever) and ``scripts/pm_dispatch.py`` (the env-gated
-wave-summary digest sink, :func:`pm_dispatch.compress_reply_for_context`).
+and is wired into atelier at the ``scripts/pm_dispatch.py`` env-gated
+wave-summary digest sink (:func:`pm_dispatch.compress_reply_for_context`).
 """
 
 from __future__ import annotations

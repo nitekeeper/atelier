@@ -109,43 +109,6 @@ TEMPLATE_DIR = REPO_ROOT / "internal" / "team-mode-templates"
 RULES_SKILL = REPO_ROOT / "internal" / "team-mode-rules" / "SKILL.md"
 ROLE_TEMPLATE = "briefings/role.j2"
 
-# ── B1 — always-on terse-output rule (caveman token-compression) ──────────
-#
-# Additive prompt guidance appended to every COMPOSED worker briefing (see
-# :func:`compose_briefing`). It asks the spawned worker to keep its free-text
-# ``notes_md`` prose COMPACT (caveman style — fragments, one line per finding,
-# drop articles/filler/hedging/pleasantries) so the orchestrator's context
-# stays lean when the worker's reply is read back off the bridge.
-#
-# This is pure GUIDANCE to the agent — NOT a parser change, NOT a wire-protocol
-# change. It is appended to the RENDERED briefing (after Jinja2 has run), so it
-# sits OUTSIDE the template's ``untrusted(...)`` TASK fence as the briefing's
-# final guidance section. It does NOT touch role.j2 / _base.j2 (their byte-
-# parity tests stay green) and it does NOT touch the TM-006 reply contract.
-#
-# HARD CARVE-OUT (mirrors caveman_codec's protected segments): the directive
-# explicitly EXCLUDES the TM-006 JSON reply envelope (``task_result`` /
-# ``shutdown_response`` and ALL its keys/values), code (fenced or inline), file
-# paths, identifiers (CONST_CASE / dotted.names / fn() calls), version numbers,
-# quoted error strings, and the ``ABANDON:`` grammar line — those stay
-# byte-exact. A literal-minded LLM must never "compress" a path, an error
-# string, the reply envelope JSON, or the ABANDON line.
-_TERSE_OUTPUT_RULE = (
-    "\n\n# OUTPUT SHAPE (terse — read last)\n\n"
-    "Keep your free-text `notes_md` prose COMPACT to save the orchestrator's "
-    "context. Talk like a smart caveman — brain stays big, only fluff dies. Use "
-    "fragments, one line per finding/decision, no pleasantries, no hedging, no "
-    "restating this briefing. Drop articles and filler where meaning survives. "
-    "This applies ONLY to your free-text prose. Do NOT compress or alter, and "
-    "reproduce VERBATIM: the TM-006 reply envelope (the `task_result` / "
-    "`shutdown_response` JSON and ALL its keys/values), code (fenced or inline), "
-    "file paths, identifiers (CONST_CASE, dotted.names, fn() calls), version "
-    "numbers, quoted error strings, and the `ABANDON: <category>:<reason>` "
-    "grammar line. Those stay byte-exact. If terseness would create technical "
-    "ambiguity (security, destructive/irreversible actions, ordered multi-step "
-    "sequences), write that part in full."
-)
-
 # ── CONTEXT-BUDGET discipline — always-on, reaches EVERY dispatched worker ──
 #
 # The HONEST mechanism (read this before assuming the hooks cover you): atelier's
@@ -168,7 +131,7 @@ _TERSE_OUTPUT_RULE = (
 # ``hooks/context_budget.py::DEFAULT_THRESHOLD_TOKENS`` — keep them in sync if it
 # changes (CLAUDE.md ``## Auto-trigger architecture`` documents the contract).
 #
-# Same append discipline as ``_TERSE_OUTPUT_RULE``: opens with "\n\n" + its own
+# Append discipline: opens with "\n\n" + its own
 # ``# CONTEXT BUDGET`` heading, appended to the RENDERED briefing OUTSIDE the
 # template's ``untrusted`` TASK fence (guidance, never injectable task data). It
 # does NOT touch role.j2 / _base.j2 (their byte-parity tests stay green) and does
@@ -190,7 +153,7 @@ _CONTEXT_BUDGET_RULE = (
 )
 
 # Output-side "minimal-diff / native-first" implementer lever (M8 rec #3, ponytail
-# analysis). UNLIKE the always-on terse/context-budget rules, this one is GATED to
+# analysis). UNLIKE the always-on context-budget rule, this one is GATED to
 # implementation phases (tdd / tdd:green / tdd:clean) AND toggleable via
 # ``compose_briefing(include_minimal_diff=...)`` — a designer/reviewer/test-author
 # must NOT be told to write minimal code. Same append discipline: opens with
@@ -236,29 +199,6 @@ def _is_implementation_phase(wave_phase: str) -> bool:
     phases the minimal-diff lever applies to. Uses ``model_tier.normalize_phase``
     so ``dev:tdd`` / ``tdd-green`` / etc. canonicalize to the gate keys."""
     return normalize_phase(wave_phase) in _IMPLEMENTATION_PHASES
-
-
-#: Operator force-off for the terse rule everywhere (the A/B off-switch). "0" disables.
-_TERSE_ENV = "ATELIER_INCLUDE_TERSE"
-
-
-def _terse_rule_applies() -> bool:
-    """Whether to append ``_TERSE_OUTPUT_RULE`` (the terse / "caveman" rule only;
-    ``_CONTEXT_BUDGET_RULE`` is a separate concern and is never gated here).
-
-    DEFAULT OFF. The terse instruction is a measured NET LOSS at every tier, by
-    three independent measurements (2026-06-20):
-      • per-worker benchmark: +99% cost & worse correctness on haiku, ~neutral sonnet;
-      • whole-cycle A/B: +37.8% total tokens even on sonnet (cost compounds across
-        the cycle's turns + cache re-injection — the OPPOSITE of the orchestrator-
-        context saving it was meant for);
-      • deterministic cap-demo: its only benefit (compacter ``notes_md`` -> smaller
-        wave digest) is bounded tiny (~100 tokens/worker) because the digest already
-        head/tail-caps notes to 200 chars AND the B2 codec compresses it.
-    So it is now OPT-IN ONLY via ``ATELIER_INCLUDE_TERSE=1`` (kept solely as the A/B
-    re-test hook). The B2 wave-digest codec + ``_CONTEXT_BUDGET_RULE`` are unaffected.
-    """
-    return os.environ.get(_TERSE_ENV, "0") == "1"
 
 
 # ── ATELIER_TRANSPORT — cli (the deterministic host; the ONLY transport) ────
@@ -353,7 +293,7 @@ async def dispatch_host_pipeline(
 # bridge, NO `bridge_send.py` reply, NO peer wire. Its terminal
 # `structured_output` (matching ENVELOPE_SCHEMA) IS its reply. This addendum
 # re-points the template's CHANNELS/REPLY-CONTRACT guidance accordingly. It is
-# APPENDED to the rendered briefing (same discipline as `_TERSE_OUTPUT_RULE` /
+# APPENDED to the rendered briefing (same discipline as
 # `_CONTEXT_BUDGET_RULE`: opens with "\n\n", its own heading, OUTSIDE the
 # template's untrusted TASK fence). The template still renders its historical
 # bridge CHANNELS block first (the inter-agent message wire still exists); this
@@ -621,7 +561,7 @@ def compose_briefing(
     from_agent_self: str | None = None,
     template_env: Environment | None = None,
     transport: str | None = None,
-    include_terse: bool = True,
+    include_context_budget: bool = True,
     include_minimal_diff: bool = True,
 ) -> str:
     """Assemble + render a worker's inaugural spawn prompt.
@@ -664,34 +604,29 @@ def compose_briefing(
     ``ATELIER_TRANSPORT`` from the environment via :func:`resolve_transport`,
     which → ``"cli"`` (the only transport since the M7 bridge-queue removal). In
     ``"cli"`` transport a CLI CHANNELS/REPLY-CONTRACT addendum
-    (:data:`_CLI_TRANSPORT_RULE`) is appended AFTER the terse + context-budget
-    rules, re-pointing "use bridge_send.py" → "return your result as the
+    (:data:`_CLI_TRANSPORT_RULE`) is appended AFTER the context-budget
+    rule, re-pointing "use bridge_send.py" → "return your result as the
     structured final message matching the json-schema". Any value other than
     ``"cli"`` (including the retired ``"bridge"``) raises
     :class:`UnknownTransportError`. The ``team_chat`` / loom wiring is independent
     of this and untouched (the inter-agent message WIRE, distinct from the removed
     dispatch queue, still rides ``bridge_send.py``/``bridge_read.py``).
 
-    ``include_terse`` (default ``True``) gates the appended ``_TERSE_OUTPUT_RULE``
-    + ``_CONTEXT_BUDGET_RULE`` tail; the default path is byte-identical to today,
+    ``include_context_budget`` (default ``True``) gates the appended
+    ``_CONTEXT_BUDGET_RULE`` tail; the default path is byte-identical to today,
     and ``_CLI_TRANSPORT_RULE`` is NOT gated (transport-correctness, not a
-    measurement lever). SCOPE (M8 lever foundation): the flag is presently set only
-    via a direct call / the A/B tests — there is no env / run_mode wiring yet (the
-    two production callers of ``_host_briefing_for`` omit it, so a live run is
-    always ``True``); operator wiring lands with the measurement harness. It gates
-    only the APPENDED ``_CONTEXT_BUDGET_RULE`` constant: the equivalent
+    measurement lever). SCOPE: the flag is presently set only via a direct call /
+    the A/B tests — there is no env / run_mode wiring yet (the two production
+    callers of ``_host_briefing_for`` omit it, so a live run is always ``True``).
+    It gates only the APPENDED ``_CONTEXT_BUDGET_RULE`` constant: the equivalent
     context-budget discipline subsection in ``internal/team-mode-rules/SKILL.md`` is
-    always rendered, so ``include_terse=False`` is a clean control for the terse
-    rule and removes the appended budget tail, but does NOT remove the rules-block
-    budget guidance (single-sourcing that is a follow-up). NB the
-    ``_TERSE_OUTPUT_RULE`` itself is now **DEFAULT-OFF** even when ``include_terse``
-    is True — it is a measured net loss at every tier (see
-    :func:`_terse_rule_applies`) and is opt-in only via ``ATELIER_INCLUDE_TERSE=1``.
-    ``_CONTEXT_BUDGET_RULE`` is unaffected and still rides ``include_terse``.
+    always rendered, so ``include_context_budget=False`` removes the appended budget
+    tail but does NOT remove the rules-block budget guidance (single-sourcing that
+    is a follow-up).
 
     ``include_minimal_diff`` (default ``True``) gates the output-side
     ``_MINIMAL_DIFF_RULE`` (the minimal-diff/native-first ladder + anti-deliberation
-    reflex + safety carve-out, M8 rec #3). UNLIKE the always-on terse/budget rules
+    reflex + safety carve-out, M8 rec #3). UNLIKE the always-on context-budget rule
     it is PHASE-GATED: it appends ONLY for an implementation ``wave_phase``
     (tdd / tdd:green / tdd:clean, via :func:`_is_implementation_phase`) — never for
     design / plan / review / security / tdd:red / qa / verify / doc. Default path
@@ -768,17 +703,13 @@ def compose_briefing(
 
     tmpl = template_env.get_template(ROLE_TEMPLATE)
     rendered = tmpl.render(**ctx)
-    # B1 — always-on terse-output guidance. Appended to the RENDERED briefing
-    # (outside the template's untrusted TASK fence) as the briefing's final
-    # guidance section. `_TERSE_OUTPUT_RULE` opens with "\n\n" so it reads as
-    # its own paragraph; we rstrip the rendered body first so the separator is
+    # CONTEXT-BUDGET discipline — always-on guidance. Appended to the RENDERED
+    # briefing (outside the template's untrusted TASK fence) as the briefing's
+    # final guidance section. `_CONTEXT_BUDGET_RULE` opens with "\n\n" so it reads
+    # as its own paragraph; we rstrip the rendered body first so the separator is
     # exactly one clean paragraph break regardless of the template's trailing
-    # whitespace. Does NOT modify role.j2 / _base.j2 or the TM-006 contract.
-    #
-    # CONTEXT-BUDGET discipline — also always-on, appended AFTER the terse rule
-    # (deterministic, stable order: terse → context-budget). Both sit OUTSIDE the
-    # untrusted TASK fence; both open with "\n\n" so each is its own paragraph.
-    # This is the single load-bearing channel that reaches a one-shot worker — the
+    # whitespace. Does NOT modify role.j2 / _base.j2 or the TM-006 contract. This
+    # is the single load-bearing channel that reaches a one-shot worker — the
     # PostToolUse/PreCompact hooks fire only in the orchestrator session, never in
     # a spawned worker (see `_CONTEXT_BUDGET_RULE`).
     #
@@ -789,15 +720,10 @@ def compose_briefing(
     # belt-and-braces — `transport` is already validated against VALID_TRANSPORTS
     # above, so it is always TRANSPORT_CLI here.
     body = rendered.rstrip()
-    if include_terse:
-        # _TERSE_OUTPUT_RULE is now DEFAULT-OFF (measured net loss at every tier;
-        # see _terse_rule_applies) — opt back in only via ATELIER_INCLUDE_TERSE=1.
-        # _CONTEXT_BUDGET_RULE is a separate concern and stays under include_terse.
-        if _terse_rule_applies():
-            body += _TERSE_OUTPUT_RULE
+    if include_context_budget:
         body += _CONTEXT_BUDGET_RULE
     # Output-side minimal-diff lever (M8 rec #3) — GATED to implementation phases
-    # (tdd/tdd:green/tdd:clean) and toggleable; appended AFTER the terse/budget
+    # (tdd/tdd:green/tdd:clean) and toggleable; appended AFTER the budget
     # block and BEFORE the cli rule so _CLI_TRANSPORT_RULE stays the tail.
     if include_minimal_diff and _is_implementation_phase(wave_phase):
         body += _MINIMAL_DIFF_RULE

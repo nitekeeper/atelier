@@ -32,7 +32,6 @@ from pathlib import Path
 from scripts.dispatch import (
     _CLI_TRANSPORT_RULE,
     _CONTEXT_BUDGET_RULE,
-    _TERSE_OUTPUT_RULE,
     TRANSPORT_CLI,
     compose_briefing,
 )
@@ -52,9 +51,9 @@ def _compose_kwargs(**overrides):
     Pins ``transport=TRANSPORT_CLI`` (the only transport since the M7 bridge-queue
     removal) so the AI-1 budget-rule ORDER invariants hold deterministically
     regardless of the runner's ambient ``ATELIER_TRANSPORT``. On the cli path the
-    order is terse → context-budget → cli-transport addendum, so the budget rule
-    is NOT the literal tail (the cli addendum is) — the ORDER assertions below key
-    off relative position, not the tail.
+    order is context-budget → cli-transport addendum, so the budget rule is NOT the
+    literal tail (the cli addendum is) — the ORDER assertions below key off relative
+    position, not the tail.
     """
     rules = (REPO_ROOT / "internal" / "team-mode-rules" / "SKILL.md").read_text(encoding="utf-8")
     base = {
@@ -113,28 +112,22 @@ def test_ai1_context_budget_rule_does_not_claim_silent_automation():
 # ── AI-1 — LIVE: the rule reaches the rendered briefing, outside the fence ──
 
 
-def test_ai1_context_budget_rule_present_in_cli_default_briefing(monkeypatch):
+def test_ai1_context_budget_rule_present_in_cli_default_briefing():
     """LIVE proof on the CLI/host transport — the M7 PRODUCTION DEFAULT (and, since
     the bridge-queue removal, the ONLY transport). Asserts the rule survives and
-    its position is the STABLE terse → context-budget → cli-transport order. The
-    cli branch appends `_CLI_TRANSPORT_RULE` after the budget rule, so the budget
-    rule is NOT the literal tail. NEUTER: dropping the `+ _CONTEXT_BUDGET_RULE`
-    append makes this RED."""
-    monkeypatch.setenv(
-        "ATELIER_INCLUDE_TERSE", "1"
-    )  # terse now default-off; opt in to assert order
+    its position is the STABLE context-budget → cli-transport order. The cli branch
+    appends `_CLI_TRANSPORT_RULE` after the budget rule, so the budget rule is NOT
+    the literal tail. NEUTER: dropping the `+ _CONTEXT_BUDGET_RULE` append makes
+    this RED."""
     body = compose_briefing(**_compose_kwargs(transport=TRANSPORT_CLI))
     # (a) the budget rule reaches the cli-default briefing.
     assert _CONTEXT_BUDGET_RULE in body
-    # (b) stable order: terse < context-budget < cli-transport addendum (the cli
-    #     addendum is the tail on this path, so the budget rule is NOT the tail).
-    terse_at = body.find(_TERSE_OUTPUT_RULE)
+    # (b) stable order: context-budget < cli-transport addendum (the cli addendum
+    #     is the tail on this path, so the budget rule is NOT the tail).
     budget_at = body.find(_CONTEXT_BUDGET_RULE)
     cli_at = body.find(_CLI_TRANSPORT_RULE)
-    assert terse_at != -1 and budget_at != -1 and cli_at != -1
-    assert terse_at < budget_at < cli_at, (
-        "cli briefing order must be terse → context-budget → cli-transport addendum"
-    )
+    assert budget_at != -1 and cli_at != -1
+    assert budget_at < cli_at, "cli briefing order must be context-budget → cli-transport addendum"
 
 
 def test_ai1_context_budget_rule_present_under_cli_env_default(monkeypatch):
@@ -152,22 +145,15 @@ def test_ai1_context_budget_rule_present_under_cli_env_default(monkeypatch):
     assert _CLI_TRANSPORT_RULE in body
 
 
-def test_ai1_budget_rule_after_untrusted_fence_and_after_terse_rule(monkeypatch):
+def test_ai1_budget_rule_after_untrusted_fence():
     """The budget rule sits AFTER the untrusted TASK fence (guidance, not
-    injectable task data) and AFTER the terse rule (the deterministic
-    terse → context-budget order is stable)."""
-    monkeypatch.setenv(
-        "ATELIER_INCLUDE_TERSE", "1"
-    )  # terse default-off; opt in for the order check
+    injectable task data)."""
     body = compose_briefing(**_compose_kwargs())
     fence_close = body.rfind("</untrusted>")
     assert fence_close != -1, "expected an untrusted fence in the rendered briefing"
     budget_at = body.find(_CONTEXT_BUDGET_RULE)
-    terse_at = body.find(_TERSE_OUTPUT_RULE)
     assert budget_at != -1
-    assert terse_at != -1
     assert budget_at > fence_close, "budget rule must be appended AFTER the untrusted fence"
-    assert terse_at < budget_at, "stable order: terse rule precedes the context-budget rule"
 
 
 def test_ai1_tm006_reply_contract_present_and_precedes_budget_rule():

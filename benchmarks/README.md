@@ -71,15 +71,65 @@ right rule text) with **zero API spend**. The paid matrix is never run in CI, ex
 like ponytail's gate. The harness is also linted (`ruff`) and formatted with the rest of
 the repo.
 
-## Metrics
+## Glossary — what every term means
 
-- **loc** (git-diff added lines): the over-build proxy — the `+N` a PR shows.
-- **safe** (gate, deterministic, stdlib-only): the produced `safe_join` is executed
-  against `../../../../etc/passwd`; True = contained, False = escaped.
-- **tokens** (four-channel: output + input + cache_creation + cache_read), **cost_usd**,
-  **wall_ms**: straight from the `claude` CLI JSON.
-- **over_engineering / correctness** (LLM judge, `claude-sonnet-4-6`, temp 0, published
-  rubric): each scored 0–3.
+### Arms & levers (the thing each cell is testing)
+
+A **lever** is a prompt rule appended to the agent's briefing. An **arm** is one
+configuration of levers; the benchmark runs all four arms on the same task and compares
+them. Everything is measured **relative to `bare`** — bare is the honest "real agent, no
+rule" baseline, so any difference is the lever's effect, not the model being chatty.
+
+- **`bare`** — the task only, **no lever**. The baseline; the `Δ vs bare` columns subtract
+  this.
+- **`terse`** — task + the terse / "caveman" *briefing rule* (**B1**): an instruction
+  telling the worker to write its free-text prose compactly ("talk like a smart caveman").
+  An **input-side** lever (it shrinks what the agent *says*). **Deleted from production**
+  as a measured net loss; kept here only as a frozen constant so the A/B reproduces.
+- **`minimal_diff`** — task + the minimal-diff rule (`_MINIMAL_DIFF_RULE`): a "build the
+  smallest thing that works" laziness ladder (YAGNI → stdlib → native feature → one line)
+  with an anti-deliberation reflex and a safety carve-out. An **output-side** lever (it
+  shrinks what the agent *builds*). **Live in production**, phase-gated to implementer
+  phases. Adapted from [ponytail](https://github.com/DietrichGebert/ponytail).
+- **`both`** — task + terse + minimal_diff together.
+
+> **B1 vs B2 — don't conflate them.** "Caveman" names two different mechanisms. **B1** is
+> the terse *briefing rule above* (tells the agent to be brief) — **removed**. **B2** is
+> the `caveman_codec.py` *post-processor* that deterministically strips filler from text
+> *after* it is written, never touching protected tokens — **kept** (it is free; no agent
+> deliberation cost). This benchmark only ever tested B1.
+
+### Metric columns (what each number in the result tables means)
+
+- **`task` / `arm` / `model`** — which task, which lever-arm, and which model
+  (`haiku` = claude-haiku-4-5, `sonnet` = claude-sonnet-4-6, `opus` = claude-opus-4-8) the
+  cell ran.
+- **`n`** — how many cells (reps × …) were averaged into that row.
+- **`LOC` (loc_median)** — **L**ines **O**f **C**ode the agent *added*, from `git diff`
+  added-line count (lockfiles/minified excluded). The over-build proxy — the `+N` a PR
+  shows. **Lower = less built.** Only meaningful read alongside `correct` (fewer lines
+  that also do less is *less*, not *less-bloated*).
+- **`tokens` (tokens_mean)** — total tokens for the cell, four-channel
+  (output + input + cache_creation + cache_read), straight from the `claude` CLI JSON.
+  Cache-noisy — treat as secondary to cost/wall.
+- **`cost $` (cost_mean)** — US-dollar cost of the cell, from the CLI's `total_cost_usd`.
+  One of the two clean economic signals.
+- **`wall s` (wall_ms_mean)** — **wall-clock** seconds, real elapsed time from launching
+  `claude -p` to its exit (captured in ms, shown in s). The latency signal; catches a
+  lever that makes the model *deliberate longer* even when output isn't bigger.
+- **`over_eng` (over_eng_mean)** — **over-engineering** score from an LLM judge
+  (`claude-sonnet-4-6`, temp 0, published rubric), **0–3**: 0 = minimal/idiomatic,
+  1 = slightly more than needed, 2 = notable extra abstraction/deps/config,
+  3 = framework-for-a-one-off. **Lower = better.** The judge must name the specific
+  over-built construct.
+- **`correct` (correct_mean)** — correctness score from the same LLM judge, **0–3**:
+  0 = doesn't satisfy the ticket, 1 = partial, 2 = works on the happy path,
+  3 = correct incl. edge cases. **Higher = better.** Read against LOC to catch "won the
+  LOC metric by doing less."
+- **`safe` (safe_rate)** — fraction of safety-task cells that survived the adversarial
+  input. Deterministic, stdlib-only: the produced `safe_join` is executed against
+  `../../../../etc/passwd`; 1.00 = contained (safe), lower = some cell let the path escape.
+  `-` means the task had no safety axis.
 
 Every instrument is proven before any paid cell runs: `--selftest-offline` checks the
 deterministic scorer + arm wiring with no API, and `--selftest` additionally requires the

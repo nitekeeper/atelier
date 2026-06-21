@@ -48,6 +48,33 @@ every level (haiku −27%, sonnet −16%, opus −22%), drives the over-engineer
 now visible at the top tier too. This re-confirms keeping `minimal_diff` (phase-gated to
 implementer phases) and watching the correctness dip.
 
+**Where the correctness dip actually comes from — it is NOT broad, it is one task.**
+Breaking correctness (and mean LOC) down per task, bare → minimal_diff, averaged across
+all three models (n=6/cell):
+
+| task | bare | minimal_diff | note |
+|---|--:|--:|---|
+| safe-join | 2.83 (loc 40) | **3.00 (loc 17)** | leaner **and** more correct — the lever working as designed |
+| slugify | 3.00 (loc 9) | 3.00 (loc 6) | leaner, correctness held |
+| file-dropzone | 3.00 (loc 2) | 3.00 (loc 1) | tie |
+| date-field | 2.50 (loc 1) | 2.00 (loc 1) | −0.5 |
+| **form-validation** | **2.83 (loc 32)** | **1.83 (loc 7)** | **−1.0 — the smoking gun** |
+
+Almost the entire aggregate dip is **form-validation**, a *compound* task with three
+stated requirements (valid email, password ≥ 8 chars, block submit on invalid).
+`minimal_diff` cut it 32 → 7 lines and the judge marks it down a full point — i.e. it
+**dropped a requirement**: "build the minimum" overshot into "build less than asked." On
+single-requirement tasks (slugify) and the safety task it is neutral-to-**better**
+(`safe-join`: 40 → 17 lines AND correctness 2.83 → 3.00).
+
+So the completeness risk is **localized to multi-acceptance-criteria work**, where the
+"stop at the first rung that works" reflex can stop before covering every criterion — and
+it is the lever violating its OWN carve-out ("do NOT minimize away … anything the task
+EXPLICITLY requested"). Actionable: sharpen the carve-out to "satisfy every acceptance
+criterion *before* minimizing," and/or have the lever echo the acceptance list. It is
+exactly why `minimal_diff` stays paired with a review loop, and why **correctness, not
+LOC, is the metric to watch.**
+
 **`terse` came out ≈cost-neutral per-worker here — it did NOT reproduce the earlier
 +99%-on-haiku harm.** That earlier figure (see `2026-06-20-fair-test.md`) was the
 per-worker leg measured on a 3-task over-build-prone *subset*; across all 5 tasks at

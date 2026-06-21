@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+- Sharpened the `_MINIMAL_DIFF_RULE` carve-out to cover **compound tasks**:
+  minimality now explicitly applies to the SIZE of a change, never its SCOPE —
+  every stated requirement / acceptance criterion must be satisfied ("fewer
+  lines per requirement, not fewer requirements"). Closes the completeness gap
+  the three-model benchmark localized to multi-requirement tasks (the
+  `form-validation` case where the lever dropped a requirement). The new clause
+  is pinned un-trimmable in `tests/test_minimal_diff_lever.py`.
+
 ### Removed
 - Removed the terse/caveman briefing rule (B1) — measured net loss at every tier;
   the B2 wave-digest codec and context-budget rule are retained. The

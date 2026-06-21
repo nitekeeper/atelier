@@ -48,7 +48,7 @@ REPO_ROOT = BENCH.parent  # atelier repo root (benchmarks/ lives at the top leve
 FIXTURE = BENCH / "fixtures" / "widget-app"
 RUNS = BENCH / "runs"
 CELL_TIMEOUT_S = 600
-MODELS = {"haiku": "claude-haiku-4-5", "sonnet": "claude-sonnet-4-6"}
+MODELS = {"haiku": "claude-haiku-4-5", "sonnet": "claude-sonnet-4-6", "opus": "claude-opus-4-8"}
 JUDGE_MODEL = "claude-sonnet-4-6"
 MAX_WORKERS = 6
 

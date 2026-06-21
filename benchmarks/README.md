@@ -48,7 +48,7 @@ python benchmarks/run.py --selftest-offline
 python benchmarks/run.py --selftest
 
 # Run the per-worker matrix (spends — isolated claude -p per cell):
-python benchmarks/run.py --reps 2 --models haiku,sonnet
+python benchmarks/run.py --reps 2 --models haiku,sonnet,opus
 
 # Narrow it:
 python benchmarks/run.py --arms bare,minimal_diff --tasks safe-join --models haiku
@@ -106,3 +106,10 @@ The terse rule's kill verdict, triangulated three ways (2026-06-20):
   tasks across haiku & sonnet (the decisive per-worker run).
 - [`results/2026-06-20-whole-cycle-ab.md`](results/2026-06-20-whole-cycle-ab.md) — the
   live whole-cycle A/B (the keep-or-kill number).
+
+Post-removal per-tier sweep:
+
+- [`results/2026-06-20-three-model-matrix.md`](results/2026-06-20-three-model-matrix.md) —
+  the full per-worker matrix across **haiku, sonnet, and opus** (120 cells). `minimal_diff`
+  wins at every tier incl. opus; terse came out ≈neutral per-worker (it did *not* reproduce
+  the +99%-on-haiku figure — variance/task-mix, an honest negative the kill never rested on).

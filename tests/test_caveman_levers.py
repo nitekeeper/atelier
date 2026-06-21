@@ -1,14 +1,12 @@
-"""Liveness + neuter tests for the two caveman token-compression levers.
+"""Liveness + neuter tests for the context-budget briefing tail and its gate.
 
-B1 — always-on terse-output rule appended to the RENDERED worker briefing
-     (scripts/dispatch.py::compose_briefing + _TERSE_OUTPUT_RULE).
-B2 — env-gated caveman codec at the wave-summary digest sink
-     (scripts/pm_dispatch.py::compress_reply_for_context + WaveDispatcher).
+The terse/caveman briefing rule (B1) has been fully removed from production —
+this module now guards only the appended ``_CONTEXT_BUDGET_RULE`` tail and its
+``include_context_budget`` gate, plus a zero-trace regression that the deleted
+terse rule never reappears in a composed briefing.
 
-Both levers ship LIVE. Each carries a NEUTER assertion: a silent revert of the
-lever (removing the B1 append, or the B2 codec call / flipping the gate OFF)
-turns the suite RED. The kaizen round-1 failure mode (levers shipped INERT,
-saving zero tokens) is specifically guarded against here.
+(B2 — the wave-summary digest codec — lives in tests/test_caveman_codec.py and
+tests/test_wave_compression.py; it is unrelated to this module.)
 """
 
 from __future__ import annotations
@@ -18,7 +16,6 @@ from pathlib import Path
 from scripts.dispatch import (
     _CLI_TRANSPORT_RULE,
     _CONTEXT_BUDGET_RULE,
-    _TERSE_OUTPUT_RULE,
     TRANSPORT_CLI,
     compose_briefing,
 )
@@ -31,10 +28,7 @@ def _compose_kwargs(**overrides):
 
     Pins ``transport=TRANSPORT_CLI`` (the only transport since the M7 bridge-queue
     removal) so the transport under test is deterministic regardless of the
-    runner's ambient ``ATELIER_TRANSPORT``. The B1 caveman assertions (terse rule
-    is appended after the untrusted fence, and before the appended-tail blocks)
-    hold on the cli path: the terse rule precedes both the context-budget rule and
-    the cli-transport addendum.
+    runner's ambient ``ATELIER_TRANSPORT``.
     """
     rules = (REPO_ROOT / "internal" / "team-mode-rules" / "SKILL.md").read_text(encoding="utf-8")
     base = {
@@ -56,125 +50,97 @@ def _compose_kwargs(**overrides):
     return base
 
 
-# ── B1 — constant shape (neuter backstop) ─────────────────────────────────
+# ── Context-budget tail — LIVE: reaches the rendered briefing, outside the fence ─
 
 
-def test_b1_terse_rule_is_nonempty_constant():
-    """A silent blanking of the constant turns the liveness assertions below
-    RED (they require a distinctive non-empty substring)."""
-    assert isinstance(_TERSE_OUTPUT_RULE, str)
-    assert _TERSE_OUTPUT_RULE.strip()
-    # Distinctive markers the liveness test keys off.
-    low = _TERSE_OUTPUT_RULE.lower()
-    assert "terse" in low
-    assert "notes_md" in _TERSE_OUTPUT_RULE
-    assert "caveman" in low
-    # HARD CARVE-OUT contract is spelled out verbatim.
-    assert "task_result" in _TERSE_OUTPUT_RULE
-    assert "shutdown_response" in _TERSE_OUTPUT_RULE
-    assert "ABANDON:" in _TERSE_OUTPUT_RULE
-
-
-# ── B1 — LIVE: the rule reaches the rendered briefing, outside the fence ───
-
-
-def test_b1_terse_rule_present_when_enabled(monkeypatch):
-    """Terse is now DEFAULT-OFF (measured net loss); opt in via ATELIER_INCLUDE_TERSE=1.
-    When enabled, the rule reaches the briefing, appended AFTER the untrusted fence."""
-    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
-    body = compose_briefing(**_compose_kwargs())
-    assert _TERSE_OUTPUT_RULE in body
+def test_context_budget_rule_present_by_default():
+    """A normal dispatch carries the context-budget rule, appended AFTER the
+    untrusted fence."""
+    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))
+    assert _CONTEXT_BUDGET_RULE in body
     fence_close = body.rfind("</untrusted>")
     assert fence_close != -1
-    assert body.find(_TERSE_OUTPUT_RULE) > fence_close
+    assert body.find(_CONTEXT_BUDGET_RULE) > fence_close
 
 
-def test_b1_tm006_reply_contract_present_and_unmodified(monkeypatch):
-    """Even with terse enabled, the TM-006 reply contract survives and precedes it."""
-    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
-    body = compose_briefing(**_compose_kwargs())
+def test_tm006_reply_contract_present_and_precedes_budget_tail():
+    """The TM-006 reply contract survives and precedes the appended budget tail."""
+    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))
     assert "# REPLY CONTRACT (verbatim — TM-006)" in body
     assert '"type": "task_result"' in body
-    assert body.index('"type": "task_result"') < body.index(_TERSE_OUTPUT_RULE)
+    assert body.index('"type": "task_result"') < body.index(_CONTEXT_BUDGET_RULE)
 
 
-def test_b1_task_brief_stays_inside_fence_untouched():
-    """The untrusted task_brief renders inside the fence regardless of terse."""
+def test_task_brief_stays_inside_fence_untouched():
+    """The untrusted task_brief renders inside the fence."""
     body = compose_briefing(**_compose_kwargs(task_brief="Add a unit test for X."))
     fence_close = body.rfind("</untrusted>")
     assert "Add a unit test for X." in body
     assert body.index("Add a unit test for X.") < fence_close
 
 
-# ── B1' — terse is DEFAULT-OFF (measured net loss at every tier); opt-in via env ──
-def test_terse_off_by_default():
-    """A normal sonnet dispatch (env unset) must NOT carry the terse rule, while
-    still carrying the context-budget rule."""
-    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))
-    assert _TERSE_OUTPUT_RULE not in body
-    assert _CONTEXT_BUDGET_RULE in body
+# ── include_context_budget gate ───────────────────────────────────────────
 
 
-def test_terse_on_via_env(monkeypatch):
-    """ATELIER_INCLUDE_TERSE=1 opts the terse rule back in (the A/B re-test hook)."""
-    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
-    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))
-    assert _TERSE_OUTPUT_RULE in body
-    assert _CONTEXT_BUDGET_RULE in body
-
-
-def test_terse_env_force_off(monkeypatch):
-    """ATELIER_INCLUDE_TERSE=0 (explicit) also keeps terse off, budget on."""
-    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "0")
-    body = compose_briefing(**_compose_kwargs(wave_phase="tdd:green"))
-    assert _TERSE_OUTPUT_RULE not in body
-    assert _CONTEXT_BUDGET_RULE in body
-
-
-def test_include_terse_false_omits_both_rules():
-    """include_terse=False drops the appended context-budget rule (and terse, off
-    anyway), but NOT the CLI transport addendum."""
-    off = compose_briefing(**_compose_kwargs(include_terse=False))
-    assert _TERSE_OUTPUT_RULE not in off
+def test_include_context_budget_false_omits_budget_tail_only():
+    """include_context_budget=False drops the appended context-budget rule but NOT
+    the CLI transport addendum."""
+    off = compose_briefing(**_compose_kwargs(include_context_budget=False))
     assert _CONTEXT_BUDGET_RULE not in off
     assert _CLI_TRANSPORT_RULE in off
 
 
-def test_terse_enabled_byte_parity_and_exact_delta(monkeypatch):
-    """With terse opted in: explicit include_terse=True == implicit default; both
-    rules present; and include_terse=False == that default with exactly the
-    terse+budget tail excised (anti-recoupling delta guard)."""
-    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
-    explicit = compose_briefing(**_compose_kwargs(include_terse=True))
+def test_include_context_budget_byte_parity_and_exact_delta():
+    """explicit include_context_budget=True == implicit default; and
+    include_context_budget=False == that default with exactly the budget tail
+    excised (anti-recoupling delta guard)."""
+    explicit = compose_briefing(**_compose_kwargs(include_context_budget=True))
     on = compose_briefing(**_compose_kwargs())
     assert explicit == on
-    assert _TERSE_OUTPUT_RULE in on
     assert _CONTEXT_BUDGET_RULE in on
-    off = compose_briefing(**_compose_kwargs(include_terse=False))
-    combo = _TERSE_OUTPUT_RULE + _CONTEXT_BUDGET_RULE
-    assert on.count(combo) == 1
-    cut = on.find(combo)
-    assert off == on[:cut] + on[cut + len(combo) :]
+    off = compose_briefing(**_compose_kwargs(include_context_budget=False))
+    assert on.count(_CONTEXT_BUDGET_RULE) == 1
+    cut = on.find(_CONTEXT_BUDGET_RULE)
+    assert off == on[:cut] + on[cut + len(_CONTEXT_BUDGET_RULE) :]
 
 
-def test_terse_threads_through_host_briefing_for(monkeypatch):
-    """With terse enabled, it propagates through cli_dispatch._host_briefing_for;
-    include_terse=False still drops the budget tail."""
-    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
+def test_include_context_budget_threads_through_host_briefing_for():
+    """include_context_budget propagates through cli_dispatch._host_briefing_for;
+    False drops the budget tail."""
     from scripts.cli_dispatch import _host_briefing_for
 
     task = {"task_id": "AI-X", "assigned_persona": "backend-engineer-1", "phase": "tdd:green"}
     kw = {"clone_dir": REPO_ROOT, "team_id": "t", "team_lead_name": "lead", "wave_id": "w"}
     on = _host_briefing_for(**kw)(task, 1)
-    off = _host_briefing_for(**kw, include_terse=False)(task, 1)
-    assert _TERSE_OUTPUT_RULE in on
-    assert _TERSE_OUTPUT_RULE not in off
+    off = _host_briefing_for(**kw, include_context_budget=False)(task, 1)
+    assert _CONTEXT_BUDGET_RULE in on
     assert _CONTEXT_BUDGET_RULE not in off
 
 
-def test_include_terse_false_still_carries_rules_block_context_budget():
-    """include_terse=False drops the APPENDED _CONTEXT_BUDGET_RULE constant, but the
-    equivalent discipline in the always-rendered team-mode-rules block survives."""
-    off = compose_briefing(**_compose_kwargs(include_terse=False))
+def test_include_context_budget_false_still_carries_rules_block_budget():
+    """include_context_budget=False drops the APPENDED _CONTEXT_BUDGET_RULE constant,
+    but the equivalent discipline in the always-rendered team-mode-rules block
+    survives."""
+    off = compose_briefing(**_compose_kwargs(include_context_budget=False))
     assert _CONTEXT_BUDGET_RULE not in off
     assert "accumulating past" in off
+
+
+# ── B1 zero-trace regression — the terse rule must NEVER reappear ──────────
+
+
+def test_terse_rule_fully_removed_zero_trace(monkeypatch):
+    """The deleted terse/caveman briefing rule (B1) must never appear in a composed
+    briefing — not even with the retired ATELIER_INCLUDE_TERSE=1 env set (proves the
+    env is dead and the rule left zero trace)."""
+    monkeypatch.setenv("ATELIER_INCLUDE_TERSE", "1")
+    # Neutral team_id so the fixture's own name does not contribute a false "caveman"
+    # hit — the assertions key off the deleted B1 rule's distinctive prose.
+    body = compose_briefing(
+        **_compose_kwargs(wave_phase="tdd:green", team_id="atelier-zerotrace-1")
+    )
+    low = body.lower()
+    assert "# output shape (terse" not in low
+    assert "smart caveman" not in low
+    assert "talk like a smart caveman" not in low
+    assert "only fluff dies" not in low

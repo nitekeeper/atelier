@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+- Removed the terse/caveman briefing rule (B1) — measured net loss at every tier;
+  the B2 wave-digest codec and context-budget rule are retained. The
+  `_TERSE_OUTPUT_RULE` constant, the `ATELIER_INCLUDE_TERSE` env, and
+  `_terse_rule_applies()` are deleted from `scripts/dispatch.py`. The
+  `compose_briefing` / `_host_briefing_for` `include_terse` parameter (which only
+  ever gated the always-on context-budget tail after B1 went default-off) is
+  renamed to `include_context_budget`; behavior for that tail is byte-identical.
+
 ## v1.10.1 — 2026-06-19
 
 **Migration runner self-heals a ledger/schema desync instead of crashing.** A

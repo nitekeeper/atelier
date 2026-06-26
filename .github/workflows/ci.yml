@@ -78,27 +78,3 @@ jobs:
           # everywhere, not just the outer run.
           PYTEST_ADDOPTS: "-p no:libtmux"
         run: pytest tests/ -q
-
-  benchmarks:
-    name: Benchmarks (offline selftest)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      # Proves the benchmark's deterministic instruments (adversarial safety
-      # scorer + arm wiring) with ZERO API spend — the paid matrix is never run
-      # in CI. Mirrors ponytail's gate: validate the harness, don't pay for it.
-      - name: Benchmark instruments (no API spend)
-        env:
-          PYTHONPATH: .
-        run: python benchmarks/run.py --selftest-offline

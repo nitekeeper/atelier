@@ -618,6 +618,35 @@ def _strip_loom_section(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
+# Worker-irrelevant boilerplate stripped from the PHASE PROCEDURE before it is
+# injected into a worker briefing. The on-disk dev-*/SKILL.md files are the
+# source of truth (read raw by the orchestrator + tests); this trims only the
+# per-spawn injected copy. Removed:
+#   * leading YAML frontmatter (the human-facing `description:` metadata),
+#   * the Prerequisites "Mode:" / "Required tables:" lines (backend-mode + table
+#     -registry implementation detail the worker never acts on; the load-bearing
+#     "Required: <phase> reached" line is kept), and
+#   * the "## Procedure" step "1. Check the phase gate:" block — the soft-wall /
+#     bypass check is a PRE-DISPATCH orchestrator step (the PM clears the gate
+#     before spawning), duplicated verbatim across the worker phase procedures;
+#     a spawned worker never runs check-gate. The actual implementation steps
+#     (2. onward) are untouched.
+_PHASE_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+_PHASE_PREREQ_RE = re.compile(r"^> - (?:Mode|Required tables): .*\n", re.MULTILINE)
+_PHASE_GATE_STEP_RE = re.compile(r"\n1\. Check the phase gate:.*?(?=\n2\. )", re.DOTALL)
+
+
+def _strip_worker_irrelevant_phase(text: str) -> str:
+    """Strip frontmatter, the Prerequisites mode/tables impl lines, and the
+    pre-dispatch gate-check Procedure step from a phase-procedure string before
+    it is injected into a worker briefing. Each strip degrades safely (a no-op
+    leaves the content); the on-disk file is unchanged."""
+    text = _PHASE_FRONTMATTER_RE.sub("", text, count=1)
+    text = _PHASE_PREREQ_RE.sub("", text)
+    text = _PHASE_GATE_STEP_RE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", text).lstrip("\n")
+
+
 def _default_bridge_cmds(team_id: str, role_id: str, last_seq: int = 0) -> dict[str, Any]:
     """Construct the default ``bridge_cmds`` dict the template renders into
     the CHANNELS block. Provided as a convenience so CLI callers without a
@@ -754,6 +783,10 @@ def compose_briefing(
     loom_active = team_chat is not None and team_chat.get("transport") == "loom"
     if not loom_active:
         rules_text = _strip_loom_section(rules_text)
+    # Trim worker-irrelevant boilerplate from the phase procedure (frontmatter,
+    # prereq mode/tables lines, the pre-dispatch gate-check step) before it is
+    # injected — the worker never runs the gate or switches backend mode.
+    phase_procedure_text = _strip_worker_irrelevant_phase(phase_procedure_text)
     sanitized_task = sanitize_bridge_field(task_brief)
 
     # Compose the task_brief slot: the rules header + persona + phase

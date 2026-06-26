@@ -506,19 +506,71 @@ def sanitize_bridge_field(value: str) -> str:
 # ── Briefing composition ──────────────────────────────────────────────────
 
 
+# Worker-irrelevant boilerplate stripped from the rules block before it is
+# injected into a briefing. The SKILL.md file is the source of truth on disk
+# (read raw by tests and by pm_dispatch_envelope.py's ABANDON_RE parser); the
+# stripping below applies ONLY to the per-spawn worker-facing copy so we don't
+# pay tokens — on every spawn, re-read from cache on every worker turn — for
+# content the workers never act on. The strips are:
+#   * leading YAML frontmatter (schema_version/version/description metadata),
+#   * HTML comment blocks (the file's own comment says "not rendered to
+#     workers" — yet it was being injected verbatim), and
+#   * the maintainer ## CHANGELOG section (version history + the schema-bump
+#     governance note — neither is worker-behavioral).
+# Every load-bearing surface (TM-001..TM-008, the reply-envelope schema, the
+# abandon grammar, the untrusted fence, the context-budget guidance, the Loom
+# rules) lives BELOW the CHANGELOG and is untouched.
+_RULES_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+_RULES_HTML_COMMENT_RE = re.compile(r"<!--.*?-->\n?", re.DOTALL)
+_RULES_CHANGELOG_RE = re.compile(r"\n## CHANGELOG\n.*?(?=\n## )", re.DOTALL)
+
+
+def _strip_worker_irrelevant_rules(text: str) -> str:
+    """Strip frontmatter, HTML comments, and the CHANGELOG section from the
+    worker-facing rules text. Behaviour-preserving by construction: it only
+    removes metadata/maintainer content that sits ABOVE the first hard rule.
+    Leaves the on-disk file untouched (this operates on the read string)."""
+    text = _RULES_FRONTMATTER_RE.sub("", text, count=1)
+    # Strip HTML comments only in the PREAMBLE (before the first markdown H1
+    # title), where the maintainer comment lives — never inside rule bodies,
+    # so a future literal "<!--" in a rule's prose can't silently eat content.
+    preamble, sep, rest = text.partition("\n# ")
+    if sep:
+        text = _RULES_HTML_COMMENT_RE.sub("", preamble) + sep + rest
+    else:
+        text = _RULES_HTML_COMMENT_RE.sub("", text)
+    # Strip the maintainer CHANGELOG section. Structural assumption: the
+    # heading is exactly "## CHANGELOG" and is followed by another "## "
+    # section. If a future edit renames/moves it past the last heading, this
+    # no-ops and the section ships again (a token regression, never a dropped
+    # rule) — the content-preservation tests stay green either way.
+    text = _RULES_CHANGELOG_RE.sub("", text)
+    # Collapse the run of blank lines the removals can leave behind so the
+    # rendered briefing stays tidy (purely cosmetic; no behavioural effect).
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.lstrip("\n")
+
+
 def _read_rules_block() -> str:
-    """Read the team-mode rules SKILL.md verbatim. Per TM-007 the rendered
-    rules block is prepended to every worker briefing — a stale rules
-    surface MUST NOT silently propagate into worker prompts. The schema
-    version pin is enforced by the bridge writer/reader at runtime; here we
-    just guarantee the rules text is current with the file on disk."""
+    """Read the team-mode rules SKILL.md and return the worker-facing rules
+    block. Per TM-007 the rendered rules block is prepended to every worker
+    briefing — a stale rules surface MUST NOT silently propagate into worker
+    prompts, so we re-read from disk on every call. The schema version pin is
+    enforced by the bridge writer/reader at runtime.
+
+    The returned text has worker-irrelevant boilerplate stripped (frontmatter,
+    HTML maintainer comments, and the CHANGELOG) via
+    :func:`_strip_worker_irrelevant_rules` so each spawn does not carry — and
+    re-read from cache on every turn — content the worker never acts on. The
+    file on disk is unchanged; only this injected copy is trimmed."""
     try:
-        return RULES_SKILL.read_text(encoding="utf-8")
+        raw = RULES_SKILL.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
         raise DispatchError(
             f"team-mode rules SKILL.md not found at {RULES_SKILL}; cannot "
             "compose a briefing without the rules block (TM-007)"
         ) from exc
+    return _strip_worker_irrelevant_rules(raw)
 
 
 def _default_bridge_cmds(team_id: str, role_id: str, last_seq: int = 0) -> dict[str, Any]:
@@ -658,7 +710,7 @@ def compose_briefing(
     # heading so the worker reads the briefing as a single coherent doc
     # rather than four blind concatenated chunks.
     prefix_parts = [
-        "# ATELIER TEAM-MODE RULES (verbatim — read first)",
+        "# ATELIER TEAM-MODE RULES (read first)",
         "",
         rules_text.rstrip(),
         "",

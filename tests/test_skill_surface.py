@@ -1,6 +1,7 @@
-"""Lock in the contract that Atelier exposes EXACTLY 7 user-facing skills
-to Claude Code (v1.2.0 surface — adds `abort` + `status` team-mode lifecycle
-skills, issue #65, to the v1.1.0 set of 5, for a set of 7) and that every
+"""Lock in the contract that Atelier exposes EXACTLY 8 user-facing skills
+to Claude Code (v1.11.0 surface — adds the read-only `tokens` token-usage
+reporter to the v1.2.0 set of 7, which itself added `abort` + `status`
+team-mode lifecycle skills, issue #65, to the v1.1.0 set of 5) and that every
 internal procedure stays under internal/."""
 
 import json
@@ -11,16 +12,25 @@ SKILLS = REPO / "skills"
 INTERNAL = REPO / "internal"
 
 
-def test_exactly_seven_user_skills():
-    """EXACTLY 7 user-facing skills (v1.2.0): the v1.1.0 set of 5 plus the #65
-    `abort` + `status` team-mode lifecycle skills."""
+def test_exactly_eight_user_skills():
+    """EXACTLY 8 user-facing skills (v1.11.0): the v1.2.0 set of 7 plus the
+    read-only `tokens` token-usage reporter."""
     skill_dirs = [p for p in SKILLS.iterdir() if p.is_dir() and (p / "SKILL.md").exists()]
     names = sorted(p.name for p in skill_dirs)
-    assert names == ["abort", "ingest", "load", "migrate", "run", "save", "status"], names
+    assert names == [
+        "abort",
+        "ingest",
+        "load",
+        "migrate",
+        "run",
+        "save",
+        "status",
+        "tokens",
+    ], names
 
 
 def test_plugin_manifest_lists_no_extra_skills():
-    """If plugin.json declares any skill, it must be one of the seven."""
+    """If plugin.json declares any skill, it must be one of the eight."""
     manifest_path = REPO / ".claude-plugin" / "plugin.json"
     if not manifest_path.exists():
         return  # nothing to check
@@ -31,7 +41,7 @@ def test_plugin_manifest_lists_no_extra_skills():
             name = s if isinstance(s, str) else s.get("name", "")
             assert any(
                 name.endswith(n)
-                for n in ("load", "save", "ingest", "run", "migrate", "abort", "status")
+                for n in ("load", "save", "ingest", "run", "migrate", "abort", "status", "tokens")
             ), f"manifest declares unknown skill: {name}"
 
 

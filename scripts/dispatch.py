@@ -597,6 +597,27 @@ def _read_rules_block() -> str:
     return _strip_worker_irrelevant_rules(raw)
 
 
+# The rules-block "## Loom chat transport" section is behavioural ONLY when Loom
+# is the active chat transport. When Loom is unavailable or opted-out
+# (ATELIER_LOOM_COMMS=0), the worker has no Loom peer and the section's own text
+# says "When Loom is unavailable, you communicate normally via the bridge;
+# nothing ... changes" — so injecting its ~3.2KB into every spawn is dead weight.
+# Strip it from the injected copy when Loom is NOT active; keep it verbatim when
+# Loom is live (the F16/A9 mandatory-when-available contract). The on-disk file
+# is unchanged. Same structural assumption + safe-degradation as the other
+# section strips: stops at the next "## "; a no-op leaves the content.
+_RULES_LOOM_RE = re.compile(r"\n## Loom chat transport.*?(?=\n## )", re.DOTALL)
+
+
+def _strip_loom_section(text: str) -> str:
+    """Remove the Loom-chat-transport section from a rules-block string. Used
+    only when Loom is NOT the active chat transport for the spawn."""
+    text = _RULES_LOOM_RE.sub("", text)
+    # Collapse any blank-line run the removal leaves behind (parallels
+    # _strip_worker_irrelevant_rules); purely cosmetic, no behavioural effect.
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
 def _default_bridge_cmds(team_id: str, role_id: str, last_seq: int = 0) -> dict[str, Any]:
     """Construct the default ``bridge_cmds`` dict the template renders into
     the CHANNELS block. Provided as a convenience so CLI callers without a
@@ -727,6 +748,12 @@ def compose_briefing(
         template_env = make_template_env()
 
     rules_text = _read_rules_block()
+    # Loom rules apply only when Loom is the active chat transport for this
+    # spawn. team_chat carries the wire label (loom | bridge); None / bridge
+    # means no live Loom peer, so strip the Loom section from this briefing.
+    loom_active = team_chat is not None and team_chat.get("transport") == "loom"
+    if not loom_active:
+        rules_text = _strip_loom_section(rules_text)
     sanitized_task = sanitize_bridge_field(task_brief)
 
     # Compose the task_brief slot: the rules header + persona + phase

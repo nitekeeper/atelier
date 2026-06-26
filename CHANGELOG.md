@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v1.11.0 — 2026-06-26
+
+### Added
+- **`/atelier:tokens` — daily token-usage rollup.** A new stdlib-only reader
+  (`scripts/token_usage.py`) walks Claude Code's `~/.claude` transcripts and
+  emits a per-day × model rollup of the four token categories (input, output,
+  cache-creation, cache-read) plus the cache-write TTL split, mirroring the
+  verified tokscale dedup contract (`msg.id:requestId`, within-file MAX-merge +
+  across-file first-wins, sidechain include + reparent, top-level
+  `message.usage`). `scripts/token_pricing.py` adds per-model USD costing
+  (cache-write 5m = 1.25× / 1h = 2.0× base input; unknown model → no cost).
+  Exposed as the `/atelier:tokens` skill via a `daily` CLI
+  (`--config-dir` / `--since` / `--format {json,csv,markdown}` / `--cost`); the
+  no-`--cost` JSON is a byte-stable feed (consumed by Loom's token-usage panel).
+
 ### Changed
 - Sharpened the `_MINIMAL_DIFF_RULE` carve-out to cover **compound tasks**:
   minimality now explicitly applies to the SIZE of a change, never its SCOPE —

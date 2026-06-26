@@ -523,6 +523,18 @@ def sanitize_bridge_field(value: str) -> str:
 _RULES_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 _RULES_HTML_COMMENT_RE = re.compile(r"<!--.*?-->\n?", re.DOTALL)
 _RULES_CHANGELOG_RE = re.compile(r"\n## CHANGELOG\n.*?(?=\n## )", re.DOTALL)
+# The abandon-grammar section is rendered a SECOND time, in full and
+# behaviour-equivalent form, by the Jinja2 template's `abandon_clause` block
+# (internal/team-mode-templates/briefings/role.j2). Every worker therefore
+# receives the same regex + 8-category table twice. Strip the rules-block copy
+# from the injection so it appears exactly once (from the template). The raw
+# file is unchanged, so pm_dispatch_envelope.py's ABANDON_RE parse (which reads
+# the file directly, not this output) is unaffected.
+# NOTE: the reply-envelope section is NOT de-duplicated — role.j2's REPLY
+# CONTRACT block is STALE (it omits the `failed` token and the `attempt`
+# anti-spoofing field that SKILL.md carries), so the SKILL.md copy is the
+# authoritative one that must keep reaching workers.
+_RULES_ABANDON_RE = re.compile(r"\n## Abandon grammar.*?(?=\n## )", re.DOTALL)
 
 
 def _strip_worker_irrelevant_rules(text: str) -> str:
@@ -545,6 +557,9 @@ def _strip_worker_irrelevant_rules(text: str) -> str:
     # no-ops and the section ships again (a token regression, never a dropped
     # rule) — the content-preservation tests stay green either way.
     text = _RULES_CHANGELOG_RE.sub("", text)
+    # Strip the duplicated abandon-grammar section (role.j2 renders an
+    # equivalent one). Same structural assumption + safe-degradation as above.
+    text = _RULES_ABANDON_RE.sub("", text)
     # Collapse the run of blank lines the removals can leave behind so the
     # rendered briefing stays tidy (purely cosmetic; no behavioural effect).
     text = re.sub(r"\n{3,}", "\n\n", text)

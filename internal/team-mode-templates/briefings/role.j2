@@ -91,7 +91,8 @@ Your terminal message per attempt is a single JSON envelope:
 {
   "type": "task_result",
   "task_id": "{{ task_id }}",
-  "status": "done" | "blocked" | "abandoned" | "needs-input",
+  "attempt": "<integer; the dispatch attempt number this reply answers>",
+  "status": "done" | "blocked" | "abandoned" | "needs-input" | "failed",
   "artifacts": [{"path": "<repo-relative>", "sha": "<git-blob or sha256>"}],
   "notes_md": "<short markdown summary, <= 2k chars>",
   "next_action": "review" | "merge" | "amend-spec" | "escalate" | "none"
@@ -106,8 +107,16 @@ Closure tokens — **exactly one** of:
 | `blocked`     | Cannot proceed; need PM/human input or external unblock.             |
 | `needs-input` | Specific question awaiting answer; otherwise able to continue.       |
 | `abandoned`   | 5-attempt budget exhausted OR wall-clock/token cap hit.              |
+| `failed`      | Ran and hit a deterministic hard failure; terminal, NOT retryable. Does NOT burn remaining attempts; PM records + escalates and does NOT re-dispatch. Use only when retrying is pointless. |
 
 No prose terminals. No "all good." No "I'm done."
+
+Field constraints (PM validates these):
+
+- `type` MUST equal `"task_result"`; `status` MUST be one of the five tokens above — no other value is accepted.
+- `attempt` is the dispatch attempt number; PM cross-checks it against the dispatched attempt for anti-spoofing — you MUST emit it.
+- `artifacts` may be an empty array ONLY for `blocked`/`needs-input`/`failed`; a `done` MUST list what you wrote with verifiable `sha`s.
+- `notes_md` ≤ 2k chars; the full artifact bodies live in your output doc (durable backend, `domain=project_doc, subdomain=<phase>-result`), not the envelope.
 
 Shutdown handshake (TM-005). On receiving `{"type":"shutdown_request",
 "request_id":"<id>", ...}`, reply within ONE message turn with:

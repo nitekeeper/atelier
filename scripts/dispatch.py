@@ -319,8 +319,9 @@ _CLI_TRANSPORT_RULE = (
     "`attempt` / `status` / `artifacts` / `notes_md`). That structured output IS "
     "your reply to the team-lead — the deterministic host reads it directly as "
     "the return value of your invocation; you do not send it anywhere. Emit it "
-    "exactly once, as your terminal message. The abandon grammar, the four "
-    "closure tokens, and the artifacts contract are UNCHANGED — only the delivery "
+    "exactly once, as your terminal message. The abandon grammar, the five "
+    "closure tokens (`done`/`blocked`/`abandoned`/`needs-input`/`failed`), and "
+    "the artifacts contract are UNCHANGED — only the delivery "
     "channel changes (structured return value, not a bridge send)."
 )
 
@@ -530,11 +531,15 @@ _RULES_CHANGELOG_RE = re.compile(r"\n## CHANGELOG\n.*?(?=\n## )", re.DOTALL)
 # from the injection so it appears exactly once (from the template). The raw
 # file is unchanged, so pm_dispatch_envelope.py's ABANDON_RE parse (which reads
 # the file directly, not this output) is unaffected.
-# NOTE: the reply-envelope section is NOT de-duplicated — role.j2's REPLY
-# CONTRACT block is STALE (it omits the `failed` token and the `attempt`
-# anti-spoofing field that SKILL.md carries), so the SKILL.md copy is the
-# authoritative one that must keep reaching workers.
 _RULES_ABANDON_RE = re.compile(r"\n## Abandon grammar.*?(?=\n## )", re.DOTALL)
+# The reply-envelope section is ALSO rendered a second time by role.j2's
+# `reply_contract` block. role.j2 is now the canonical, complete copy (it
+# carries the `failed` token, the `attempt` anti-spoofing field, and the field
+# constraints — the artifacts-emptiness rule, the type/status validity rules,
+# and the notes_md cap), so the rules-block copy is a true duplicate and is
+# stripped from the injection. (Before this it was kept because role.j2 was
+# stale; that staleness was fixed in lockstep with adding this strip.)
+_RULES_REPLY_ENVELOPE_RE = re.compile(r"\n## Reply envelope.*?(?=\n## )", re.DOTALL)
 
 
 def _strip_worker_irrelevant_rules(text: str) -> str:
@@ -560,6 +565,10 @@ def _strip_worker_irrelevant_rules(text: str) -> str:
     # Strip the duplicated abandon-grammar section (role.j2 renders an
     # equivalent one). Same structural assumption + safe-degradation as above.
     text = _RULES_ABANDON_RE.sub("", text)
+    # Strip the duplicated reply-envelope section (role.j2's reply_contract is
+    # now the canonical, complete copy). Same structural assumption + safe
+    # degradation: a no-op leaves the content rather than dropping a rule.
+    text = _RULES_REPLY_ENVELOPE_RE.sub("", text)
     # Collapse the run of blank lines the removals can leave behind so the
     # rendered briefing stays tidy (purely cosmetic; no behavioural effect).
     text = re.sub(r"\n{3,}", "\n\n", text)

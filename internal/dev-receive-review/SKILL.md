@@ -54,12 +54,12 @@ Requires `review:changes-requested`.
 6. **Implement accepted fixes** — work through the accept list. For each fix:
    - Make the change.
    - Run the targeted test: `pytest <test-file>::<test-name> -v` — confirm PASS.
-   - Run the full suite: `pytest -v` — confirm 0 failures.
+   - Run the full suite: `pytest -q --tb=short` — confirm 0 failures.
    - If any test fails: stop. Fix the regression before moving to the next accept item.
 
 7. **Verify before requesting re-review** — after all accepted fixes are implemented:
    ```
-   pytest -v
+   pytest -q --tb=short
    ```
    All tests must pass. Do not request re-review with a failing suite.
 

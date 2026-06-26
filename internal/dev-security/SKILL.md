@@ -74,6 +74,6 @@ Requires `review:approved`.
    - Confirm: "Security review approved. Phase: security:approved. Ready for dev:qa."
 
 ## Hard rules
-- Run `pytest -v` before approving — security fixes must not regress tests.
+- Run `pytest -q --tb=short` before approving — security fixes must not regress tests.
 - Never mark an item as passed without explicitly checking it — no assumed passes.
 - Secrets found anywhere in source are a hard block — no exceptions.

@@ -81,7 +81,7 @@ If you wrote implementation before the test: delete it. Not "keep as reference."
 
 9. Run the full test suite:
    ```
-   pytest -v
+   pytest -q --tb=short
    ```
    Expected: all tests pass. If any test regressed, fix it before continuing.
 
@@ -97,7 +97,7 @@ If you wrote implementation before the test: delete it. Not "keep as reference."
 
 12. Run the full test suite again:
     ```
-    pytest -v
+    pytest -q --tb=short
     ```
     Expected: all tests still pass. If any test fails after refactor, the refactor changed behaviour — revert and refactor more carefully.
 

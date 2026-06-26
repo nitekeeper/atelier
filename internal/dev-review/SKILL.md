@@ -50,7 +50,7 @@ Requires `tdd:clean`.
    | # | Check |
    |---|---|
    | 1 | All plan tasks implemented |
-   | 2 | All tests pass (`pytest -v`) |
+   | 2 | All tests pass (`pytest -q --tb=short`) |
    | 3 | No dead code or leftover stubs |
    | 4 | Public interfaces match the design doc |
    | 5 | Error handling is explicit (no silent swallowing) |
@@ -74,6 +74,6 @@ Requires `tdd:clean`.
    - Confirm: "Code review approved. Phase: review:approved. Ready for dev:security."
 
 ## Hard rules
-- Run `pytest -v` before approving — never approve with failing tests.
+- Run `pytest -q --tb=short` before approving — never approve with failing tests.
 - Issues must be specific (file + line range + fix direction) — vague comments are not actionable.
 - Do not approve partial fixes — all issues from the previous review must be resolved before re-approving.

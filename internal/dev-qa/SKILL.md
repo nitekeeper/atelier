@@ -43,7 +43,7 @@ Requires `security:approved`.
 
    | # | Check | How to verify |
    |---|---|---|
-   | 1 | CI pipeline green | Run `pytest -v` — all tests must pass. Run `python3 -m py_compile scripts/*.py` to check for syntax errors. |
+   | 1 | CI pipeline green | Run `pytest -q --tb=short` — all tests must pass. Run `python3 -m py_compile scripts/*.py` to check for syntax errors. |
    | 2 | All assigned tasks complete | `python3 atelier/scripts/tasks.py list --project_id <project_id> --status assigned` — must be empty |
    | 3 | No open blocking tasks | `python3 atelier/scripts/tasks.py list --project_id <project_id> --status open` — review any found |
    | 4 | Documentation updated | README, API docs, user-facing materials current |

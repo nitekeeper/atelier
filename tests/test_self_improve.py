@@ -108,6 +108,43 @@ class TestRunTestsInClone:
         assert passed is True
         assert count == 1
 
+    def test_pytest_argv_is_quiet_not_verbose(self, monkeypatch):
+        """PIN (anti-revert): full-suite pytest gate runs -q --tb=short, never -v."""
+        import scripts.self_improve as si
+
+        captured = {}
+
+        class _FakeResult:
+            stdout = "1 passed in 0.01s"
+            returncode = 0
+
+        def _fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return _FakeResult()
+
+        monkeypatch.setattr(si.subprocess, "run", _fake_run)
+        si.run_tests_in_clone(Path("x"))
+        argv = captured["argv"]
+        assert "-q" in argv
+        assert "--tb=short" in argv
+        assert "-v" not in argv
+
+    def test_red_result_parses_failure_signal(self, monkeypatch):
+        """PIN: a red run (returncode=1) yields passed=False with count from summary."""
+        import scripts.self_improve as si
+
+        class _FakeResult:
+            stdout = "FAILED tests/x.py::test_c\n1 failed, 2 passed in 0.01s"
+            returncode = 1
+
+        def _fake_run(argv, **kwargs):
+            return _FakeResult()
+
+        monkeypatch.setattr(si.subprocess, "run", _fake_run)
+        passed, count = si.run_tests_in_clone(Path("x"))
+        assert passed is False
+        assert count == 2
+
     def test_failing_tests_returns_false(self, tmp_path, bare_remote, source_repo):
         # Push a failing test to the remote
         (source_repo / "tests" / "test_fail.py").write_text("def test_fail(): assert False\n")

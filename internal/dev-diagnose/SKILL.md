@@ -69,7 +69,7 @@ If you patched the code before writing the regression test: revert the patch, wr
 
 9. Run the full suite:
    ```
-   pytest -v
+   pytest -q --tb=short
    ```
    Expected: all tests pass including the regression.
 

@@ -52,7 +52,7 @@ def create_branch(clone_dir: Path, cycle_n: int) -> str:
 def run_tests_in_clone(clone_dir: Path) -> tuple[bool, int]:
     """Run pytest in clone_dir. Returns (all_passed, test_count)."""
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-v", "--tb=short"],
+        [sys.executable, "-m", "pytest", "-q", "--tb=short"],
         cwd=clone_dir,
         capture_output=True,
         text=True,

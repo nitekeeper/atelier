@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## v1.11.1 — 2026-06-26
+
+### Removed
+- **Retired the benchmark suite.** Removed `benchmarks/` (the ponytail/terse
+  A/B harness — `run.py`, `bench_fullcycle.py`, fixtures, results, README) and
+  its `benchmarks` offline-selftest CI job. The token-lever benchmarking
+  initiative is concluded; the *kept* outcomes (the briefing levers and the
+  terse-rule removal) remain in the shipped code — only the measurement harness
+  is gone. Nothing in the plugin runtime imported `benchmarks/`, so the removal
+  is inert. CI now runs lint + security + tests.
+
 ## v1.11.0 — 2026-06-26
 
 ### Added

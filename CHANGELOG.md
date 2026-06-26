@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+## v1.12.0 — 2026-06-26
+
+Two kaizen-driven token-reduction runs against `compose_briefing`. Net effect: the
+per-spawn worker briefing shrank ~34% in the common (Loom-off) case (≈36.7k → ≈24.3k
+chars for a representative implementer spawn), behaviour-preserving. Every strip
+applies to the INJECTED copy only — the on-disk `internal/**/SKILL.md` files are
+unchanged, so the file-reading tests and the raw-file `ABANDON_RE` parse in
+`pm_dispatch_envelope.py` are unaffected.
+
+### Changed
+- **Rules-block trim + de-duplication (#22).** `_read_rules_block` strips the YAML
+  frontmatter, the maintainer HTML comment, and the CHANGELOG from the injected
+  team-mode rules block. The abandon-grammar and reply-envelope sections —
+  previously rendered twice per briefing — are de-duplicated: the `role.j2`
+  template is now the canonical reply-contract copy, updated to carry the `failed`
+  token, the `attempt` anti-spoofing field, and the field constraints
+  (artifacts-emptiness, type/status validity, `notes_md` cap).
+- **Loom rules gated on availability (#23).** The `## Loom chat transport` section
+  is injected only when Loom is the active chat transport (`team_chat.transport ==
+  'loom'`) — the same signal `role.j2` branches on — so the F16/A9
+  mandatory-when-available contract holds when Loom is live, while the ~3.2KB
+  section is no longer paid on every spawn when Loom is unavailable.
+- **Phase-procedure boilerplate trim (#23).** The injected phase procedure drops its
+  frontmatter, the Prerequisites mode/required-tables implementation lines, and the
+  pre-dispatch "Check the phase gate" step (a soft-wall check the orchestrator runs
+  before dispatch — un-executable by a non-interactive `claude -p` worker).
+  Implementation steps, the Iron Law, and Hard rules are preserved.
+- **`_MINIMAL_DIFF_RULE` trim (#23).** The "REFLEX, NOT RESEARCH" motivational
+  paragraph is reduced to its behavioral core; all safety carve-outs
+  (WHEN-NOT-TO-BE-LAZY, COVER-EVERY-REQUIREMENT) preserved.
+
+### Fixed
+- `_CLI_TRANSPORT_RULE` described "four closure tokens"; corrected to five
+  (`done`/`blocked`/`abandoned`/`needs-input`/`failed`), removing a contradictory
+  superseding tail that could mis-route a deterministic `failed` result. (#22)
+
 ## v1.11.1 — 2026-06-26
 
 ### Removed

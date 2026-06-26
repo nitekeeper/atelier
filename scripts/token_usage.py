@@ -63,8 +63,12 @@ Stdlib-only (``json``, ``os``, ``datetime``, ``pathlib``, ``dataclasses``,
 
 from __future__ import annotations
 
+import argparse
+import csv
+import io
 import json
 import os
+import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -527,3 +531,143 @@ def daily_rollup(
     if since:
         rows = [row for row in rows if row["day"] == "unknown" or str(row["day"]) >= since]
     return rows
+
+
+# ── CLI shell (IMPURE; read-only; the no-cost path is dependency-free) ───────
+#
+# Everything above is the pure/historical reader. Everything below is an
+# argparse shell that renders ``daily_rollup`` to stdout. It NEVER mutates state
+# and NEVER crashes on an empty/missing config dir (it emits an empty rollup).
+# ``scripts.token_pricing`` is imported LAZILY inside the ``--cost`` branch so
+# the byte-stable token-only feed has no pricing dependency.
+
+# Stable column order for the rollup feed (the Loom-panel schema). ``cost_usd``
+# is appended only on the ``--cost`` path.
+_FEED_COLUMNS = ("day", *CATEGORY_FIELDS, "model")
+
+
+def _valid_since(value: str) -> str:
+    """argparse type for ``--since``: accept only a ``YYYY-MM-DD`` string."""
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--since must be YYYY-MM-DD (got {value!r})") from exc
+    return value
+
+
+def _priced_rows(rows: list[dict]) -> tuple[list[dict], dict]:
+    """Augment each row with ``cost_usd`` and compute a totals footer (lazy import).
+
+    Returns ``(rows, totals)`` where each row gains a ``cost_usd`` key (a float,
+    or ``None`` for an unknown/unpriced model) and ``totals`` carries the summed
+    four token channels plus a ``cost_usd`` total (unknown-model rows contribute
+    0 to the dollar total while keeping their token counts).
+    """
+    from scripts import token_pricing  # lazy: keeps the no-cost path dependency-free
+
+    cost_total = 0.0
+    for row in rows:
+        cost = token_pricing.cost_usd_for_row(row)
+        row["cost_usd"] = round(cost, 6) if cost is not None else None
+        if cost is not None:
+            cost_total += cost
+    totals = {field: sum(int(row.get(field, 0)) for row in rows) for field in CATEGORY_FIELDS}
+    totals["cost_usd"] = round(cost_total, 6)
+    return rows, totals
+
+
+def _render_csv(rows: list[dict], *, cost: bool, totals: dict | None) -> str:
+    """Render the rollup rows as CSV (human view), with an optional TOTAL row."""
+    columns = list(_FEED_COLUMNS) + (["cost_usd"] if cost else [])
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(columns)
+    for row in rows:
+        writer.writerow([row.get(col, "") for col in columns])
+    if cost and totals is not None:
+        footer = {"day": "TOTAL", **totals}
+        writer.writerow([footer.get(col, "") for col in columns])
+    return buffer.getvalue().rstrip("\n")
+
+
+def _render_markdown(rows: list[dict], *, cost: bool, totals: dict | None) -> str:
+    """Render the rollup rows as a Markdown table (human view), optional TOTAL row."""
+    columns = list(_FEED_COLUMNS) + (["cost_usd"] if cost else [])
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(str(row.get(col, "")) for col in columns) + " |")
+    if cost and totals is not None:
+        footer = {"day": "TOTAL", **totals}
+        lines.append("| " + " | ".join(str(footer.get(col, "")) for col in columns) + " |")
+    return "\n".join(lines)
+
+
+def _render(rows: list[dict], *, fmt: str, cost: bool, totals: dict | None) -> str:
+    """Render ``rows`` in the requested format.
+
+    JSON without ``--cost`` is the byte-stable token-only list (the Loom feed).
+    JSON with ``--cost`` is an object ``{"rows": [...], "totals": {...}}`` so the
+    per-row ``cost_usd`` augmentation and the totals footer both survive
+    serialization.
+    """
+    if fmt == "json":
+        if cost:
+            return json.dumps({"rows": rows, "totals": totals}, indent=2, sort_keys=True)
+        return json.dumps(rows, indent=2, sort_keys=True)
+    if fmt == "csv":
+        return _render_csv(rows, cost=cost, totals=totals)
+    return _render_markdown(rows, cost=cost, totals=totals)
+
+
+def _cmd_daily(args: argparse.Namespace) -> int:
+    """``daily`` subcommand: collect → rollup → optional pricing → render."""
+    rows = daily_rollup(config_dir=args.config_dir, since=args.since)
+    totals: dict | None = None
+    if args.cost:
+        rows, totals = _priced_rows(rows)
+    sys.stdout.write(_render(rows, fmt=args.format, cost=args.cost, totals=totals) + "\n")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    """Entry point for ``python3 scripts/token_usage.py``. Read-only; returns rc."""
+    parser = argparse.ArgumentParser(
+        prog="token_usage",
+        description="Historical Claude Code token-usage reporter (read-only).",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    daily = sub.add_parser("daily", help="Per-day, per-model token rollup.")
+    daily.add_argument(
+        "--config-dir",
+        default=None,
+        help="Transcript root (default: $CLAUDE_CONFIG_DIR, else ~/.claude).",
+    )
+    daily.add_argument(
+        "--since",
+        default=None,
+        type=_valid_since,
+        help="Drop rows whose day sorts before this YYYY-MM-DD ('unknown' is kept).",
+    )
+    daily.add_argument(
+        "--format",
+        choices=("json", "csv", "markdown"),
+        default="json",
+        help="Output format (default: json — the stable Loom-panel feed schema).",
+    )
+    daily.add_argument(
+        "--cost",
+        action="store_true",
+        help="Augment each row with cost_usd and print a totals footer.",
+    )
+    daily.set_defaults(func=_cmd_daily)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

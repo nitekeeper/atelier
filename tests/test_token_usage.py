@@ -30,6 +30,7 @@ from scripts.token_usage import (
     _harden_token,
     collect_usage_records,
     daily_rollup,
+    main,
     to_daily_rollup,
 )
 
@@ -469,3 +470,170 @@ def test_ttl_split_max_merges_across_partials(tmp_path):
     assert rec.cache_creation_5m == 200
     assert rec.cache_creation_1h == 80
     assert rec.usage.cache_creation_input_tokens == 300
+
+
+# ── CLI: `daily --format json` emits the stable token-only schema ────────────
+
+_M = 1_000_000
+
+_FEED_KEYS = {
+    "day",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "model",
+}
+
+
+def test_cli_daily_json_emits_stable_schema(tmp_path, capsys):
+    root, proj = _config_root(tmp_path)
+    _write_jsonl(
+        proj / "s.jsonl",
+        [
+            _assistant_line(
+                msg_id="a", model="claude-opus-4-8", usage={"input_tokens": 10, "output_tokens": 2}
+            )
+        ],
+    )
+
+    rc = main(["daily", "--config-dir", str(root)])
+
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert isinstance(data, list)
+    assert len(data) == 1
+    row = data[0]
+    # Stable feed: exactly the six token-only keys, NO cost_usd.
+    assert set(row) == _FEED_KEYS
+    assert "cost_usd" not in row
+    assert row["model"] == "claude-opus-4-8"
+
+
+# ── CLI: `--cost` augments rows with cost_usd and prints a totals footer ──────
+
+
+def test_cli_daily_cost_adds_cost_usd_and_totals(tmp_path, capsys):
+    root, proj = _config_root(tmp_path)
+    # 1M input + 1M output on opus → $5 + $25 = $30.00 (exact).
+    _write_jsonl(
+        proj / "s.jsonl",
+        [
+            _assistant_line(
+                msg_id="a",
+                model="claude-opus-4-8",
+                usage={"input_tokens": _M, "output_tokens": _M},
+            )
+        ],
+    )
+
+    rc = main(["daily", "--config-dir", str(root), "--cost"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    # --cost is an object with augmented rows + a totals footer.
+    assert set(payload) == {"rows", "totals"}
+    assert payload["rows"][0]["cost_usd"] == 30.0
+    assert payload["totals"]["cost_usd"] == 30.0
+    assert payload["totals"]["input_tokens"] == _M
+    assert payload["totals"]["output_tokens"] == _M
+
+
+# ── CLI: `--since` filters older days (drives the public daily_rollup filter) ─
+
+
+def test_cli_daily_since_filters_old_days(tmp_path, capsys):
+    root, proj = _config_root(tmp_path)
+    _write_jsonl(
+        proj / "old.jsonl",
+        [
+            _assistant_line(
+                msg_id="o", usage={"output_tokens": 1}, timestamp="2026-06-10T12:00:00+00:00"
+            )
+        ],
+    )
+    _write_jsonl(
+        proj / "new.jsonl",
+        [
+            _assistant_line(
+                msg_id="n", usage={"output_tokens": 2}, timestamp="2026-06-20T12:00:00+00:00"
+            )
+        ],
+    )
+
+    rc = main(["daily", "--config-dir", str(root), "--since", "2026-06-15"])
+
+    assert rc == 0
+    days = {row["day"] for row in json.loads(capsys.readouterr().out)}
+    assert "2026-06-10" not in days
+    assert "2026-06-20" in days
+
+
+def test_cli_invalid_since_is_rejected(tmp_path):
+    # argparse type-validation rejects a non-date → SystemExit(2).
+    with pytest.raises(SystemExit):
+        main(["daily", "--config-dir", str(tmp_path), "--since", "not-a-date"])
+
+
+# ── CLI: csv / markdown human views render a header + data ───────────────────
+
+
+def test_cli_daily_csv_renders_header_and_row(tmp_path, capsys):
+    root, proj = _config_root(tmp_path)
+    _write_jsonl(
+        proj / "s.jsonl",
+        [_assistant_line(msg_id="a", model="claude-opus-4-8", usage={"input_tokens": 5})],
+    )
+
+    rc = main(["daily", "--config-dir", str(root), "--format", "csv"])
+
+    assert rc == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert (
+        out[0]
+        == "day,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,model"
+    )
+    assert "claude-opus-4-8" in out[1]
+
+
+def test_cli_daily_csv_cost_appends_column_and_total(tmp_path, capsys):
+    root, proj = _config_root(tmp_path)
+    _write_jsonl(
+        proj / "s.jsonl",
+        [_assistant_line(msg_id="a", model="claude-opus-4-8", usage={"input_tokens": _M})],
+    )
+
+    rc = main(["daily", "--config-dir", str(root), "--format", "csv", "--cost"])
+
+    assert rc == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out[0].endswith(",cost_usd")
+    assert out[-1].startswith("TOTAL,")
+
+
+def test_cli_daily_markdown_renders_table(tmp_path, capsys):
+    root, proj = _config_root(tmp_path)
+    _write_jsonl(
+        proj / "s.jsonl",
+        [_assistant_line(msg_id="a", model="claude-opus-4-8", usage={"input_tokens": 5})],
+    )
+
+    rc = main(["daily", "--config-dir", str(root), "--format", "markdown"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "| day |" in out
+    assert "| --- |" in out
+    assert "claude-opus-4-8" in out
+
+
+# ── CLI: missing config dir → empty rollup, rc 0, no crash ────────────────────
+
+
+def test_cli_missing_config_dir_emits_empty_rollup(tmp_path, capsys):
+    missing = tmp_path / "does-not-exist"
+
+    rc = main(["daily", "--config-dir", str(missing)])
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "[]"

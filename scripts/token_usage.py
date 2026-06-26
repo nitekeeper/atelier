@@ -131,14 +131,19 @@ def _resolve_config_dir(config_dir: str | Path | None = None) -> Path:
 def discover_transcripts(config_dir: str | Path | None = None) -> list[Path]:
     """Recursively find every transcript ``*.jsonl`` under the config dir.
 
-    Walks ``<base>/projects/`` recursively, so nested sub-agent transcripts
-    (``.../subagents/agent-*.jsonl``) are included. Returns a sorted,
-    de-duplicated list of file paths. A missing/empty tree is skipped silently.
+    Walks ``<base>/projects/`` and ``<base>/transcripts/`` recursively, so nested
+    sub-agent transcripts (``.../subagents/agent-*.jsonl``) are included. Returns a
+    sorted, de-duplicated list of file paths. A missing/empty tree is skipped
+    silently. (The dual-tree walk mirrors the verified reference contract — walking
+    only ``projects/`` would silently under-count if Claude Code ever populates
+    ``transcripts/``.)
     """
     base = _resolve_config_dir(config_dir)
     found: set[Path] = set()
-    root = base / "projects"
-    if root.is_dir():
+    for sub in ("projects", "transcripts"):
+        root = base / sub
+        if not root.is_dir():
+            continue
         for path in root.rglob("*.jsonl"):
             if path.is_file():
                 found.add(path)

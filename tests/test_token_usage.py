@@ -246,13 +246,19 @@ def test_since_filters_old_days_but_retains_unknown(tmp_path):
     # CI host tz (the +00:00 offset is embedded in each string).
     _write_jsonl(
         proj / "old.jsonl",
-        [_assistant_line(msg_id="o1", usage={"output_tokens": 1},
-                         timestamp="2026-06-10T12:00:00+00:00")],
+        [
+            _assistant_line(
+                msg_id="o1", usage={"output_tokens": 1}, timestamp="2026-06-10T12:00:00+00:00"
+            )
+        ],
     )
     _write_jsonl(
         proj / "new.jsonl",
-        [_assistant_line(msg_id="n1", usage={"output_tokens": 2},
-                         timestamp="2026-06-20T12:00:00+00:00")],
+        [
+            _assistant_line(
+                msg_id="n1", usage={"output_tokens": 2}, timestamp="2026-06-20T12:00:00+00:00"
+            )
+        ],
     )
     # A record with NO parseable timestamp → buckets under "unknown".
     _write_jsonl(
@@ -312,8 +318,11 @@ def test_local_tz_day_boundary_is_deterministic(tmp_path, _fixed_tz):
     # 2026-06-20T05:00:00Z, in Etc/GMT+9 (UTC-9), is 2026-06-19 20:00 local.
     _write_jsonl(
         proj / "boundary.jsonl",
-        [_assistant_line(msg_id="b1", usage={"output_tokens": 4},
-                         timestamp="2026-06-20T05:00:00+00:00")],
+        [
+            _assistant_line(
+                msg_id="b1", usage={"output_tokens": 4}, timestamp="2026-06-20T05:00:00+00:00"
+            )
+        ],
     )
 
     rows = daily_rollup(config_dir=root)
@@ -328,7 +337,9 @@ def test_local_tz_day_boundary_is_deterministic(tmp_path, _fixed_tz):
 
 def test_claude_config_dir_env_override(tmp_path, monkeypatch):
     root, proj = _config_root(tmp_path)
-    _write_jsonl(proj / "session-env.jsonl", [_assistant_line(msg_id="e1", usage={"output_tokens": 8})])
+    _write_jsonl(
+        proj / "session-env.jsonl", [_assistant_line(msg_id="e1", usage={"output_tokens": 8})]
+    )
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     # No config_dir arg → resolves via CLAUDE_CONFIG_DIR.
@@ -346,10 +357,14 @@ def test_to_daily_rollup_splits_categories_and_models(tmp_path):
     _write_jsonl(
         proj / "session-roll.jsonl",
         [
-            _assistant_line(msg_id="rA", model="claude-opus-4-8",
-                            usage={"input_tokens": 10, "output_tokens": 1}),
-            _assistant_line(msg_id="rB", model="claude-sonnet-4-6",
-                            usage={"input_tokens": 20, "output_tokens": 2}),
+            _assistant_line(
+                msg_id="rA", model="claude-opus-4-8", usage={"input_tokens": 10, "output_tokens": 1}
+            ),
+            _assistant_line(
+                msg_id="rB",
+                model="claude-sonnet-4-6",
+                usage={"input_tokens": 20, "output_tokens": 2},
+            ),
         ],
     )
 
@@ -367,3 +382,90 @@ def test_to_daily_rollup_splits_categories_and_models(tmp_path):
             "cache_read_input_tokens",
             "model",
         }
+
+
+# ── transcripts/ tree is ALSO walked (not just projects/) ────────────────────
+
+
+def test_transcripts_tree_is_also_walked(tmp_path):
+    # The verified reference walks BOTH <base>/projects/ and <base>/transcripts/.
+    # A record living only under transcripts/ must still be discovered (else a
+    # silent under-count vs the contract).
+    tdir = tmp_path / "transcripts" / "-home-user-myrepo"
+    _write_jsonl(
+        tdir / "session-t.jsonl",
+        [_assistant_line(msg_id="t1", usage={"output_tokens": 11})],
+    )
+
+    records = collect_usage_records(config_dir=tmp_path)
+
+    assert len(records) == 1
+    assert records[0].usage.output_tokens == 11
+
+
+# ── sidechain WITHOUT sessionId: reparent falls back to the path dir ─────────
+
+
+def test_sidechain_path_fallback_reparent_when_no_session_id(tmp_path):
+    root, proj = _config_root(tmp_path)
+    subagents = proj / "subagents"
+    # A sidechain line carrying NO sessionId → session reparents to the parent
+    # session dir name derived from the path (<proj>/subagents/agent-*.jsonl).
+    line = _assistant_line(
+        msg_id="scf1",
+        usage={"output_tokens": 3},
+        session_id=None,
+        is_sidechain=True,
+    )
+    _write_jsonl(subagents / "agent-9.jsonl", [line])
+
+    records = collect_usage_records(config_dir=root)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.is_sidechain is True
+    # parent of "subagents" is the project dir → that name is the reparented id.
+    assert rec.session_id == "-home-user-myrepo"
+
+
+# ── TTL split fields MAX-merge across streaming partials (same dedup key) ─────
+
+
+def test_ttl_split_max_merges_across_partials(tmp_path):
+    root, proj = _config_root(tmp_path)
+    # Two partials of the SAME message.id:requestId with GROWING TTL-split values;
+    # the per-field MAX merge must surface the larger of each, not the first/sum.
+    lines = [
+        _assistant_line(
+            msg_id="ttl",
+            request_id="rttl",
+            usage={
+                "cache_creation_input_tokens": 100,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 50,
+                    "ephemeral_1h_input_tokens": 10,
+                },
+            },
+        ),
+        _assistant_line(
+            msg_id="ttl",
+            request_id="rttl",
+            usage={
+                "cache_creation_input_tokens": 300,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 200,
+                    "ephemeral_1h_input_tokens": 80,
+                },
+            },
+        ),
+    ]
+    _write_jsonl(proj / "session-ttl.jsonl", lines)
+
+    records = collect_usage_records(config_dir=root)
+
+    assert len(records) == 1
+    rec = records[0]
+    # MAX of each TTL bucket across the partials (not the first, not the sum).
+    assert rec.cache_creation_5m == 200
+    assert rec.cache_creation_1h == 80
+    assert rec.usage.cache_creation_input_tokens == 300

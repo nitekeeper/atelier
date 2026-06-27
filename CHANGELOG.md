@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## v1.13.0 — 2026-06-27
+
+A kaizen-driven token-reduction run (#25). Two behaviour-preserving changes that cut
+the tokens spent on unread test output and on inert per-spawn protocol; a third
+candidate was investigated and abstained as unsafe. Verified by deterministic
+before/after benchmarks, two independent reviews, and a green CI (2054 tests).
+
+### Changed
+- **Quiet test gate (#25).** Every full-suite `pytest` gate run across the dev-arc
+  (`dev-tdd`/`review`/`qa`/`finish`/`receive-review`/`diagnose`/`subagent`/`security`)
+  and the host CI-mirror gate (`scripts/self_improve.py`) now runs
+  `pytest -q --tb=short` instead of `-v`. The per-test `PASSED` scroll (one line per
+  ~2,050 tests) is read by nobody; quiet output is ~80× smaller per run (47,712 → 594
+  approx. tokens) while `--tb=short` keeps the FAILURES section + tracebacks intact.
+  This aligns agents with atelier's own CI, which already uses `pytest tests/ -q`. The
+  four targeted single-test `::test -v` runs (watching one new test execute) are
+  preserved. Anti-revert PIN tests lock the gate command.
+- **CLI-mode briefing diet (#25).** When `transport == cli` (atelier's only shipped
+  transport), `compose_briefing` no longer injects the bridge/heartbeat/shutdown
+  protocol it then tells the worker to ignore (a one-shot `claude -p` spawn has no
+  inbound channel): the `TM-001..005` rules, the Heartbeat clause, the Agent-Rights
+  body (replaced by a one-line auditability note), and the `role.j2` `# CHANNELS`
+  bridge table are stripped from the INJECTED copy, and the context-budget reference
+  subsection is de-duplicated against the appended rule. Per-spawn briefing ≈24.4k →
+  ≈17.2k chars (−7,156, Loom-off). Stripped from the injected copy only — on-disk
+  `internal/team-mode-rules/SKILL.md` and `role.j2` are byte-identical (sha256-pinned);
+  the load-bearing carveouts (`TM-006/007/008`, the reply contract, the abandon
+  grammar) and the Loom-on section are preserved; gated on exact
+  `transport == TRANSPORT_CLI` so a future transport safe-degrades to the full briefing.
+
+### Notes
+- A third candidate — digesting the host-engine reply echo returned to the driver —
+  was **abstained**: that return is shared by programmatic consumers (the outcome
+  dict, the review→fix loop, abandonment parsing) and the interactive driver, the
+  existing `default_wave_digest` is type-incompatible with the return shape and not
+  failure-aware, so the ~2,160-token prize was not worth the blast radius.
+
 ## v1.12.0 — 2026-06-26
 
 Two kaizen-driven token-reduction runs against `compose_briefing`. Net effect: the

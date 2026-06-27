@@ -201,6 +201,64 @@ def test_cli_strip_keeps_carveout_anchors():
     assert "^ABANDON: (?P<category>" in b  # role.j2 abandon grammar survives
 
 
+def test_cli_strip_removes_pragma_sentence_keeps_schema_version_and_tm007():
+    """Cycle-3 — the cli strip removes ONLY role.j2's IDENTITY PRAGMA-assertion
+    sentence (its bridge-DB `user_version == <N>` session-open assertion — inert
+    for a sessionless one-shot worker, and a duplicate of the rules-block TM-007).
+    It KEEPS (a) the preceding `schema_version: <N>` sentence (the `stale_rules`
+    abandon hook needs the worker to know its schema_version), and (b) TM-007,
+    which survives via the always-prepended team-mode-rules block (`**TM-007 —
+    Schema pin.`), NOT via role.j2's now-removed `(TM-007)` reference."""
+    b = _cli_briefing()
+    # ABSENCE — role.j2's PRAGMA-assertion sentence is gone, anchored on its
+    # UNIQUE `== <N>` opener and `(TM-007)` closer. The bare rules-block
+    # "asserts `PRAGMA user_version`" statement (NO `==`) is a SEPARATE, canonical
+    # TM-007 copy and MUST survive — so we do NOT assert its absence.
+    assert "PRAGMA user_version ==" not in b
+    assert "hard fail (TM-007)" not in b
+    # PRESENCE (a) — the schema_version sentence (stale_rules abandon hook) survives.
+    assert "You operate under team-mode-rules `schema_version" in b
+    # PRESENCE (b) — TM-007 survives via the rules-block `**TM-007 — Schema pin.`
+    # section, not role.j2:19's stripped reference.
+    assert "**TM-007 — Schema pin." in b
+    # SAFE-DEGRADE — the on-disk role.j2 is untouched (the strip is in-memory and
+    # cli-gated), so a re-introduced bridge transport still renders the sentence.
+    raw = _ROLE_J2.read_text()
+    assert "asserts `PRAGMA user_version == {{ schema_version }}`" in raw
+    assert "hard fail (TM-007)" in raw
+
+
+def test_cli_agent_rights_note_is_channel_agnostic_and_drops_bridge_messages():
+    """F4 (cycle 2) — the Agent-Rights section is REPLACED by a channel-agnostic
+    auditability nudge: the substance (the worker's work is auditable) survives,
+    while the inert `bridge_messages` / bridge-message specifics (a one-shot cli
+    worker sends ZERO bridge messages) are GONE from the briefing."""
+    b = _cli_briefing()
+    # The auditability substance survives, channel-agnostic.
+    assert "## Agent Rights" in b
+    assert "Your output and full transcript are auditable" in b
+    # The inert bridge-message wording the worker can never act on is gone.
+    assert "bridge_messages" not in b
+    assert "Every bridge message you send or receive" not in b
+
+
+def test_cli_transport_rule_keeps_loadbearing_clauses_and_drops_restating_prose():
+    """F7 (cycle 2) — the trimmed `_CLI_TRANSPORT_RULE` keeps the transport-
+    correctness clauses VERBATIM (the structured-final-message contract + the
+    UNCHANGED closure-tokens/abandon-grammar/artifacts clause) and drops the
+    restating prose (no-peers / host-reads-it-directly)."""
+    b = _cli_briefing()
+    # KEEP — verbatim load-bearing clauses.
+    assert "# TRANSPORT OVERRIDE — CLI MODE" in b
+    assert "RETURN YOUR RESULT as the structured final message matching the provided" in b
+    assert "that structured output IS your reply to the team-lead" in b
+    assert "The closure tokens, the abandon grammar, and the artifacts contract are UNCHANGED" in b
+    assert "Emit it exactly once" in b
+    # DROP — the restating prose folded out of the trimmed rule.
+    assert "no live peers and no inter-agent wire" not in b
+    assert "you do not send it anywhere" not in b
+
+
 def test_cli_strip_removes_inert_protocol_and_clears_5000ch_floor(monkeypatch):
     """ABSENCE + FLOOR — the cli strip removes the inert TM-001..005 / Heartbeat
     / # CHANNELS / context-budget-duplicate content, and removes >= 5000 chars vs

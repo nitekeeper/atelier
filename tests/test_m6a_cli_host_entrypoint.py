@@ -430,7 +430,12 @@ def test_loom_off_vs_on_host_dispatch_byte_identical(tmp_path, monkeypatch):
         assert loom_marker not in sys_prompt, (
             f"Loom marker leaked into host briefing: {loom_marker!r}"
         )
-    assert "bridge_send" in sys_prompt, "bridge CHANNELS fallback missing from host briefing"
+    # cli mode strips the inert bridge wiring (no bridge_send for a one-shot host
+    # worker); the positive backstop is the structured-return contract instead.
+    assert "bridge_send" not in sys_prompt, "cli strip should remove the bridge wiring"
+    assert "structured final message matching the provided json-schema" in sys_prompt, (
+        "cli host briefing must carry the structured-return contract"
+    )
 
 
 #: Loom-only briefing markers — these render ONLY when ``team_chat.transport ==

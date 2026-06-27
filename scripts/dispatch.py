@@ -303,23 +303,22 @@ async def dispatch_host_pipeline(
 # bridge CHANNELS block first (the inter-agent message wire still exists); this
 # addendum tells the one-shot CLI worker to IGNORE it and return structured
 # output instead.
+#
+# This addendum is SHRUNK for the cli inert-protocol strip: the # CHANNELS bridge
+# table and the inert TM-001..005 / Heartbeat protocol it used to point at are now
+# stripped from the briefing (`_strip_cli_inert_rules` / `_strip_cli_channels`), so
+# there is nothing left to tell the worker to IGNORE or to SUPERSEDE — the addendum
+# only states the positive contract (return the structured final message).
 _CLI_TRANSPORT_RULE = (
-    "\n\n# TRANSPORT OVERRIDE — CLI MODE (read last; SUPERSEDES the CHANNELS + "
-    "REPLY CONTRACT sections above)\n\n"
-    "You are a one-shot, ephemeral agent. There is NO bridge, NO `bridge_send.py` "
-    "/ `bridge_read.py`, and NO live peers to message — IGNORE every "
-    "`bridge_send.py` / `bridge_read.py` / heartbeat command in the CHANNELS "
-    "section above; those commands do not exist in this run. Do NOT attempt "
-    "inter-agent messaging.\n\n"
-    "RETURN YOUR RESULT as the structured final message matching the provided "
-    "json-schema (the TM-006 `task_result` envelope: `type` / `task_id` / "
-    "`attempt` / `status` / `artifacts` / `notes_md`). That structured output IS "
-    "your reply to the team-lead — the deterministic host reads it directly as "
-    "the return value of your invocation; you do not send it anywhere. Emit it "
-    "exactly once, as your terminal message. The abandon grammar, the five "
-    "closure tokens (`done`/`blocked`/`abandoned`/`needs-input`/`failed`), and "
-    "the artifacts contract are UNCHANGED — only the delivery "
-    "channel changes (structured return value, not a bridge send)."
+    "\n\n# TRANSPORT OVERRIDE — CLI MODE (read last)\n\n"
+    "You are a one-shot, ephemeral agent — no live peers and no inter-agent wire "
+    "in this run. RETURN YOUR RESULT as the structured final message matching the "
+    "provided json-schema: that structured output IS your reply to the team-lead "
+    "(the deterministic host reads it directly as the return value of your "
+    "invocation; you do not send it anywhere). Emit it exactly once, as your "
+    "terminal message. The closure tokens, the abandon grammar, and the artifacts "
+    "contract are UNCHANGED — only the delivery channel is the structured return "
+    "value, not a peer send."
 )
 
 
@@ -615,6 +614,84 @@ def _strip_loom_section(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
+# ── CLI-mode inert-protocol strip (the briefing-diet lever) ──────────────────
+#
+# In `cli` transport the worker is a one-shot `claude -p --json-schema` call: it
+# has NO bridge wire, NO live peers, NO heartbeat channel, and its terminal
+# `structured_output` IS its reply. A large slice of the team-mode rules /
+# CHANNELS surface is therefore INERT for a cli worker — it describes a protocol
+# that does not exist in this run. These strips remove that inert content from the
+# IN-MEMORY briefing copy ONLY; the on-disk SKILL.md + role.j2 stay byte-identical
+# (pm_dispatch_envelope's ABANDON_RE is derived from the on-disk SKILL.md). Each
+# `.sub()` degrades safely on an anchor miss (a no-op leaves the content — a token
+# regression, never a dropped rule), mirroring `_strip_loom_section`.
+#
+# Granularity matters: TM-001..008 share the single `## Hard rules` heading, so a
+# section-anchored strip would delete the TM-006/007/008 carveouts. We strip at
+# BOLD-MARKER granularity (`**TM-001 ..` up to `**TM-006 ..`) so TM-006/007/008
+# survive. The Agent-Rights strip is bounded-lookahead on `## Hard rules`, which
+# GUARANTEES it can never swallow the hard rules.
+_CLI_TM_001_005_RE = re.compile(r"\n\*\*TM-001 .*?(?=\n\*\*TM-006 )", re.DOTALL)
+_CLI_HEARTBEAT_RE = re.compile(r"\n## Heartbeat clause\n.*?(?=\n## )", re.DOTALL)
+_CLI_AGENT_RIGHTS_RE = re.compile(
+    r"\n## Agent Rights & Expectations\n.*?(?=\n## Hard rules)", re.DOTALL
+)
+# A ~1-line auditability note that preserves the substance of Agent-Rights
+# bullet 2 (messages are persisted + auditable) — the only point a one-shot cli
+# worker can still act on. REPLACE (not delete) so the substance survives.
+_CLI_AGENT_RIGHTS_NOTE = (
+    "\n## Agent Rights\n\nEvery bridge message you send or receive is appended to "
+    "`bridge_messages` (append-only) and is auditable — assume reviewers, the "
+    "human, and future runs read it.\n"
+)
+_CLI_CONTEXT_BUDGET_RE = re.compile(
+    r"\n## Context-budget discipline \(reference\)\n.*?(?=\n## )", re.DOTALL
+)
+# POST-render strip of the rendered template's `# CHANNELS` bridge-wiring block.
+# Lookahead stops at `## Loom team-chat` (loom-on — keep the Loom subsection) OR
+# `# REPLY CONTRACT` (loom-off — the next structural block); the REPLY CONTRACT
+# block is the hard carveout and is never entered.
+_CLI_CHANNELS_RE = re.compile(
+    r"\n# CHANNELS\n.*?(?=\n## Loom team-chat|\n# REPLY CONTRACT)", re.DOTALL
+)
+# When the loom subsection survives (loom-on), its control-plane note references
+# "the `Send to team-lead` / `read_since` / `heartbeat` bridge commands above" —
+# but the bridge table "above" is now stripped, so the back-reference dangles.
+# Rewrite it to a self-contained form (drop "above"). No test pins this phrase;
+# the SEPARATE "Loom NEVER carries" invariant (role.j2) is left intact.
+_CLI_CHANNELS_DANGLE_RE = re.compile(r"bridge commands above\b")
+
+
+def _strip_cli_inert_rules(rules_text: str) -> str:
+    """Strip the cli-inert TM-001..005 + Heartbeat clause from the rules block and
+    REPLACE the Agent Rights & Expectations section with a 1-line auditability
+    note. In-memory only; safe no-op on any anchor miss."""
+    rules_text = _CLI_TM_001_005_RE.sub("", rules_text)
+    rules_text = _CLI_HEARTBEAT_RE.sub("", rules_text)
+    rules_text = _CLI_AGENT_RIGHTS_RE.sub(_CLI_AGENT_RIGHTS_NOTE, rules_text)
+    return re.sub(r"\n{3,}", "\n\n", rules_text)
+
+
+def _strip_context_budget_subsection(rules_text: str) -> str:
+    """Strip the rules-block "## Context-budget discipline (reference)" subsection.
+    It duplicates the appended ``_CONTEXT_BUDGET_RULE``; this dedup is gated on the
+    same ``include_context_budget`` flag so the appended tail single-sources it.
+    In-memory only; safe no-op on an anchor miss."""
+    rules_text = _CLI_CONTEXT_BUDGET_RE.sub("", rules_text)
+    return re.sub(r"\n{3,}", "\n\n", rules_text)
+
+
+def _strip_cli_channels(rendered: str) -> str:
+    """Strip the rendered template's `# CHANNELS` bridge-wiring block (inert for a
+    one-shot cli worker) and clean up the now-dangling "above" back-reference in
+    the surviving loom subsection. Operates on the POST-render briefing so the
+    byte-unchanged role.j2 still references `{{ bridge_cmds.* }}`. Safe no-op on a
+    miss."""
+    rendered = _CLI_CHANNELS_RE.sub("", rendered)
+    rendered = _CLI_CHANNELS_DANGLE_RE.sub("bridge commands", rendered)
+    return re.sub(r"\n{3,}", "\n\n", rendered)
+
+
 # Worker-irrelevant boilerplate stripped from the PHASE PROCEDURE before it is
 # injected into a worker briefing. The on-disk dev-*/SKILL.md files are the
 # source of truth (read raw by the orchestrator + tests); this trims only the
@@ -743,16 +820,18 @@ def compose_briefing(
     dispatch queue, still rides ``bridge_send.py``/``bridge_read.py``).
 
     ``include_context_budget`` (default ``True``) gates the appended
-    ``_CONTEXT_BUDGET_RULE`` tail; the default path is byte-identical to today,
-    and ``_CLI_TRANSPORT_RULE`` is NOT gated (transport-correctness, not a
-    measurement lever). SCOPE: the flag is presently set only via a direct call /
-    the A/B tests — there is no env / run_mode wiring yet (the two production
-    callers of ``_host_briefing_for`` omit it, so a live run is always ``True``).
-    It gates only the APPENDED ``_CONTEXT_BUDGET_RULE`` constant: the equivalent
-    context-budget discipline subsection in ``internal/team-mode-rules/SKILL.md`` is
-    always rendered, so ``include_context_budget=False`` removes the appended budget
-    tail but does NOT remove the rules-block budget guidance (single-sourcing that
-    is a follow-up).
+    ``_CONTEXT_BUDGET_RULE`` tail AND, paired with it, the dedup of the equivalent
+    ``## Context-budget discipline (reference)`` subsection in
+    ``internal/team-mode-rules/SKILL.md`` (via
+    :func:`_strip_context_budget_subsection`) — so the guidance is SINGLE-SOURCED:
+    ``True`` appends the tail and strips the rules-block duplicate; ``False`` keeps
+    the rules-block subsection and omits the tail. The guidance therefore appears
+    exactly once either way (never duplicated, never wholly dropped). The on-disk
+    SKILL.md is unchanged — only this injected copy is trimmed. ``_CLI_TRANSPORT_RULE``
+    is NOT gated (transport-correctness, not a measurement lever). SCOPE: the flag
+    is presently set only via a direct call / the A/B tests — there is no env /
+    run_mode wiring yet (the two production callers of ``_host_briefing_for`` omit
+    it, so a live run is always ``True``).
 
     ``include_minimal_diff`` (default ``True``) gates the output-side
     ``_MINIMAL_DIFF_RULE`` (the minimal-diff/native-first ladder + anti-deliberation
@@ -780,6 +859,19 @@ def compose_briefing(
     loom_active = team_chat is not None and team_chat.get("transport") == "loom"
     if not loom_active:
         rules_text = _strip_loom_section(rules_text)
+    # CLI inert-protocol strip — gate on EXACT TRANSPORT_CLI (never
+    # `in VALID_TRANSPORTS`) so a future / re-introduced bridge transport
+    # safe-degrades to the FULL briefing. A one-shot cli worker has no bridge
+    # wire / peers / heartbeat, so TM-001..005, the Heartbeat clause, and the
+    # Agent-Rights section are inert; strip them from the in-memory copy.
+    if transport == TRANSPORT_CLI:
+        rules_text = _strip_cli_inert_rules(rules_text)
+    # Context-budget dedup — gated on include_context_budget so it pairs with the
+    # appended `_CONTEXT_BUDGET_RULE` tail (single-sourcing the guidance). Not
+    # transport-gated: the duplication exists in every mode, and the appended tail
+    # is likewise not transport-gated.
+    if include_context_budget:
+        rules_text = _strip_context_budget_subsection(rules_text)
     # Trim worker-irrelevant boilerplate from the phase procedure (frontmatter,
     # prereq mode/tables lines, the pre-dispatch gate-check step) before it is
     # injected — the worker never runs the gate or switches backend mode.
@@ -843,6 +935,13 @@ def compose_briefing(
 
     tmpl = template_env.get_template(ROLE_TEMPLATE)
     rendered = tmpl.render(**ctx)
+    # CLI post-render strip — remove the rendered `# CHANNELS` bridge-wiring block
+    # (inert for a one-shot cli worker). Done POST-render so role.j2 still
+    # references `{{ bridge_cmds.* }}` (the byte-unchanged template the AST-union
+    # test walks); gated on EXACT TRANSPORT_CLI (safe-degrade for any other
+    # transport). Keeps the loom subsection (lookahead) when loom is active.
+    if transport == TRANSPORT_CLI:
+        rendered = _strip_cli_channels(rendered)
     # CONTEXT-BUDGET discipline — always-on guidance. Appended to the RENDERED
     # briefing (outside the template's untrusted TASK fence) as the briefing's
     # final guidance section. `_CONTEXT_BUDGET_RULE` opens with "\n\n" so it reads

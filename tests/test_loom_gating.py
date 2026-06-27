@@ -68,8 +68,14 @@ def test_loom_gating_saves_tokens_when_inactive():
 def test_non_loom_rules_survive_when_inactive():
     # Stripping the Loom section must not touch other load-bearing rules.
     off = compose_briefing(**_KW, team_chat=None)
-    for n in range(1, 9):
+    # cli mode strips the inert TM-001..005 RULE bodies (no bridge wire / peers /
+    # heartbeat for a one-shot worker); TM-006/007/008 are carveouts that survive.
+    # The "## Hard rules (TM-001 through TM-008)" heading also survives, so assert
+    # on the bold RULE markers for the stripped set, not bare ids.
+    for n in range(1, 6):
+        assert f"**TM-00{n} —" not in off
+    for n in range(6, 9):
         assert f"TM-00{n}" in off
     assert "<untrusted source=" in off  # TM-008 fence
-    assert "30 seconds" in off  # heartbeat clause (immediately follows Loom)
+    assert "30 seconds" not in off  # heartbeat clause stripped in cli mode
     assert "Self-verify" in off

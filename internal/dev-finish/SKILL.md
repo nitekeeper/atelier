@@ -27,7 +27,7 @@ Requires `qa:approved`.
 
    | Check | Command | Required result |
    |---|---|---|
-   | Tests green | `pytest -v` | 0 failures — show full summary line |
+   | Tests green | `pytest -q --tb=short` | 0 failures — show full summary line |
    | Working tree clean | `git status --short` | No output |
    | No open assigned tasks | `python3 atelier/scripts/tasks.py list --project_id <project_id> --status assigned` | Empty list |
    | All work committed | `git status --short` | No output (already covered above — the feature branch must hold every change) |

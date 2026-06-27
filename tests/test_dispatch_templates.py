@@ -771,6 +771,7 @@ def test_compose_briefing_degrades_byte_identical_to_bridge(
     # No Loom subsection, no runnable loom commands leak into the briefing...
     assert "## Loom team-chat" not in degraded
     assert str(client) not in degraded
-    # ...while the bridge control-plane block is intact.
-    assert "# CHANNELS" in degraded
+    # ...the inert bridge # CHANNELS block is stripped in cli mode, but the REPLY
+    # CONTRACT carveout survives (the structured-return contract still applies).
+    assert "# CHANNELS" not in degraded
     assert "# REPLY CONTRACT" in degraded

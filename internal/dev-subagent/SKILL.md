@@ -137,7 +137,7 @@ on any Loom error, note it and continue.
 
 5. **After all tasks complete:**
    ```
-   pytest -v
+   pytest -q --tb=short
    ```
    All tests must pass. Report: "All [N] tasks complete. Phase: tdd:clean. Invoke `internal/dev-review/SKILL.md` to begin code review."
    Do not advance to `review:open` — that is the human's call.

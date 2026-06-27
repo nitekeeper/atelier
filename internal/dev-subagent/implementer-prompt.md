@@ -17,7 +17,7 @@ You are an implementer subagent. You have been dispatched to complete one task f
 
 1. Write the failing test `{{test_name}}` first. Run it — confirm FAIL.
 2. Write the minimal implementation to make the test pass. Run it — confirm PASS.
-3. Run the full suite: `pytest -v` — confirm 0 failures.
+3. Run the full suite: `pytest -q --tb=short` — confirm 0 failures.
 4. Refactor for clarity. Re-run full suite — confirm still 0 failures.
 5. Commit: `git add <changed files> && git commit -m "test+feat: {{task_title}}"`
 6. Report: COMPLETE or BLOCKED with reason.

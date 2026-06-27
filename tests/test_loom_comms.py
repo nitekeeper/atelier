@@ -411,21 +411,24 @@ def test_compose_without_team_chat_renders_bridge_no_loom() -> None:
     `register <role-id>` command (from loom_cmds) and the subsection's
     distinctive table heading."""
     out = compose_briefing(**_compose_kwargs())
-    assert "# CHANNELS" in out
+    # cli mode strips the inert bridge # CHANNELS block for a one-shot worker.
+    assert "# CHANNELS" not in out
     # The TEMPLATE Loom subsection (rendered only on the loom path) is ABSENT.
     assert "register backend-engineer-1" not in out  # no loom_cmds register cmd
     assert "Loom team-chat (PEER chat" not in out  # the subsection heading
     assert "deregister --as backend-engineer-1" not in out  # no loom deregister cmd
-    # The bridge control-plane wiring IS present.
-    assert "bridge_send.py" in out
-    assert "Send to team-lead" in out
+    # The bridge control-plane wiring is also stripped in cli mode (inert): the
+    # one-shot worker returns its structured result, it does not bridge_send.
+    assert "bridge_send.py" not in out
+    assert "Send to team-lead" not in out
 
 
 def test_validate_render_context_bridge_fallback_does_not_raise() -> None:
     """The bridge-fallback team_chat dict satisfies validate_render_context —
     team_chat is a non-None dict, so None==missing never trips."""
     out = compose_briefing(**_compose_kwargs(team_chat={"transport": "bridge"}))
-    assert "# CHANNELS" in out
+    # cli mode strips the inert bridge # CHANNELS block.
+    assert "# CHANNELS" not in out
     # And the validator itself does not raise on a representative full context.
     ctx = {
         name: ("x" if name != "team_chat" else {"transport": "bridge"}) for name in REQUIRED_VARS

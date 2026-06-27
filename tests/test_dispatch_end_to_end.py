@@ -67,9 +67,12 @@ def test_compose_briefing_end_to_end_with_real_persona() -> None:
     # inaugural spawn prompt, ready to feed into the Task tool).
     assert isinstance(rendered, str)
 
-    # TM-001 is a stable rules-SKILL anchor — proves the rules block was
-    # prepended verbatim into the briefing's task_brief slot.
-    assert "TM-001" in rendered
+    # In cli mode the inert TM-001..005 RULE bodies are stripped (the one-shot
+    # worker has no bridge wire / peers / heartbeat); the carveout TM-006 survives
+    # and proves the rules block was still prepended. (The "## Hard rules (TM-001
+    # through TM-008)" heading survives too, so we assert on the bold RULE marker.)
+    assert "**TM-001 —" not in rendered
+    assert "TM-006" in rendered
 
     # Persona block proof — either the agent's display name OR their
     # role_id must appear (role_id always appears in IDENTITY; the persona
@@ -83,9 +86,10 @@ def test_compose_briefing_end_to_end_with_real_persona() -> None:
     # or the worker prompt is missing a contract surface.
     for anchor in (
         "# IDENTITY",
-        "# CHANNELS",
         "# WAVE CONTEXT",
         "# TASK",
         "# ABANDON GRAMMAR",
     ):
         assert anchor in rendered, f"rendered briefing missing structural anchor: {anchor!r}"
+    # The bridge # CHANNELS block is inert for a one-shot cli worker — stripped.
+    assert "# CHANNELS" not in rendered

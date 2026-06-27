@@ -660,6 +660,30 @@ _CLI_CHANNELS_RE = re.compile(
 # Rewrite it to a self-contained form (drop "above"). No test pins this phrase;
 # the SEPARATE "Loom NEVER carries" invariant (role.j2) is left intact.
 _CLI_CHANNELS_DANGLE_RE = re.compile(r"bridge commands above\b")
+# POST-render strip of two cli-inert role.j2 surfaces a one-shot cli worker can
+# never act on (no bridge wire):
+#   * the IDENTITY "Your own agent handle on the bridge is `<self>`." line —
+#     pure bridge identity; and
+#   * the reply-contract "Shutdown handshake (TM-005). …" paragraph + its
+#     `{"type":"shutdown_response", …}` json example — a `shutdown_request` can
+#     never arrive over a non-existent bridge wire, so the handshake is dead.
+#     (TM-005 is already stripped from the rules_block for cli by
+#     `_strip_cli_inert_rules`; this is the surviving role.j2 copy.)
+# The shutdown regex anchors on the unique "Shutdown handshake (TM-005)." line
+# and ends at the FIRST closing ``` fence that is followed by a newline (the
+# `(?=\n)` lookahead excludes the opening ```json fence), so it removes the
+# paragraph + its json example but CANNOT reach the earlier TM-006 closure-token
+# table or the `task_result` envelope json. The handle regex matches only its own
+# one-line sentence. Both are bounded so they never swallow a load-bearing surface.
+# The trailing `\n```(?=\n)` boundary depends on `_base.j2` emitting a newline
+# after the reply_contract block's closing fence (the inter-block separator). If
+# that inter-block whitespace ever changes, the regex SAFELY no-ops — it leaves
+# the handshake in (a token regression re-caught by the footprint benchmark),
+# never dropping a load-bearing rule.
+_CLI_BRIDGE_HANDLE_RE = re.compile(r"\nYour own agent handle on the bridge is `[^`\n]*`\.")
+_CLI_SHUTDOWN_HANDSHAKE_RE = re.compile(
+    r"\nShutdown handshake \(TM-005\)\..*?\n```(?=\n)", re.DOTALL
+)
 
 
 def _strip_cli_inert_rules(rules_text: str) -> str:
@@ -689,6 +713,19 @@ def _strip_cli_channels(rendered: str) -> str:
     miss."""
     rendered = _CLI_CHANNELS_RE.sub("", rendered)
     rendered = _CLI_CHANNELS_DANGLE_RE.sub("bridge commands", rendered)
+    return re.sub(r"\n{3,}", "\n\n", rendered)
+
+
+def _strip_cli_role_inert(rendered: str) -> str:
+    """Strip the two cli-inert role.j2 surfaces — the IDENTITY bridge-handle line
+    and the reply-contract TM-005 shutdown handshake (paragraph + json example) —
+    from the POST-render briefing. Mirrors `_strip_cli_channels`: in-memory only,
+    gated by the caller on EXACT TRANSPORT_CLI (so a re-introduced bridge transport
+    safe-degrades to the full handshake), safe no-op on any anchor miss. Leaves the
+    TM-006 closure-token table, the `task_result` envelope json, and the IDENTITY
+    PRAGMA / schema_version paragraph (the `stale_rules` abandon hook) intact."""
+    rendered = _CLI_SHUTDOWN_HANDSHAKE_RE.sub("", rendered)
+    rendered = _CLI_BRIDGE_HANDLE_RE.sub("", rendered)
     return re.sub(r"\n{3,}", "\n\n", rendered)
 
 
@@ -942,6 +979,7 @@ def compose_briefing(
     # transport). Keeps the loom subsection (lookahead) when loom is active.
     if transport == TRANSPORT_CLI:
         rendered = _strip_cli_channels(rendered)
+        rendered = _strip_cli_role_inert(rendered)
     # CONTEXT-BUDGET discipline — always-on guidance. Appended to the RENDERED
     # briefing (outside the template's untrusted TASK fence) as the briefing's
     # final guidance section. `_CONTEXT_BUDGET_RULE` opens with "\n\n" so it reads

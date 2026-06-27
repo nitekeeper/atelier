@@ -201,6 +201,33 @@ def test_cli_strip_keeps_carveout_anchors():
     assert "^ABANDON: (?P<category>" in b  # role.j2 abandon grammar survives
 
 
+def test_cli_strip_removes_pragma_sentence_keeps_schema_version_and_tm007():
+    """Cycle-3 — the cli strip removes ONLY role.j2's IDENTITY PRAGMA-assertion
+    sentence (its bridge-DB `user_version == <N>` session-open assertion — inert
+    for a sessionless one-shot worker, and a duplicate of the rules-block TM-007).
+    It KEEPS (a) the preceding `schema_version: <N>` sentence (the `stale_rules`
+    abandon hook needs the worker to know its schema_version), and (b) TM-007,
+    which survives via the always-prepended team-mode-rules block (`**TM-007 —
+    Schema pin.`), NOT via role.j2's now-removed `(TM-007)` reference."""
+    b = _cli_briefing()
+    # ABSENCE — role.j2's PRAGMA-assertion sentence is gone, anchored on its
+    # UNIQUE `== <N>` opener and `(TM-007)` closer. The bare rules-block
+    # "asserts `PRAGMA user_version`" statement (NO `==`) is a SEPARATE, canonical
+    # TM-007 copy and MUST survive — so we do NOT assert its absence.
+    assert "PRAGMA user_version ==" not in b
+    assert "hard fail (TM-007)" not in b
+    # PRESENCE (a) — the schema_version sentence (stale_rules abandon hook) survives.
+    assert "You operate under team-mode-rules `schema_version" in b
+    # PRESENCE (b) — TM-007 survives via the rules-block `**TM-007 — Schema pin.`
+    # section, not role.j2:19's stripped reference.
+    assert "**TM-007 — Schema pin." in b
+    # SAFE-DEGRADE — the on-disk role.j2 is untouched (the strip is in-memory and
+    # cli-gated), so a re-introduced bridge transport still renders the sentence.
+    raw = _ROLE_J2.read_text()
+    assert "asserts `PRAGMA user_version == {{ schema_version }}`" in raw
+    assert "hard fail (TM-007)" in raw
+
+
 def test_cli_agent_rights_note_is_channel_agnostic_and_drops_bridge_messages():
     """F4 (cycle 2) — the Agent-Rights section is REPLACED by a channel-agnostic
     auditability nudge: the substance (the worker's work is auditable) survives,

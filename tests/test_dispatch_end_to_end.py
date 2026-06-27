@@ -276,6 +276,11 @@ def test_strip_cli_role_inert_unit() -> None:
     is a safe no-op when neither anchor is present."""
     sample = (
         "# IDENTITY\n\n"
+        # This line deliberately OMITS the "The runtime asserts `PRAGMA
+        # user_version ==" opener, so the PRAGMA-sentence regex finds no match
+        # here (opener-absent case) and its "hard fail (TM-007)." survives —
+        # exercising the no-PRAGMA-present path. The full-paragraph (opener
+        # PRESENT) case is covered by test_strip_cli_role_inert_removes_pragma_sentence.
         "DB at session open; mismatch is a hard fail (TM-007).\n\n"
         "Your own agent handle on the bridge is `backend-engineer-1`.\n"
         "# REPLY CONTRACT\n\n"
@@ -312,3 +317,26 @@ def test_strip_cli_role_inert_unit() -> None:
     # Safe no-op when neither anchor is present.
     benign = "# SOMETHING\n\nplain text with no inert surfaces here.\n"
     assert _strip_cli_role_inert(benign) == benign
+
+
+def test_strip_cli_role_inert_removes_pragma_sentence() -> None:
+    """`_strip_cli_role_inert` removes the IDENTITY PRAGMA-assertion sentence when
+    the opener IS present (the production-faithful case — the full IDENTITY paragraph
+    as role.j2 renders it), while KEEPING the preceding `schema_version: <N>` sentence
+    (the `stale_rules` abandon hook)."""
+    sample = (
+        "# IDENTITY\n\n"
+        "You operate under team-mode-rules `schema_version: 7`. The runtime "
+        "asserts `PRAGMA user_version == 7` on the bridge DB at session open; "
+        "mismatch is a hard fail (TM-007).\n\n"
+        "# REPLY CONTRACT\n"
+    )
+    out = _strip_cli_role_inert(sample)
+    # (a) The PRAGMA-assertion sentence is gone (unique `== <N>` opener + paren closer).
+    assert "PRAGMA user_version ==" not in out
+    assert "hard fail (TM-007)" not in out
+    # (b) The schema_version sentence (stale_rules abandon hook) survives intact.
+    assert "You operate under team-mode-rules `schema_version: 7`." in out
+    # Clean seam — the surviving sentence is not jammed against the next heading.
+    assert "# REPLY CONTRACT" in out
+    assert "\n\n\n" not in out

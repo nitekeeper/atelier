@@ -651,10 +651,19 @@ _CLI_CHANNELS_RE = re.compile(
 # Rewrite it to a self-contained form (drop "above"). No test pins this phrase;
 # the SEPARATE "Loom NEVER carries" invariant (role.j2) is left intact.
 _CLI_CHANNELS_DANGLE_RE = re.compile(r"bridge commands above\b")
-# POST-render strip of two cli-inert role.j2 surfaces a one-shot cli worker can
+# POST-render strip of three cli-inert role.j2 surfaces a one-shot cli worker can
 # never act on (no bridge wire):
 #   * the IDENTITY "Your own agent handle on the bridge is `<self>`." line —
-#     pure bridge identity; and
+#     pure bridge identity;
+#   * the IDENTITY PRAGMA-assertion sentence "The runtime asserts `PRAGMA
+#     user_version == <N>` … is a hard fail (TM-007)." — it describes a bridge-DB
+#     session-open assertion, but a one-shot cli worker opens NO bridge session,
+#     so the assertion can never fire. TM-007 itself survives via the always-
+#     prepended rules block (the `**TM-007 — Schema pin.**` rule in team-mode-
+#     rules/SKILL.md, NOT this role.j2 copy), and the PRECEDING "You operate
+#     under team-mode-rules
+#     `schema_version: <N>`." sentence is KEPT — the `stale_rules` abandon hook
+#     needs the worker to know its schema_version; and
 #   * the reply-contract "Shutdown handshake (TM-005). …" paragraph + its
 #     `{"type":"shutdown_response", …}` json example — a `shutdown_request` can
 #     never arrive over a non-existent bridge wire, so the handshake is dead.
@@ -674,6 +683,18 @@ _CLI_CHANNELS_DANGLE_RE = re.compile(r"bridge commands above\b")
 _CLI_BRIDGE_HANDLE_RE = re.compile(r"\nYour own agent handle on the bridge is `[^`\n]*`\.")
 _CLI_SHUTDOWN_HANDSHAKE_RE = re.compile(
     r"\nShutdown handshake \(TM-005\)\..*?\n```(?=\n)", re.DOTALL
+)
+# The IDENTITY PRAGMA-assertion sentence. Anchored on the role.j2-UNIQUE opener
+# "`PRAGMA user_version ==" (the rules-block TM-007 copy says "`PRAGMA
+# user_version`" with no `== <N>`, so the `==` anchor excludes it) and ended at
+# the FIRST "hard fail (TM-007)." (non-greedy + DOTALL spans the template's hard
+# line-wraps). The leading `\s+The\s+` consumes ONLY the inter-sentence separator
+# whitespace before "The" — it cannot reach back into the preceding
+# `schema_version` sentence (which ends `…`.`, non-whitespace) — so that sentence
+# is left byte-intact and the seam after the strip is `…schema_version: <N>`.\n\n`.
+_CLI_PRAGMA_SENTENCE_RE = re.compile(
+    r"\s+The\s+runtime asserts `PRAGMA user_version ==.*?hard fail \(TM-007\)\.",
+    re.DOTALL,
 )
 
 
@@ -708,15 +729,21 @@ def _strip_cli_channels(rendered: str) -> str:
 
 
 def _strip_cli_role_inert(rendered: str) -> str:
-    """Strip the two cli-inert role.j2 surfaces — the IDENTITY bridge-handle line
-    and the reply-contract TM-005 shutdown handshake (paragraph + json example) —
-    from the POST-render briefing. Mirrors `_strip_cli_channels`: in-memory only,
-    gated by the caller on EXACT TRANSPORT_CLI (so a re-introduced bridge transport
-    safe-degrades to the full handshake), safe no-op on any anchor miss. Leaves the
-    TM-006 closure-token table, the `task_result` envelope json, and the IDENTITY
-    PRAGMA / schema_version paragraph (the `stale_rules` abandon hook) intact."""
+    """Strip the three cli-inert role.j2 surfaces — the IDENTITY bridge-handle line,
+    the IDENTITY PRAGMA-assertion sentence (the bridge-DB session-open `user_version`
+    assertion, which never fires for a sessionless one-shot worker), and the reply-
+    contract TM-005 shutdown handshake (paragraph + json example) — from the POST-
+    render briefing. Mirrors `_strip_cli_channels`: in-memory only, gated by the
+    caller on EXACT TRANSPORT_CLI (so a re-introduced bridge transport safe-degrades
+    to the full text), safe no-op on any anchor miss. The strip is a FINE mid-
+    paragraph cut: it removes the PRAGMA *sentence* while KEEPING the preceding
+    "You operate under team-mode-rules `schema_version: <N>`." sentence (the
+    `stale_rules` abandon hook) — and TM-007 itself survives via the always-
+    prepended rules block. Also leaves the TM-006 closure-token table and the
+    `task_result` envelope json intact."""
     rendered = _CLI_SHUTDOWN_HANDSHAKE_RE.sub("", rendered)
     rendered = _CLI_BRIDGE_HANDLE_RE.sub("", rendered)
+    rendered = _CLI_PRAGMA_SENTENCE_RE.sub("", rendered)
     return re.sub(r"\n{3,}", "\n\n", rendered)
 
 

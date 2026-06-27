@@ -201,6 +201,37 @@ def test_cli_strip_keeps_carveout_anchors():
     assert "^ABANDON: (?P<category>" in b  # role.j2 abandon grammar survives
 
 
+def test_cli_agent_rights_note_is_channel_agnostic_and_drops_bridge_messages():
+    """F4 (cycle 2) — the Agent-Rights section is REPLACED by a channel-agnostic
+    auditability nudge: the substance (the worker's work is auditable) survives,
+    while the inert `bridge_messages` / bridge-message specifics (a one-shot cli
+    worker sends ZERO bridge messages) are GONE from the briefing."""
+    b = _cli_briefing()
+    # The auditability substance survives, channel-agnostic.
+    assert "## Agent Rights" in b
+    assert "Your output and full transcript are auditable" in b
+    # The inert bridge-message wording the worker can never act on is gone.
+    assert "bridge_messages" not in b
+    assert "Every bridge message you send or receive" not in b
+
+
+def test_cli_transport_rule_keeps_loadbearing_clauses_and_drops_restating_prose():
+    """F7 (cycle 2) — the trimmed `_CLI_TRANSPORT_RULE` keeps the transport-
+    correctness clauses VERBATIM (the structured-final-message contract + the
+    UNCHANGED closure-tokens/abandon-grammar/artifacts clause) and drops the
+    restating prose (no-peers / host-reads-it-directly)."""
+    b = _cli_briefing()
+    # KEEP — verbatim load-bearing clauses.
+    assert "# TRANSPORT OVERRIDE — CLI MODE" in b
+    assert "RETURN YOUR RESULT as the structured final message matching the provided" in b
+    assert "that structured output IS your reply to the team-lead" in b
+    assert "The closure tokens, the abandon grammar, and the artifacts contract are UNCHANGED" in b
+    assert "Emit it exactly once" in b
+    # DROP — the restating prose folded out of the trimmed rule.
+    assert "no live peers and no inter-agent wire" not in b
+    assert "you do not send it anywhere" not in b
+
+
 def test_cli_strip_removes_inert_protocol_and_clears_5000ch_floor(monkeypatch):
     """ABSENCE + FLOOR — the cli strip removes the inert TM-001..005 / Heartbeat
     / # CHANNELS / context-budget-duplicate content, and removes >= 5000 chars vs

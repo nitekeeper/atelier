@@ -138,18 +138,12 @@ ROLE_TEMPLATE = "briefings/role.j2"
 # NOT touch the TM-006 reply envelope.
 _CONTEXT_BUDGET_RULE = (
     "\n\n# CONTEXT BUDGET (read last)\n\n"
-    "Your working context is INDEPENDENT and is NOT auto-managed by atelier's "
-    "hooks — the PostToolUse 125k nudge and PreCompact snapshot fire only in the "
-    "orchestrator's interactive session, not inside your spawn. So YOU must act: "
-    "when your context approaches ~125000 tokens, do BOTH, in order. (1) FIRST "
-    "write a durable structured checkpoint of your decisions, blockers, and "
-    "partial-progress — either a short file in your working dir (e.g. "
-    "`.ai/subagent-checkpoints/<role>-checkpoint.md`) or your returned structured "
-    "summary — so nothing is lost. (2) THEN wind down and RETURN your terminal "
-    "`task_result` / structured summary rather than continuing to accumulate past "
-    "~150000 tokens. Claude Code cannot silently auto-compact a one-shot subagent "
-    "at a threshold, so this is your responsibility — checkpoint first, then "
-    "return; do not just keep going."
+    "Your context is NOT auto-managed inside this spawn — atelier's hooks fire "
+    "only in the orchestrator session, so YOU must act. Near ~125000 tokens, do "
+    "BOTH in order: (1) FIRST write a durable checkpoint of your decisions, "
+    "blockers, and partial-progress — a file in your working dir or your returned "
+    "structured summary; (2) THEN wind down and RETURN your terminal `task_result` "
+    "/ structured summary rather than accumulating past ~150000 tokens."
 )
 
 # Output-side "minimal-diff / native-first" implementer lever (M8 rec #3, ponytail
@@ -311,14 +305,10 @@ async def dispatch_host_pipeline(
 # only states the positive contract (return the structured final message).
 _CLI_TRANSPORT_RULE = (
     "\n\n# TRANSPORT OVERRIDE — CLI MODE (read last)\n\n"
-    "You are a one-shot, ephemeral agent — no live peers and no inter-agent wire "
-    "in this run. RETURN YOUR RESULT as the structured final message matching the "
-    "provided json-schema: that structured output IS your reply to the team-lead "
-    "(the deterministic host reads it directly as the return value of your "
-    "invocation; you do not send it anywhere). Emit it exactly once, as your "
-    "terminal message. The closure tokens, the abandon grammar, and the artifacts "
-    "contract are UNCHANGED — only the delivery channel is the structured return "
-    "value, not a peer send."
+    "RETURN YOUR RESULT as the structured final message matching the provided "
+    "json-schema: that structured output IS your reply to the team-lead. Emit it "
+    "exactly once, as your terminal message. The closure tokens, the abandon "
+    "grammar, and the artifacts contract are UNCHANGED."
 )
 
 
@@ -636,13 +626,14 @@ _CLI_HEARTBEAT_RE = re.compile(r"\n## Heartbeat clause\n.*?(?=\n## )", re.DOTALL
 _CLI_AGENT_RIGHTS_RE = re.compile(
     r"\n## Agent Rights & Expectations\n.*?(?=\n## Hard rules)", re.DOTALL
 )
-# A ~1-line auditability note that preserves the substance of Agent-Rights
-# bullet 2 (messages are persisted + auditable) — the only point a one-shot cli
-# worker can still act on. REPLACE (not delete) so the substance survives.
+# A ~1-line CHANNEL-AGNOSTIC auditability note that preserves the substance of
+# Agent-Rights bullet 2 (the worker's work is persisted + auditable) without the
+# inert `bridge_messages` / bridge-message specifics — a one-shot cli worker
+# sends ZERO bridge messages, but its output + transcript ARE auditable. REPLACE
+# (not delete) so the auditability substance survives.
 _CLI_AGENT_RIGHTS_NOTE = (
-    "\n## Agent Rights\n\nEvery bridge message you send or receive is appended to "
-    "`bridge_messages` (append-only) and is auditable — assume reviewers, the "
-    "human, and future runs read it.\n"
+    "\n## Agent Rights\n\nYour output and full transcript are auditable — assume "
+    "reviewers, the human, and future runs read them.\n"
 )
 _CLI_CONTEXT_BUDGET_RE = re.compile(
     r"\n## Context-budget discipline \(reference\)\n.*?(?=\n## )", re.DOTALL
@@ -740,21 +731,48 @@ def _strip_cli_role_inert(rendered: str) -> str:
 #   * the "## Procedure" step "1. Check the phase gate:" block — the soft-wall /
 #     bypass check is a PRE-DISPATCH orchestrator step (the PM clears the gate
 #     before spawning), duplicated verbatim across the worker phase procedures;
-#     a spawned worker never runs check-gate. The actual implementation steps
-#     (2. onward) are untouched.
+#     a spawned worker never runs check-gate, and
+#   * the dev-tdd "Advance phase: `… workflow.py … advance … tdd:<red|green|clean>`"
+#     command lines (the numbered steps + the "- Advance phase back to red:"
+#     sub-bullet) — phase advancement is HOST bookkeeping: `advance_phase` is
+#     invoked ONLY from `scripts/workflow.py`'s own CLI dispatch (the `advance`
+#     subcommand), never by the worker and never by `host_scheduler` /
+#     `cli_dispatch`, so a one-shot worker has no business running it. (The
+#     unfilled `<db_path>` / `<project_id>` placeholders make the command
+#     unrunnable too, but that is SECONDARY and does NOT by itself decide
+#     strip-vs-keep — a RETAINED step, the `documents.py list --project_id
+#     <project_id>` read, carries the same unfilled placeholder yet stays.) SCOPED
+#     to `tdd:` advance targets so non-tdd phase procedures (review / security /
+#     qa / design / plan …) and their advance lines are left byte-identical. The
+#     Iron Law, the `pytest -q --tb=short` full-suite step, and the
+#     `### Red/Green/Clean cycle` headers are NOT touched; the surviving
+#     implementation steps keep their original numbers (renumbering gaps like
+#     3,5,7 are cosmetic — same effect as the gate-step strip above).
 _PHASE_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 _PHASE_PREREQ_RE = re.compile(r"^> - (?:Mode|Required tables): .*\n", re.MULTILINE)
 _PHASE_GATE_STEP_RE = re.compile(r"\n1\. Check the phase gate:.*?(?=\n2\. )", re.DOTALL)
+# Matches a marker-prefixed (numbered step OR "- " sub-bullet) "Advance phase …"
+# line whose command advances to a `tdd:` phase. Single-line by construction
+# (``[^\n]*``), so it can never swallow an adjacent step; degrades to a safe
+# no-op when the phrasing/target changes (a token regression re-caught by the
+# footprint benchmark, never a dropped load-bearing rule).
+_PHASE_ADVANCE_STEP_RE = re.compile(
+    r"^[ \t]*(?:\d+\.|-) Advance phase[^\n]*workflow\.py[^\n]*advance[^\n]*tdd:[^\n]*\n",
+    re.MULTILINE,
+)
 
 
 def _strip_worker_irrelevant_phase(text: str) -> str:
-    """Strip frontmatter, the Prerequisites mode/tables impl lines, and the
-    pre-dispatch gate-check Procedure step from a phase-procedure string before
-    it is injected into a worker briefing. Each strip degrades safely (a no-op
-    leaves the content); the on-disk file is unchanged."""
+    """Strip frontmatter, the Prerequisites mode/tables impl lines, the
+    pre-dispatch gate-check Procedure step, and the dev-tdd ``tdd:`` "Advance
+    phase: … workflow.py … advance …" host-action command lines from a
+    phase-procedure string before it is injected into a worker briefing. Each
+    strip degrades safely (a no-op leaves the content); the on-disk file is
+    unchanged."""
     text = _PHASE_FRONTMATTER_RE.sub("", text, count=1)
     text = _PHASE_PREREQ_RE.sub("", text)
     text = _PHASE_GATE_STEP_RE.sub("", text)
+    text = _PHASE_ADVANCE_STEP_RE.sub("", text)
     return re.sub(r"\n{3,}", "\n\n", text).lstrip("\n")
 
 

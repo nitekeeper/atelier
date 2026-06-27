@@ -81,8 +81,12 @@ def test_ai1_context_budget_rule_is_nonempty_constant():
     """Silent blanking of the constant turns the liveness assertions RED."""
     assert isinstance(_CONTEXT_BUDGET_RULE, str)
     assert _CONTEXT_BUDGET_RULE.strip()
-    # Load-bearing tokens the action item names.
-    assert "125" in _CONTEXT_BUDGET_RULE
+    # Load-bearing tokens the action item names: BOTH thresholds (the ~125000
+    # trigger and the ~150000 ceiling) survive the cycle-2 compression, as does
+    # the terminal `task_result` the wind-down step returns.
+    assert "125000" in _CONTEXT_BUDGET_RULE
+    assert "150000" in _CONTEXT_BUDGET_RULE
+    assert "task_result" in _CONTEXT_BUDGET_RULE
     low = _CONTEXT_BUDGET_RULE.lower()
     assert "checkpoint" in low
     # A wind-down / return phrase (the worker must terminate, not keep going).
@@ -92,6 +96,21 @@ def test_ai1_context_budget_rule_is_nonempty_constant():
     assert "silent" not in low or "cannot silently" in low
     # It must explicitly state the agent acts ("you must" / "your responsibility").
     assert "you must act" in low or "your responsibility" in low
+
+
+def test_ai1_context_budget_rule_pins_checkpoint_then_return_order():
+    """Corrigibility-critical ORDER: the durable-checkpoint step (FIRST) MUST
+    precede the wind-down / RETURN step (THEN). The rule already reads
+    checkpoint→return, but no test pinned it — a future reword to
+    return-then-checkpoint would lose the durability guarantee (work returned
+    before it is persisted) yet still pass the presence assertions. Pin it."""
+    rule = _CONTEXT_BUDGET_RULE
+    # The ordered-step markers themselves.
+    assert rule.index("FIRST") < rule.index("THEN")
+    # And the load-bearing actions they introduce: checkpoint BEFORE wind-down /
+    # return (lower index = earlier in the text the worker reads top-to-bottom).
+    assert rule.index("checkpoint") < rule.index("wind down")
+    assert rule.index("checkpoint") < rule.index("RETURN")
 
 
 def test_ai1_context_budget_rule_does_not_claim_silent_automation():

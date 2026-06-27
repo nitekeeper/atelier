@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## v1.14.0 — 2026-06-27
+
+A kaizen-driven token-reduction run (#27). Three behaviour-preserving cycles cut the
+per-spawn worker-briefing footprint a further **−2,073 chars / −518 tokens** (−12.0% loom-off;
+≈ **−59% cumulative** since the run-5 baseline of 36,724 chars), plus a measure-first probe
+that proved two previously-flagged runtime sinks are inert on the host path. Verified by
+deterministic before/after `compose_briefing` benchmarks, three independent reviews (a
+different reviewer persona each cycle), and green CI (2068 tests).
+
+### Changed
+- **role.j2 CLI-inert briefing strips (#27, cycle 1).** Guard the empty
+  Peers/Forbidden/Acceptance-criteria subsections with `{% if %}` (a one-shot CLI worker
+  receives none of those lists) and post-render-strip the TM-005 shutdown-handshake duplicate
+  + the IDENTITY bridge-handle line for CLI transport — all inert for a worker with no bridge
+  wire. Mirrors the existing `_strip_cli_channels` pattern; gated on EXACT `TRANSPORT_CLI`.
+  **−193 tokens/spawn.**
+- **dispatch.py rule-tail compression (#27, cycle 2).** `_CONTEXT_BUDGET_RULE` 875→473 ch
+  (kept the 125k/150k thresholds + the ordered checkpoint-then-return discipline),
+  `_CLI_TRANSPORT_RULE` 594→318 ch (kept the json-schema return contract + the
+  closure-tokens/abandon-grammar UNCHANGED clause), a channel-agnostic Agent-Rights note, and
+  a `tdd:`-scoped strip of the dev-tdd "Advance phase" host-bookkeeping command lines (non-tdd
+  phase procedures left byte-identical). `_MINIMAL_DIFF_RULE` deliberately left intact (a prior
+  "caveman compression" was a net token *loss*). **−296 tokens/spawn.**
+- **PRAGMA-sentence strip (#27, cycle 3).** Strip the inert bridge-DB `PRAGMA user_version`
+  assertion sentence from the IDENTITY block for CLI workers (a sessionless one-shot worker
+  never opens the bridge DB); the `schema_version` sentence is kept (the `stale_rules` abandon
+  hook) and the canonical TM-007 rule survives via the always-prepended rules block.
+  **−29 tokens/spawn.**
+
+### Notes
+- **Measure-first finding:** a read-only probe confirmed run-6's flagged "next-tier" runtime
+  sinks are INERT on the kaizen→atelier host path and offer no lever — the plan-phase synthesis
+  meeting (`team_meeting.py` has zero production callers; the synthesis is a host-consumed prose
+  DAG that runs once) and the "~4× redundant pytest re-runs" (CLI workers have Bash deny-listed;
+  the single host CI-mirror gate runs once per cycle). The only real, multiplied token mass on
+  the host path is the per-spawn briefing — which all three cycles targeted.
+
 ## v1.13.0 — 2026-06-27
 
 A kaizen-driven token-reduction run (#25). Two behaviour-preserving changes that cut

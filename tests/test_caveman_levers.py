@@ -90,18 +90,25 @@ def test_include_context_budget_false_omits_budget_tail_only():
     assert _CLI_TRANSPORT_RULE in off
 
 
-def test_include_context_budget_byte_parity_and_exact_delta():
-    """explicit include_context_budget=True == implicit default; and
-    include_context_budget=False == that default with exactly the budget tail
-    excised (anti-recoupling delta guard)."""
+def test_include_context_budget_byte_parity_and_single_sourcing():
+    """explicit include_context_budget=True == implicit default. The flag now
+    SINGLE-SOURCES the context-budget guidance (no duplication, never wholly
+    dropped): True appends the _CONTEXT_BUDGET_RULE tail AND strips the duplicate
+    rules-block "## Context-budget discipline" subsection; False keeps the
+    rules-block subsection and omits the tail. Toggling moves the guidance between
+    the two sites — it appears EXACTLY ONCE either way (anti-recoupling guard)."""
     explicit = compose_briefing(**_compose_kwargs(include_context_budget=True))
     on = compose_briefing(**_compose_kwargs())
     assert explicit == on
+    # True: appended tail present (exactly once), rules-block duplicate stripped.
     assert _CONTEXT_BUDGET_RULE in on
-    off = compose_briefing(**_compose_kwargs(include_context_budget=False))
     assert on.count(_CONTEXT_BUDGET_RULE) == 1
-    cut = on.find(_CONTEXT_BUDGET_RULE)
-    assert off == on[:cut] + on[cut + len(_CONTEXT_BUDGET_RULE) :]
+    assert "## Context-budget discipline (reference)" not in on
+    # False: no appended tail, but the rules-block subsection is retained — so the
+    # guidance is never lost, only relocated. Each path single-sources it.
+    off = compose_briefing(**_compose_kwargs(include_context_budget=False))
+    assert _CONTEXT_BUDGET_RULE not in off
+    assert "## Context-budget discipline (reference)" in off
 
 
 def test_include_context_budget_threads_through_host_briefing_for():

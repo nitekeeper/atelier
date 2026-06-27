@@ -9,14 +9,52 @@ is GONE — selecting it (or any other value) now fails loud via
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import pytest
 
+import scripts.dispatch as dispatch
 from scripts.dispatch import (
+    ROLE_TEMPLATE,
+    RULES_SKILL,
+    TEMPLATE_DIR,
     TRANSPORT_CLI,
     UnknownTransportError,
     compose_briefing,
     resolve_transport,
 )
+from scripts.loom_comms import LoomStatus, build_team_chat_context
+
+_ROLE_J2 = TEMPLATE_DIR / ROLE_TEMPLATE
+
+
+def _cli_briefing(*, team_chat=None):
+    """A cli compose with the same placeholder context as ``_briefing`` but an
+    optional loom ``team_chat`` (for the loom-on carveout assertions)."""
+    return compose_briefing(
+        role_id="be-1",
+        task_id="t-1",
+        persona_profile_text="PERSONA",
+        phase_procedure_text="PHASE",
+        task_brief="do the thing",
+        team_id="team-x",
+        team_lead_name="lead",
+        wave_id="wave-0",
+        wave_phase="tdd:green",
+        deadline_iso="2026-06-13T00:00:00Z",
+        transport=TRANSPORT_CLI,
+        team_chat=team_chat,
+    )
+
+
+def _loom_ctx():
+    return build_team_chat_context(
+        LoomStatus(available=True, client=Path("/fake/loom_chat.py")),
+        role_id="be-1",
+        channel="cycle-x",
+        team_lead_name="lead",
+    )
 
 
 def test_resolve_transport_defaults_to_cli():
@@ -76,9 +114,11 @@ def test_cli_briefing_appends_repoint_addendum():
     b = _briefing(TRANSPORT_CLI)
     assert "TRANSPORT OVERRIDE — CLI MODE" in b
     assert "structured final message matching the provided json-schema" in b
-    # It explicitly re-points away from the bridge commands.
-    assert "bridge_send.py" in b  # named so the worker knows to IGNORE it
-    assert "IGNORE every" in b
+    # The cli inert-protocol strip means the shrunk addendum no longer names the
+    # bridge commands (the whole CHANNELS bridge wire is stripped, so there is
+    # nothing to tell the worker to IGNORE).
+    assert "bridge_send.py" not in b
+    assert "IGNORE every" not in b
 
 
 def test_cli_is_the_default_when_transport_unset(monkeypatch):
@@ -138,3 +178,79 @@ def test_cli_transport_via_env(monkeypatch):
         deadline_iso="2026-06-13T00:00:00Z",
     )
     assert "TRANSPORT OVERRIDE — CLI MODE" in b
+
+
+# ---------------------------------------------------------------------------
+# CLI-mode inert-protocol strip (the briefing-diet lever).
+#
+# In cli transport the one-shot worker has no bridge wire, no live peers, and
+# no heartbeat — so the inert TM-001..005 / Heartbeat / Agent-Rights /
+# # CHANNELS / context-budget-duplicate content is stripped from the in-memory
+# briefing (the on-disk SKILL.md + role.j2 stay byte-identical). The carveouts
+# (TM-006/007/008, the REPLY CONTRACT, the abandon grammar, the loom-on
+# subsection) MUST survive.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_strip_keeps_carveout_anchors():
+    """PRESENCE — the cli strip must NOT touch the load-bearing carveouts: the
+    surviving hard rules, the REPLY CONTRACT block, and the abandon grammar."""
+    b = _cli_briefing()
+    for kept in ("TM-006", "TM-007", "TM-008", "# REPLY CONTRACT"):
+        assert kept in b, f"carveout anchor dropped by the cli strip: {kept!r}"
+    assert "^ABANDON: (?P<category>" in b  # role.j2 abandon grammar survives
+
+
+def test_cli_strip_removes_inert_protocol_and_clears_5000ch_floor(monkeypatch):
+    """ABSENCE + FLOOR — the cli strip removes the inert TM-001..005 / Heartbeat
+    / # CHANNELS / context-budget-duplicate content, and removes >= 5000 chars vs
+    the unstripped compose (deterministic; fails if any strip gross-regresses)."""
+    b = _cli_briefing()
+    # Per-strip absence guards — each fails if its individual strip no-ops. The
+    # `## Hard rules (TM-001 through TM-008)` heading survives (it frames the
+    # kept TM-006..008), so we assert on the bold RULE markers, not bare ids.
+    assert "**TM-001 —" not in b
+    assert "**TM-005 —" not in b
+    assert "## Heartbeat clause" not in b
+    assert "30 seconds" not in b  # heartbeat cadence line
+    assert "# CHANNELS" not in b
+    assert "## Context-budget discipline" not in b
+    # Aggregate floor: disable the cli strips → the unstripped "full" briefing,
+    # and assert the strip removed >= 5000 chars. Deterministic; ~6.2k headroom.
+    monkeypatch.setattr(dispatch, "_strip_cli_inert_rules", lambda t: t)
+    monkeypatch.setattr(dispatch, "_strip_context_budget_subsection", lambda t: t)
+    monkeypatch.setattr(dispatch, "_strip_cli_channels", lambda r: r)
+    full = _cli_briefing()
+    assert len(full) - len(b) >= 5000, (
+        f"cli strip removed only {len(full) - len(b)} chars (< 5000 floor)"
+    )
+
+
+def test_compose_does_not_mutate_on_disk_rules_or_template():
+    """BYTE-PARITY — composing a cli briefing leaves the on-disk SKILL.md and
+    role.j2 byte-identical (the strip is in-memory only). pm_dispatch_envelope's
+    ABANDON_RE is derived from the on-disk SKILL.md, so any mutation is a bug."""
+    before_rules = hashlib.sha256(RULES_SKILL.read_bytes()).hexdigest()
+    before_tmpl = hashlib.sha256(_ROLE_J2.read_bytes()).hexdigest()
+    _cli_briefing()
+    _cli_briefing(team_chat=_loom_ctx())
+    assert hashlib.sha256(RULES_SKILL.read_bytes()).hexdigest() == before_rules
+    assert hashlib.sha256(_ROLE_J2.read_bytes()).hexdigest() == before_tmpl
+
+
+def test_cli_strip_keeps_loom_subsection_when_loom_active():
+    """LOOM-ON CARVEOUT — a loom-active cli compose still renders the template's
+    `## Loom team-chat` subsection (register/deregister/channel) AND keeps the
+    rules-block `## Loom chat transport` section, while the # CHANNELS bridge
+    table is stripped and the now-dangling `above` back-reference is cleaned up."""
+    b = _cli_briefing(team_chat=_loom_ctx())
+    # Template loom subsection survives.
+    assert "## Loom team-chat" in b
+    assert "register" in b
+    assert "deregister" in b
+    assert "cycle-x" in b  # the loom channel
+    # Rules-block loom section survives (footprint loom_section_present_on).
+    assert "## Loom chat transport" in b
+    # ...but the bridge CHANNELS table is stripped, and the dangling ref is gone.
+    assert "# CHANNELS" not in b
+    assert "bridge commands above" not in b
